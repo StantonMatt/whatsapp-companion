@@ -1,0 +1,71 @@
+{
+  "name": "whatsapp-companion",
+  "version": "0.1.0",
+  "description": "A private desktop companion for WhatsApp Web",
+  "author": "WhatsApp Companion contributors",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.cjs",
+  "desktopName": "whatsapp-companion.desktop",
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "start": "electron .",
+    "dev": "npm run build && electron .",
+    "demo": "npm run build && electron . --fixture",
+    "test": "vitest run",
+    "test:desktop": "npm run build && node scripts/desktop-test.mjs && node scripts/sticker-drag-test.mjs",
+    "icons:export": "node scripts/export-icons.mjs",
+    "package:linux": "npm run build && electron-builder --linux AppImage",
+    "package:dir": "npm run build && electron-builder --dir",
+    "package:win": "npm run build && electron-builder --win nsis",
+    "package:mac": "npm run build && electron-builder --mac dmg"
+  },
+  "build": {
+    "appId": "io.whatsappcompanion.desktop",
+    "productName": "WhatsApp Companion",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "linux": {
+      "icon": "assets/icons",
+      "executableArgs": [],
+      "syncDesktopName": true,
+      "maintainer": "WhatsApp Companion contributors",
+      "category": "Network",
+      "target": [
+        "AppImage"
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": "nsis"
+    },
+    "mac": {
+      "icon": "assets/icon.icns",
+      "target": "dmg",
+      "category": "public.app-category.social-networking"
+    }
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

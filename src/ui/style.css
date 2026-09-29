@@ -1,0 +1,113 @@
+:root {
+  font-family: "Segoe UI", "Noto Sans", system-ui, sans-serif;
+  color: var(--text); background: var(--bg); font-synthesis: none; font-size: 14px; line-height: 1.45; color-scheme: dark;
+  --bg: #161717; --surface: #242626; --hover: #ffffff09; --menu: #242626; --menu-hover: #343737;
+  --text: #fafafa; --muted: #999e9e; --line: #303333; --green: #21c063; --selected: #103b2b;
+}
+:root[data-theme=light] {
+  color-scheme: light; --bg: #fff; --surface: #f0f2f5; --hover: #00000006; --menu: #fff; --menu-hover: #f0f2f5;
+  --text: #111b21; --muted: #667781; --line: #e9edef; --green: #008069; --selected: #d9fdd3;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select, textarea { font: inherit; }
+button { border: 0; background: var(--surface); color: var(--text); border-radius: 22px; padding: 10px 18px; min-height: 40px; line-height: 20px; cursor: pointer; }
+button:hover { filter: brightness(1.1); }
+button:disabled, select:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+button[aria-pressed=true] { background: var(--selected); color: var(--green); }
+.panel { position: absolute; inset: 0; overflow: auto; background: var(--bg); border-inline: 1px solid var(--line); padding-bottom: 48px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.panel-title { height: 72px; display: flex; align-items: center; gap: 16px; padding: 12px 20px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.panel-title button { width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; }
+.panel-title button:hover { background: var(--hover); }
+.panel-title .close { margin-left: auto; }
+.panel-body { padding: 4px 24px 24px; }
+h1 { font-size: 17px; font-weight: 500; margin: 0; }
+.scope-summary { display: flex; align-items: center; gap: 16px; margin: 8px 0 24px; }
+.scope-summary > div { min-width: 0; overflow-wrap: anywhere; }
+.scope-summary strong { font-size: 19px; font-weight: 500; }
+.scope-summary small { display: block; color: var(--muted); margin-top: 4px; }
+.scope-icon { display: grid; place-items: center; width: 56px; height: 56px; flex-shrink: 0; border-radius: 50%; font-size: 28px; background: var(--surface); color: var(--green); }
+.settings-list { display: flex; flex-direction: column; }
+.settings-list button { display: flex; align-items: center; justify-content: space-between; gap: 16px; text-align: left; border-radius: 0; padding: 20px 0; background: none; border-bottom: 1px solid var(--line); font-size: 16px; }
+.settings-list button:hover { background: var(--hover); }
+.settings-list small { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+.settings-list button > span:last-child { color: var(--muted); font-size: 22px; }
+.reset-link { background: none; color: var(--green); padding: 20px 0; text-align: left; }
+label { display: block; margin-bottom: 20px; font-weight: 400; font-size: 14px; }
+label small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+input:not([type=checkbox]), select, textarea { display: block; width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; color: var(--text); padding: 10px 12px; margin-top: 8px; font-weight: 400; }
+textarea { resize: vertical; min-height: 88px; line-height: 1.55; }
+
+/* Keep native selection, type-ahead, focus and popup placement in Electron,
+   while styling the picker in the same theme as the settings panel. */
+select, select::picker(select) { appearance: base-select; }
+select { display: flex; align-items: center; gap: 12px; min-height: 40px; line-height: 20px; cursor: pointer; text-align: start; overflow-wrap: anywhere; }
+select:not(:disabled):hover { border-color: var(--muted); }
+select::picker-icon { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; rotate: 45deg; translate: 0 -2px; margin-inline-start: auto; flex-shrink: 0; color: var(--muted); }
+select:open::picker-icon { rotate: 225deg; translate: 0 2px; }
+select::picker(select) { background: var(--menu); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 6px; margin-block: 4px; min-inline-size: max(176px, anchor-size(self-inline)); max-inline-size: calc(100vw - 24px); max-block-size: min(320px, calc(100% - 8px)); position-try-order: normal; overflow: auto; box-shadow: 0 8px 24px #0003; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+select option { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 10px 12px; border-radius: 6px; background: transparent; color: var(--text); font: inherit; line-height: 20px; text-align: start; overflow-wrap: anywhere; cursor: pointer; }
+select option:checked { background: var(--selected); }
+select option:hover, select option:focus { background: var(--menu-hover); outline: none; }
+select option:checked:focus { background: var(--selected); outline: 1px solid var(--green); outline-offset: -1px; }
+select option::checkmark { order: 1; margin-inline-start: auto; color: var(--green); }
+select option:disabled { color: var(--muted); cursor: default; }
+.choice-setting, .toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 14px 0; border-bottom: 1px solid var(--line); margin: 0; }
+.choice-setting > span, .toggle > span { min-width: 0; }
+.choice-setting select { width: auto; min-width: 104px; max-width: 56%; flex-shrink: 0; margin: 0; border-color: transparent; background: transparent; color: var(--muted); }
+.choice-setting select:not(:disabled):hover, .choice-setting select:open { background: var(--surface); border-color: transparent; color: var(--text); }
+input[type=checkbox] { appearance: none; position: relative; flex-shrink: 0; width: 40px; height: 24px; margin: 0; border-radius: 15px; background: #686c6d; cursor: pointer; transition: background .15s; }
+input[type=checkbox]::after { content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: var(--bg); top: 3px; left: 3px; transition: transform .15s; }
+input[type=checkbox]:checked { background: var(--green); }
+input[type=checkbox]:checked::after { transform: translateX(16px); }
+.hint { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 8px 0 20px; }
+.text-setting { margin: 20px 0; }
+.text-setting label { margin-bottom: 12px; }
+.text-setting button { font-size: 12px; color: var(--green); min-height: 36px; padding: 8px 16px; }
+.model-setting { margin-top: 20px; }
+.model-setting label { margin-bottom: 12px; }
+.card, .pending { border-block: 1px solid var(--line); padding: 20px 0; margin: 24px 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.actions + .actions { margin-top: 12px; }
+.actions button { font-size: 12px; }
+.quiet { background: transparent; color: var(--muted); padding-inline: 0; }
+.notice { padding: 16px; background: var(--surface); font-size: 12px; line-height: 1.6; border-radius: 8px; margin: 20px 0; overflow-wrap: anywhere; }
+.notice button { display: block; margin-top: 12px; background: var(--selected); color: var(--green); }
+.two-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; margin-top: 20px; }
+.two-columns label { margin-bottom: 0; }
+.footer-actions { margin-top: 24px; }
+.empty { text-align: center; padding: 48px 16px; color: var(--muted); }
+.empty > span { font-size: 48px; color: var(--green); }
+.empty p { font-size: 16px; color: var(--text); }
+.empty small, .empty-small { font-size: 12px; line-height: 1.7; color: var(--muted); }
+.sticker-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.sticker { padding: 8px; min-width: 0; border-radius: 12px; background: var(--surface); }
+.sticker img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; }
+.sticker span { font-size: 10px; display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 4px; color: var(--muted); }
+.sticker-location { margin: 16px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sticker-editor .panel-title { padding-inline: 0; position: static; }
+.sticker-editor .panel-title img { width: 70px; height: 70px; object-fit: contain; }
+.error-banner { position: fixed; right: 12px; top: 76px; left: 12px; z-index: 3; border: 1px solid #995344; background: #492d28; padding: 14px; color: #ffddcf; font-size: 13px; line-height: 1.5; border-radius: 9px; box-shadow: 0 3px 14px #0002; }
+.error-banner button { border: 0; background: transparent; padding: 0 5px; min-height: 24px; float: right; }
+.danger { color: #f4a897; }
+.pending { padding: 16px; background: var(--surface); }
+.pending p { white-space: pre-wrap; }
+.connection-status { position: fixed; bottom: 0; left: 0; right: 0; padding: 10px 24px; background: var(--bg); border-top: 1px solid var(--line); z-index: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.reasoning-setting { margin-top: 24px; }
+.range-label, .range-scale { display: flex; justify-content: space-between; gap: 12px; }
+.range-label output { color: var(--muted); }
+.range-scale { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.reasoning-setting input[type=range] { accent-color: var(--green); padding: 0; border: 0; background: transparent; cursor: pointer; height: 24px; }
+.reasoning-setting label { margin-bottom: 0; }
+
+.sticker[draggable=true] { cursor: grab; }
+.sticker[draggable=true]:active { cursor: grabbing; }
+.sticker-preview { width: calc(100% - 40px); max-width: 420px; max-height: calc(100% - 40px); padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--text); overflow: auto; }
+.sticker-preview::backdrop { background: #0009; }
+.sticker-preview h2 { font-size: 17px; font-weight: 500; margin: 0; overflow-wrap: anywhere; }
+.sticker-preview > img { display: block; width: 100%; height: min(240px, 32vh); object-fit: contain; margin: 24px auto; }
+.sticker-preview p { font-size: 13px; line-height: 1.6; color: var(--muted); }
+.sticker-preview .actions { justify-content: flex-end; }
+button.primary { background: var(--green); color: var(--bg); }

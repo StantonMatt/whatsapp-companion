@@ -1,0 +1,13 @@
+node_modules/
+dist/
+out/
+release/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+.local/
+.wwebjs_auth/
+.wwebjs_cache/

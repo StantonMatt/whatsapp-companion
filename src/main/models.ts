@@ -1,0 +1,68 @@
+import { z } from 'zod';
+import { modelIdSchema, type ModelOption, type ModelsResult, type Provider } from '../shared/model';
+import { currentTextModels } from '../core/model-policy';
+
+const pageSchema = z.object({
+  data: z.array(z.object({ id: modelIdSchema, display_name: z.string().min(1).max(250).optional(), shutdown_date: z.string().nullable().optional() })).max(10000),
+  has_more: z.boolean().optional(), last_id: modelIdSchema.nullable().optional()
+});
+class ModelsError extends Error {}
+
+export async function listModels(provider: Provider, key: string, signal?: AbortSignal, fetcher: typeof fetch = fetch): Promise<ModelOption[]> {
+  const openai = provider === 'openai';
+  const requestSignal = AbortSignal.any([AbortSignal.timeout(15000), ...(signal ? [signal] : [])]);
+  const models = new Map<string, ModelOption & { shutdown_date?: string | null }>();
+  const cursors = new Set<string>();
+  let after: string | undefined;
+  try {
+    do {
+      const url = new URL(openai ? 'https://api.openai.com/v1/models' : 'https://api.anthropic.com/v1/models');
+      if (!openai) { url.searchParams.set('limit', '1000'); if (after) url.searchParams.set('after_id', after); }
+      const response = await fetcher(url.toString(), {
+        method: 'GET', redirect: 'error', signal: requestSignal,
+        headers: openai ? { Authorization: `Bearer ${key}` } : { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+      });
+      if (!response.ok) {
+        // Error bodies can contain secrets. Only report our own status-specific messages.
+        const reason = response.status === 401 ? 'Key rejected or missing model-list access. Check the key and allow read access to Models, then refresh.'
+          : response.status === 403 ? 'This key cannot list models. Allow read access to Models in your provider’s key permissions, then refresh.'
+          : response.status === 429 ? 'Rate limit reached. Try refreshing later.'
+          : 'Unable to load models. Try refreshing later.';
+        throw new ModelsError(`Models (${response.status}): ${reason}`);
+      }
+      const parsed = pageSchema.safeParse(await response.json());
+      if (!parsed.success) throw new ModelsError('Models: The provider returned an invalid model list. Try refreshing later.');
+      for (const model of parsed.data.data) models.set(model.id, { id: model.id, name: model.display_name ?? model.id, shutdown_date: model.shutdown_date });
+      if (models.size > 10000) throw new ModelsError('Models: The provider model list is too large.');
+      if (openai || !parsed.data.has_more) break;
+      after = parsed.data.last_id ?? undefined;
+      if (!after || cursors.has(after) || cursors.size >= 100) throw new ModelsError('Models: The provider returned incomplete pagination. Try refreshing later.');
+      cursors.add(after);
+    } while (true);
+    return currentTextModels(provider, [...models.values()]);
+  } catch (error) {
+    if (signal?.aborted) throw new ModelsError('Models: Request cancelled.');
+    if (requestSignal.aborted) throw new ModelsError('Models: Loading timed out. Check your connection and refresh.');
+    if (error instanceof ModelsError) throw error;
+    throw new ModelsError('Models: Unable to connect to the provider. Check your network and refresh.');
+  }
+}
+
+/** Model lists belong to the exact key/request that loaded them, never a newer key. */
+export class ModelCatalog {
+  private active = new Map<Provider, AbortController>();
+  constructor(private loader = listModels) {}
+  invalidate(provider: Provider) { this.active.get(provider)?.abort(); this.active.delete(provider); }
+  async load(provider: Provider, key: string): Promise<ModelsResult> {
+    this.invalidate(provider);
+    const ticket = new AbortController(); this.active.set(provider, ticket);
+    try {
+      const models = await this.loader(provider, key, ticket.signal);
+      return this.active.get(provider) === ticket ? { models } : { models: [], cancelled: true };
+    } catch (error) {
+      return this.active.get(provider) === ticket
+        ? { models: [], error: error instanceof ModelsError ? error.message : 'Unable to load models. Try refreshing.' }
+        : { models: [], cancelled: true };
+    } finally { if (this.active.get(provider) === ticket) this.active.delete(provider); }
+  }
+}

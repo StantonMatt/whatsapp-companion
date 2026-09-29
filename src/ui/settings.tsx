@@ -1,0 +1,158 @@
+import React, { useEffect, useState } from 'react';
+import { defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission } from '../shared/model';
+import { resolveSettings } from '../core/settings';
+import { styleFor } from '../core/style';
+import { reasoningLevels, savedEffort } from '../core/model-policy';
+import type { Act } from './index';
+
+export function Settings({ status, act, close }: { status: Status; act: Act; close: () => void }) {
+  const [tab, setTab] = useState<string | null>(null);
+  const scope: Scope = status.panel === 'chat' && status.chat.settingsId ? status.chat.settingsId : 'global';
+  const chat = scope !== 'global';
+  const sections = chat ? ['Replies', 'Style', 'Auto replies'] : ['Replies', 'Providers', 'Style'];
+  const descriptions: Record<string, string> = { Replies: 'Suggestions, tone and language', Providers: 'Model, reasoning and API key', Style: 'Your writing style', 'Auto replies': 'Permission and sending limits' };
+  return <>
+    <div className="panel-title"><button data-preserve-auto="" aria-label={tab ? 'Back to settings' : 'Close panel'} onClick={() => tab ? setTab(null) : close()}>←</button><h1>{tab ?? (chat ? 'Chat AI settings' : 'AI settings')}</h1>{tab && <button className="close" data-preserve-auto="" aria-label="Close panel" onClick={close}>×</button>}</div>
+    <div className="panel-body">
+      {!tab ? <>
+        <div className="scope-summary"><span className="scope-icon" aria-hidden="true">✦</span><div><strong>{chat ? status.chat.name : 'All conversations'}</strong><small>{chat ? (Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings for this chat' : 'Uses global settings') : 'Default AI settings'}</small></div></div>
+        <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><span aria-hidden="true">›</span></button>)}</nav>
+        {chat && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
+      </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}
+      {!tab && !chat && <div className="footer-actions"><button className="quiet" onClick={() => void act({ type: 'reload' })}>Reload WhatsApp</button></div>}
+    </div>
+  </>;
+}
+function ReplySettings({ status, act, scope }: { status: Status; act: Act; scope: Scope }) {
+  const state = status.state;
+  const result = resolveSettings(state, status.chat.kind, scope === 'global' ? null : scope);
+  const values = result.values;
+  const inherited = (key: keyof Preferences) => scope === 'global' ? undefined : result.sources[key] === 'conversation' ? 'Custom for this chat' : 'Use global setting';
+  const patch = (value: Partial<Preferences>) => { void act({ type: 'preferences', scope, patch: value }); };
+  return <>
+    <Toggle label="Share recent conversation context" checked={values.shareContext} onChange={v => patch({ shareContext: v })} note={inherited('shareContext')}/>
+    <p className="hint">When enabled, up to 30 loaded text messages from the current chat go to your chosen provider for assistance. Attachments are excluded.</p>
+    <Toggle label="Inline suggestions" checked={values.suggestions} onChange={v => patch({ suggestions: v })} note={inherited('suggestions')}/>
+    
+    <Choice label="Tone" value={values.tone} options={['natural', 'friendly', 'professional', 'direct']} note={inherited('tone')} onChange={v => patch({ tone: v as Preferences['tone'] })}/>
+    <Choice label="Reply length" value={values.length} options={['brief', 'balanced', 'detailed']} note={inherited('length')} onChange={v => patch({ length: v as Preferences['length'] })}/>
+    <Choice label="Emoji" value={values.emoji} options={['match', 'none', 'light']} note={inherited('emoji')} onChange={v => patch({ emoji: v as Preferences['emoji'] })}/>
+    <TextSetting key={`${scope}-language-${values.language}`} label="Language" value={values.language} note={inherited('language')} save={value => act({ type: 'preferences', scope, patch: { language: value } })}/>
+    <TextSetting key={`${scope}-instructions-${values.instructions}`} label="Custom instructions" value={values.instructions} multiline note={inherited('instructions')} save={value => act({ type: 'preferences', scope, patch: { instructions: value } })}/>
+    <Choice label="Match my writing style" value={values.style} options={['off', 'general', 'conversation']} note={inherited('style')} onChange={v => patch({ style: v as Preferences['style'] })}/>
+    <Toggle label="Learn style from my loaded sent messages" checked={values.learnFromSent} onChange={v => patch({ learnFromSent: v })} note={inherited('learnFromSent')}/>
+    <p className="hint">Observation applies only in conversation style mode. Only aggregate writing traits are saved. General style is created from examples you explicitly select.</p>
+    <button onClick={() => void act({ type: 'resetPreferences', scope })}>{scope === 'global' ? 'Restore initial defaults' : 'Reset all to global settings'}</button>
+  </>;
+}
+function Providers({ status, act }: { status: Status; act: Act }) {
+  const [busy, setBusy] = useState(false);
+  const [keyRevision, setKeyRevision] = useState(0);
+  const provider = status.state.provider;
+  const run = async (action: Parameters<Act>[0]) => {
+    setBusy(true);
+    try { if (await act(action) && (action.type === 'key' || action.type === 'deleteKey')) setKeyRevision(value => value + 1); }
+    finally { setBusy(false); }
+  };
+  return <>
+    <Choice label="Provider" value={provider} options={['openai', 'anthropic']} onChange={v => void act({ type: 'provider', provider: v as Provider, model: status.state.models[v as Provider] })}/>
+    <ModelPicker key={`${provider}-${keyRevision}`} provider={provider} value={status.state.models[provider]} available={status.keys[provider] || status.fixture} act={act}/>
+    <ReasoningSlider key={`${provider}-${status.state.models[provider]}`} status={status} act={act}/>
+    <div className="card"><strong>{status.keys[provider] ? 'API key configured' : 'Add your API key'}</strong><p className="hint">Keys are entered in an OS password dialog and never exposed to the app renderer or WhatsApp.</p>
+      <div className="actions"><button disabled={busy || !status.secureStorage} onClick={() => void run({ type: 'key', provider, persist: true })}>{status.keys[provider] ? 'Replace stored key' : 'Store key securely'}</button><button disabled={busy} onClick={() => void run({ type: 'key', provider, persist: false })}>Session-only key</button></div>
+      {!status.secureStorage && <p className="hint">OS encryption unavailable. Unlock KWallet or Secret Service to save a key. A session-only key is kept in memory until exit.</p>}
+      {status.keys[provider] && <div className="actions"><button disabled={busy} onClick={() => void run({ type: 'testProvider' })}>{busy ? 'Working…' : 'Test connection'}</button><button disabled={busy} className="quiet" onClick={() => void run({ type: 'deleteKey', provider })}>Remove key</button></div>}
+    </div>
+    <p className="hint">API usage is billed by your provider. Test connection checks the selected model using synthetic text.</p>
+  </>;
+}
+function ModelPicker({ provider, value, available, act }: { provider: Provider; value: string; available: boolean; act: Act }) {
+  const [result, setResult] = useState<ModelsResult>({ models: [] });
+  const [loading, setLoading] = useState(available);
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    let current = true;
+    setResult({ models: [] }); setLoading(available);
+    if (available) void window.companion.models(provider).then(next => {
+      if (current) setResult(next.cancelled ? { models: [], error: 'Model list changed. Refresh to load it again.' } : next);
+    }).catch(() => { if (current) setResult({ models: [], error: 'Unable to load models. Try refreshing.' }); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [provider, available, refresh]);
+  const listed = result.models.some(model => model.id === value);
+  const unlisted = available && !loading && !result.error && !listed;
+  return <div className="model-setting">
+    <label>Model ID<select value={unlisted ? '' : value} disabled={loading || !available || !result.models.length} aria-busy={loading} onChange={e => void act({ type: 'provider', provider, model: e.target.value })}>
+      {!listed && <option disabled value={unlisted ? '' : value}>{unlisted ? 'Choose a current text model' : `${value} (saved)`}</option>}
+      {result.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+    </select></label>
+    <button disabled={loading || !available} onClick={() => setRefresh(value => value + 1)}>{loading ? 'Loading models…' : 'Refresh models'}</button>
+    {result.error ? <p className="notice" role="alert">{result.error}</p>
+      : !available ? <p className="hint">Add an API key to load available models.</p>
+      : !loading && !result.models.length ? <p className="notice">No current text models available for this key.</p>
+      : unlisted ? <p className="notice">Saved model: {value}. Choose a listed model to update it.</p> : null}
+  </div>;
+}
+function ReasoningSlider({ status, act }: { status: Status; act: Act }) {
+  const provider = status.state.provider, model = status.state.models[provider];
+  const levels = reasoningLevels(provider, model), saved = savedEffort(status.state);
+  const [value, setValue] = useState(saved);
+  useEffect(() => setValue(saved), [saved]);
+  if (!levels.length || !value) return <p className="hint">Reasoning effort is not adjustable for this model.</p>;
+  const label = (effort: string) => effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1);
+  const commit = async (index: string) => {
+    const next = levels[Number(index)];
+    if (next && next !== saved && !await act({ type: 'reasoning', provider, model, effort: next })) setValue(saved);
+  };
+  return <div className="reasoning-setting">
+    <label><span className="range-label">Reasoning effort<output>{label(value)}</output></span>
+      <input aria-label="Reasoning effort" type="range" min="0" max={levels.length - 1} step="1" value={levels.indexOf(value)} aria-valuetext={label(value)}
+        onChange={e => setValue(levels[Number(e.target.value)])} onPointerUp={e => void commit(e.currentTarget.value)} onKeyUp={e => void commit(e.currentTarget.value)} onBlur={e => void commit(e.currentTarget.value)}/>
+      <span className="range-scale" aria-hidden="true"><span>{label(levels[0])}</span><span>{label(levels.at(-1)!)}</span></span>
+    </label>
+    <p className="hint">Higher effort can take longer and use more tokens.</p>
+  </div>;
+}
+function StyleSettings({ status, act, scope }: { status: Status; act: Act; scope: string }) {
+  const [examples, setExamples] = useState('');
+  const profile = status.state.profiles[scope];
+  const resolved = status.chat.settingsId ? styleFor(status.state, resolveSettings(status.state, status.chat.kind, status.chat.settingsId).values, status.chat.settingsId) : null;
+  return <>
+
+    <p className="hint">Profiles describe writing habits, not private facts. Raw examples stay in memory only. General profiles can be reused across chats; conversation profiles never leave their own chat.</p>
+    {resolved?.fallback && <p className="notice">This conversation has sparse history. It uses the approved general profile when available.</p>}
+    {profile ? <><p className="hint">{profile.samples} samples · {profile.source} · {new Date(profile.updatedAt).toLocaleDateString()}</p><TextSetting key={`${scope}-${profile.updatedAt}`} label="Writing traits" value={profile.description} multiline save={description => act({ type: 'profile', scope, description })}/><button onClick={() => void act({ type: 'resetProfile', scope })}>{scope === 'general' ? 'Reset profile' : 'Reset profile and stop learning'}</button></> : <p className="empty-small">No profile yet. Style matching is off until enabled in Replies.</p>}
+    <label>Selected examples<textarea rows={6} value={examples} maxLength={20000} onChange={e => setExamples(e.target.value)} placeholder="At least five of your messages, one per line"/></label>
+    <div className="actions"><button disabled={!examples.trim()} onClick={async () => { if (await act({ type: 'learn', scope, examples })) setExamples(''); }}>Learn from examples</button><button disabled={!status.chat.ready} onClick={() => void act({ type: 'learn', scope, examples: '' })}>Use my loaded sent messages</button></div>
+  </>;
+}
+function AutoSettings({ status, act }: { status: Status; act: Act }) {
+  const id = status.chat.chatId;
+  const saved = (id && status.state.auto[id]) || defaultAuto;
+  const rules = status.runtimePaused ? { ...saved, paused: true } : saved;
+  const patch = (change: AutoPatch) => { if (id) void act({ type: 'autoRules', chatId: id, patch: change }); };
+  const permission = (value: AutoPermission) => { if (id) void act({ type: 'autoPermission', chatId: id, permission: value }); };
+  if (!id || !status.chat.ready) return <p className="notice">Automatic sending is unavailable because this WhatsApp version hides the chat identifier. Your reply and style settings still apply to this conversation.</p>;
+  return <>
+    <Toggle preserveAuto label="Allow automatic replies in this chat" checked={rules.enabled} onChange={enabled => permission(enabled ? 'enable' : 'disable')}/>
+    <p className="hint">Replies only to new text arriving in the open conversation while the latest messages are visible. Context sharing must be enabled. Changing chats, typing, clicking, or opening this panel cancels a queued reply. Restarting the app pauses sending.</p>
+    {rules.enabled && <div className="notice">{rules.paused ? 'Paused after user activity' : 'Armed for the next incoming message'}<button data-preserve-auto="" onClick={() => permission(rules.paused ? 'resume' : 'pause')}>{rules.paused ? 'Resume' : 'Pause'}</button></div>}
+    <div className="two-columns"><label>From hour<select value={rules.startHour} onChange={e => patch({ startHour: Number(e.target.value) })}>{Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}</select></label><label>Until hour<select value={rules.endHour} onChange={e => patch({ endHour: Number(e.target.value) })}>{Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}</select></label></div>
+    <p className="hint">Local time. Matching hours mean all day; an end before the start crosses midnight.</p>
+    <Choice label="Daily reply limit" value={String(rules.dailyLimit)} options={['1', '3', '5', '10', '20']} onChange={v => patch({ dailyLimit: Number(v) })}/>
+    <Choice label="Minimum minutes between replies" value={String(rules.cooldownMinutes)} options={['1', '5', '10', '30', '60']} onChange={v => patch({ cooldownMinutes: Number(v) })}/>
+    <Choice label="Cancellation window in seconds" value={String(rules.delaySeconds)} options={['15', '30', '60', '120']} onChange={v => patch({ delaySeconds: Number(v) })}/>
+    <p className="hint">Attempts count toward limits, including unconfirmed submissions. Incoming messages and custom instructions cannot grant permission to send.</p>
+  </>;
+}
+function Toggle({ label, checked, onChange, note, preserveAuto }: { label: string; checked: boolean; onChange: (value: boolean) => void; note?: string; preserveAuto?: boolean }) {
+  return <label className="toggle" data-preserve-auto={preserveAuto ? '' : undefined}><span>{label}{note && <small>{note}</small>}</span><input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}/></label>;
+}
+function Choice({ label, value, options, onChange, note }: { label: string; value: string; options: string[]; onChange: (value: string) => void; note?: string }) {
+  const names: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', match: 'Match conversation', conversation: 'This conversation' };
+  return <label className="choice-setting"><span>{label}{note && <small>{note}</small>}</span><select value={value} onChange={e => onChange(e.target.value)}>{options.map(option => <option key={option} value={option}>{names[option] ?? option[0].toUpperCase() + option.slice(1)}</option>)}</select></label>;
+}
+function TextSetting({ label, value, save, multiline, note }: { label: string; value: string; save: (value: string) => Promise<boolean>; multiline?: boolean; note?: string }) {
+  const [text, setText] = useState(value);
+  return <div className="text-setting"><label>{label}{note && <small>{note}</small>}{multiline ? <textarea rows={4} value={text} onChange={e => setText(e.target.value)}/> : <input value={text} onChange={e => setText(e.target.value)}/>}</label><button disabled={text === value} onClick={() => void save(text)}>Save</button></div>;
+}
