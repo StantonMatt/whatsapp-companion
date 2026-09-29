@@ -9,7 +9,7 @@ import { SuggestionGate } from '../src/core/suggestions';
 import { autoDecision, autoSendExpiry } from '../src/core/auto-reply';
 import { searchStickers, upsertSticker } from '../src/core/stickers';
 import { Store } from '../src/main/store';
-import { generate, buildPrompt } from '../src/main/providers';
+import { generate, buildPrompt, ProviderError } from '../src/main/providers';
 import { Assistant } from '../src/main/assistant';
 import { ProviderCheck } from '../src/main/provider-check';
 import { setReasoning } from '../src/core/model-policy';
@@ -544,5 +544,111 @@ describe('refinement source', () => {
       assistant.activity(true); finish('Stale refinement'); await work;
       expect(commands.some(c => c.type === 'suggestion' && c.text === 'Stale refinement')).toBe(false);
     } finally { assistant.cancel(); }
+  });
+});
+
+describe('suggestion recovery', () => {
+  function setup(generator: typeof generate) {
+    vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; });
+    const commands: RemoteCommand[] = [];
+    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    return { assistant, commands, store };
+  }
+  test('a transient failure recovers without changing the chat, draft or focus', async () => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Recovered reply');
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      expect(generator).toHaveBeenCalledOnce(); expect(assistant.message).toContain('Retrying');
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+      expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Recovered reply' });
+    } finally { assistant.cancel(); }
+  });
+  test('retries stop after two attempts and a manual retry works on the same snapshot', async () => {
+    const generator = vi.fn<typeof generate>().mockRejectedValue(new ProviderError('Network interrupted', true));
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(60000);
+      expect(generator).toHaveBeenCalledTimes(3); expect(commands.at(-1)).toMatchObject({ type: 'notice', retryKey: expect.any(String) });
+      assistant.receive(snap({ activity: 1 })); await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledTimes(3);
+      generator.mockResolvedValue('Manual recovery'); await assistant.request();
+      expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Manual recovery' });
+      expect(commands.some(c => c.type === 'autoSend')).toBe(false);
+    } finally { assistant.cancel(); }
+  });
+  test.each(['dismiss', 'edit', 'chat', 'settings'])('%s invalidates a scheduled retry', async change => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Current reply');
+    const { assistant, store } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      if (change === 'dismiss') assistant.dismiss();
+      if (change === 'edit') assistant.activity(true);
+      if (change === 'chat') assistant.receive(snap({ chatId: group, messages: [] }));
+      if (change === 'settings') { store.update(s => { s.global.suggestions = false; }); assistant.reconfigure(); }
+      await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledOnce();
+    } finally { assistant.cancel(); }
+  });
+  test.each(['credentials', 'quota', 'model'])('%s errors are explained without automatic retries', async problem => {
+    const generator = vi.fn<typeof generate>().mockRejectedValue(new ProviderError(problem));
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(60000);
+      expect(generator).toHaveBeenCalledOnce(); expect(commands.at(-1)).toMatchObject({ type: 'notice', text: problem });
+    } finally { assistant.cancel(); }
+  });
+  test('a failed refinement restores its source suggestion for another edit', async () => {
+    const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Original suggestion').mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Revised');
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      const source = commands.at(-1) as Extract<RemoteCommand, { type: 'suggestion' }>;
+      await assistant.request('Shorter', false, { key: source.key, suggestionId: source.id });
+      await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledTimes(2);
+      expect(commands.at(-2)).toMatchObject({ type: 'suggestion', text: source.text, id: source.id });
+      await assistant.request('Warmer', false, { key: source.key, suggestionId: source.id });
+      expect(JSON.parse(generator.mock.calls[2][0].input).draft).toBe(source.text);
+    } finally { assistant.cancel(); }
+  });
+  test('caret movement during backoff preserves recovery without leaving a pending status', async () => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue(' recovered');
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap({ draft: 'Keep typing', focused: true })); await vi.advanceTimersByTimeAsync(250);
+      assistant.receive(snap({ draft: 'Keep typing', focused: true, caretAtEnd: false, activity: 1 }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: ' recovered' });
+      expect(assistant.message).toBe('Tab to accept · Esc to dismiss');
+    } finally { assistant.cancel(); }
+  });
+  test('manual requests supersede a scheduled retry without duplicate provider calls', async () => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Requested reply');
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      await assistant.request(); await vi.advanceTimersByTimeAsync(60000);
+      expect(generator).toHaveBeenCalledTimes(2); expect(commands.filter(c => c.type === 'suggestion')).toHaveLength(1);
+    } finally { assistant.cancel(); }
+  });
+  test('a stale failure cannot retry over a newer successful request', async () => {
+    let fail!: (error: Error) => void;
+    const generator = vi.fn<typeof generate>().mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; })).mockResolvedValue('Current reply');
+    const { assistant, commands } = setup(generator);
+    try {
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      await assistant.request(); fail(new ProviderError('Old failure', true)); await vi.advanceTimersByTimeAsync(60000);
+      expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Current reply' });
+    } finally { assistant.cancel(); }
+  });
+  test('automatic reply generation is never retried', async () => {
+    const generator = vi.fn<typeof generate>().mockRejectedValue(new ProviderError('Network interrupted', true));
+    const { assistant, commands, store } = setup(generator);
+    try {
+      store.update(s => { s.global.suggestions = false; }); assistant.receive(snap()); await assistant.request(undefined, true);
+      await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledOnce(); expect(commands.some(c => c.type === 'autoSend')).toBe(false);
+    } finally { assistant.cancel(); }
+  });
+  test.each([[401, false], [403, false], [404, false], [429, false], [500, true], [503, true], [408, true]])('classifies HTTP %s without reading its body', async (status, retryable) => {
+    const request = { provider: 'openai' as const, model: 'configured-model', key: 'synthetic', system: 'Test', input: 'Test' };
+    await expect(generate(request, (async () => new Response('Private error body', { status })) as typeof fetch)).rejects.toMatchObject({ retryable });
   });
 });

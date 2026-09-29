@@ -11,7 +11,7 @@ export type RemoteCommand =
   | { type: 'refining'; key: string }
   | { type: 'autoSend'; key: string; text: string; nonce: string; expiresAt: number }
   | { type: 'locateSticker'; id: string; nonce: string }
-  | { type: 'notice'; text: string };
+  | { type: 'notice'; text: string; retryKey?: string };
 export interface Connector {
   send(command: RemoteCommand): void;
   focus(): void;

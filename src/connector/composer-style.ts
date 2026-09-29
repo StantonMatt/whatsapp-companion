@@ -15,11 +15,6 @@ button:focus-visible,input:focus-visible{outline:2px solid #21c063;outline-offse
 input{min-width:0;flex:1;width:100%;padding:8px 10px;background:var(--surface);color:var(--ink);border:1px solid transparent;border-radius:7px}
 input::placeholder{color:var(--muted)}
 .apply{display:grid;place-items:center;flex:none;width:32px;height:32px;padding:0;border-radius:50%;color:#21c063;font-size:19px}
-.primary{border-radius:7px;padding:7px 12px;background:#21c063;color:#082719;font-weight:600}
-.primary:not(:disabled):hover{background:#29d16e}
-.preview-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;margin:2px 6px 10px;user-select:text}
-.preview-footer{display:flex;align-items:center;justify-content:flex-end;gap:9px;padding:0 4px 2px}
-kbd{color:var(--muted);font:11px system-ui;border:1px solid var(--line);border-radius:4px;padding:2px 4px}
 .notice-text{padding:0 6px 6px;font-size:12px;color:var(--muted)}
 .pending-text{display:flex;align-items:center;gap:8px;padding:6px;color:var(--muted)}
 .spinner{width:12px;height:12px;border:2px solid var(--line);border-top-color:#21c063;border-radius:50%;animation:spin .8s linear infinite}

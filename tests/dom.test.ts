@@ -178,21 +178,18 @@ test.each(['Enter', ' ', 'Tab'])('keyboard use of a native control counts as tak
     expect(events).toContainEqual({ type: 'activity', editing: false });
   } finally { connector.stop(); }
 });
-test.each(['menu', 'notice'])('replacing refinement with %s removes the hidden replacement so ordinary Tab cannot accept it', async replacement => {
-  vi.useFakeTimers(); const editor = fixture(); editor.tabIndex = 0;
-  const connector = new DomConnector(document, () => {}); connector.start();
-  const insert = vi.fn(); document.execCommand = insert;
+test('refinement updates a written draft immediately without a result popup or sending', async () => {
+  vi.useFakeTimers(); const editor = fixture();
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  const insert = vi.fn(() => true); document.execCommand = insert;
   try {
-    await vi.advanceTimersByTimeAsync(600);
-    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Old refinement', replace: true });
-    expect(connector['popup'].hidden).toBe(false);
-    if (replacement === 'menu') connector['openPopup'](); else connector.command({ type: 'notice', text: 'An explanation' });
-    connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
-    expect(connector['popup'].hidden).toBe(true);
-    editor.focus(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false); document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
-    const preventDefault = vi.fn();
-    connector['keydown']({ isTrusted: true, key: 'Tab', target: editor, composedPath: () => [editor], preventDefault } as unknown as KeyboardEvent);
-    expect(insert).not.toHaveBeenCalled(); expect(preventDefault).not.toHaveBeenCalled(); expect(editor.textContent).toBe('A draft');
+    await vi.advanceTimersByTimeAsync(600); editor.focus();
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Revised draft', replace: true });
+    expect(insert).not.toHaveBeenCalled(); await vi.advanceTimersByTimeAsync(50);
+    expect(insert).toHaveBeenCalledExactlyOnceWith('insertText', false, 'Revised draft');
+    expect(connector['popup'].hidden).toBe(true); expect(connector['suggestion']).toBeUndefined();
+    expect(events).toContainEqual({ type: 'activity', editing: true });
+    expect(events.some(event => event.type === 'result')).toBe(false);
   } finally { connector.stop(); }
 });
 test('ordinary composer Tab preserves navigation and invalidates automatic-send snapshots', () => {
@@ -440,10 +437,104 @@ test('reopening refinement of an empty-composer result keeps that text visible a
   try {
     await vi.advanceTimersByTimeAsync(600);
     connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), id: '00000000-0000-4000-8000-000000000002', text: 'A revised reply', replace: true });
+    expect(connector['popup'].hidden).toBe(true); expect(connector['ghost'].textContent).toBe('A revised reply');
     connector['openPopup']();
     expect(connector['popup'].getAttribute('aria-label')).toBe('Refine suggestion');
     connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
     expect(connector['popup'].hidden).toBe(true); expect(connector['ghost'].textContent).toBe('A revised reply');
     expect(editor.textContent).toBe('');
+  } finally { connector.stop(); }
+});
+
+test('refocusing during refinement preserves the request and shows the revised ghost inline', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = '';
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+    connector.command({ type: 'refining', key });
+    connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
+    expect(events.some(event => event.type === 'dismiss')).toBe(false);
+    connector.command({ type: 'suggestion', key, text: 'An updated suggestion', replace: true });
+    expect(connector['popup'].hidden).toBe(true); expect(connector['ghost'].textContent).toBe('An updated suggestion');
+    expect(editor.textContent).toBe('');
+  } finally { connector.stop(); }
+});
+test('retry notices belong to their original context and disappear on successful recovery', async () => {
+  vi.useFakeTimers(); fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+    connector.command({ type: 'notice', text: 'Network unavailable', retryKey: 'stale' });
+    expect(connector['popup'].hidden).toBe(true);
+    connector.command({ type: 'notice', text: 'Network unavailable', retryKey: key });
+    expect(connector['popup'].textContent).toContain('Try again');
+    connector.command({ type: 'suggestion', key, text: ' recovered', replace: false });
+    expect(connector['popup'].hidden).toBe(true); expect(connector['ghost'].textContent).toContain('recovered');
+  } finally { connector.stop(); }
+});
+
+test.each(['typing', 'dismiss', 'incoming', 'caret', 'newer'])('a replacement waiting for native selection rejects %s changes', async change => {
+  vi.useFakeTimers(); const editor = fixture();
+  const connector = new DomConnector(document, () => {}); connector.start(); const insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); editor.focus(); const key = suggestionKey(connector.read());
+    connector.command({ type: 'suggestion', key, text: 'Old revision', replace: true });
+    if (change === 'typing') connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+    if (change === 'dismiss') connector['dismissPopup']();
+    if (change === 'incoming') { document.querySelector('[data-id] .selectable-text')!.textContent = 'New message'; connector['refresh'](); }
+    if (change === 'caret') connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
+    if (change === 'newer') connector.command({ type: 'suggestion', key, text: 'New revision', replace: true });
+    await vi.advanceTimersByTimeAsync(50);
+    if (change === 'newer') expect(insert).toHaveBeenCalledExactlyOnceWith('insertText', false, 'New revision');
+    else expect(insert).not.toHaveBeenCalled();
+  } finally { connector.stop(); }
+});
+
+test.each(['typing', 'Backspace', 'ArrowLeft', 'composition', 'clear'])('temporary select-all restores the caret before %s can affect the original draft', async change => {
+  vi.useFakeTimers(); const editor = fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+  const insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); editor.focus();
+    const selection = document.getSelection()!, range = document.createRange();
+    range.setStart(editor.firstChild!, 3); range.collapse(true); selection.removeAllRanges(); selection.addRange(range);
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Replacement', replace: true });
+    expect(selection.toString()).toBe('A draft');
+    if (change === 'typing') connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+    else if (change === 'composition') connector['compositionStart']({ target: editor } as unknown as Event);
+    else if (change === 'clear') connector.command({ type: 'clear' });
+    else connector['keydown']({ isTrusted: true, key: change, target: editor, composedPath: () => [editor] } as unknown as KeyboardEvent);
+    expect(selection.isCollapsed).toBe(true); expect(selection.anchorNode).toBe(editor.firstChild); expect(selection.anchorOffset).toBe(3);
+    await vi.advanceTimersByTimeAsync(50); expect(insert).not.toHaveBeenCalled(); expect(editor.textContent).toBe('A draft');
+    expect(connector['suggestion']).toBeUndefined();
+  } finally { connector.stop(); }
+});
+
+test('a selection drag during replacement preserves both the draft and the new selection', async () => {
+  vi.useFakeTimers(); const editor = fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+  const insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); editor.focus();
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Revised draft', replace: true });
+    const selection = document.getSelection()!, range = document.createRange();
+    range.setStart(editor.firstChild!, 0); range.setEnd(editor.firstChild!, 3); selection.removeAllRanges(); selection.addRange(range);
+    connector['selectionChanged'](); await vi.advanceTimersByTimeAsync(50);
+    expect(insert).not.toHaveBeenCalled(); expect(editor.textContent).toBe('A draft'); expect(selection.toString()).toBe('A d');
+    expect(connector['suggestion']).toBeUndefined();
+  } finally { connector.stop(); }
+});
+
+test.each(['return', 'edit', 'incoming'])('a revision arriving in another field preserves focus and handles %s', async action => {
+  vi.useFakeTimers(); const editor = fixture();
+  const search = document.createElement('input'); document.body.prepend(search);
+  const connector = new DomConnector(document, () => {}); connector.start(); const insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); search.focus();
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Revised draft', replace: true });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(document.activeElement).toBe(search); expect(insert).not.toHaveBeenCalled(); expect(editor.textContent).toBe('A draft');
+    if (action === 'edit') connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+    if (action === 'incoming') { document.querySelector('[data-id] .selectable-text')!.textContent = 'New message'; connector['refresh'](); }
+    editor.focus(); connector['refresh'](); await vi.advanceTimersByTimeAsync(50);
+    if (action === 'return') expect(insert).toHaveBeenCalledExactlyOnceWith('insertText', false, 'Revised draft');
+    else expect(insert).not.toHaveBeenCalled();
   } finally { connector.stop(); }
 });

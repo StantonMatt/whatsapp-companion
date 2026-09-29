@@ -22,6 +22,20 @@ try {
       await remote.mouse.click((model.border[0] + model.border[4]) / 2, (model.border[1] + model.border[5]) / 2);
     } finally { await session.detach(); }
   };
+  const assistantUi = async () => {
+    const session = await remote.context().newCDPSession(remote);
+    try {
+      const { root } = await session.send('DOM.getDocument', { depth: -1, pierce: true });
+      const nodes = [];
+      const visit = node => { nodes.push(node); for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child); };
+      visit(root);
+      const classes = node => { const index = node.attributes?.indexOf('class'); return index >= 0 ? node.attributes[index + 1].split(' ') : []; };
+      const text = node => node ? node.nodeValue + (node.children ?? []).map(text).join('') : '';
+      const ghost = nodes.find(node => classes(node).includes('ghost'));
+      const popup = nodes.find(node => classes(node).includes('popup'));
+      return { ghost: text(ghost), popupHidden: popup?.attributes?.includes('hidden') };
+    } finally { await session.detach(); }
+  };
   const openPanel = async (panel, page = remote) => {
     // Closing a native view crosses IPC; wait before toggling the same panel again.
     await expect.poll(async () => (await local.evaluate(() => window.companion.status())).panel).not.toBe(panel);
@@ -257,18 +271,18 @@ try {
   await clickAssistant('Shorter');
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await expect(editor).toHaveText('');
-  await remote.screenshot({ path: '.local/screenshots/refine-suggestion-preview.png' });
-  await clickAssistant('Use text');
+  await expect.poll(assistantUi).toEqual({ ghost: 'That sounds lovely. See you then!', popupHidden: true });
+  await remote.screenshot({ path: '.local/screenshots/refine-suggestion-inline.png' });
+  await editor.click(); await editor.press('Tab');
   await expect(editor).toHaveText('That sounds lovely. See you then!');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
-  console.log('PASS star refines an empty-composer suggestion and Use text inserts without sending');
+  console.log('PASS star updates ghost text inline with no result popup; Tab inserts without sending');
   await editor.fill('Translate this written message');
   starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
   await clickAssistant('Translate…'); await remote.keyboard.type('Spanish'); await remote.keyboard.press('Enter');
-  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss'); await editor.press('Tab');
   await expect(editor).toHaveText('That sounds lovely. See you then!');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
-  console.log('PASS compact translation action accepts a language and Tab replaces the existing draft without sending');
+  console.log('PASS translation replaces the written draft directly without sending');
   await editor.fill('Keep this text while cancelling');
   starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
   await clickAssistant('Warmer'); await expect(statusText).toHaveText('Thinking…'); await remote.keyboard.press('Escape');
@@ -302,27 +316,87 @@ try {
   await editor.press('Tab'); await expect(editor).toHaveText(longDraft + ' see you then!');
   console.log('PASS scrolled composer accepts a visible continuation');
   await editor.fill('A long draft to make warmer');
+  await editor.evaluate(editor => {
+    // Emulate WhatsApp's editor model: replacement is only retained once its
+    // selectionchange handler has observed the full-draft selection.
+    let selected = false;
+    const original = editor.textContent;
+    const selection = () => { selected = !document.getSelection()?.isCollapsed && editor.contains(document.getSelection()?.anchorNode); };
+    const input = event => { if (event.target === editor && !selected) editor.textContent = original; };
+    document.addEventListener('selectionchange', selection); editor.addEventListener('input', input);
+    window.finishSelectionFixture = () => { document.removeEventListener('selectionchange', selection); editor.removeEventListener('input', input); };
+  });
   const bounds = await editor.boundingBox();
   await remote.mouse.click(bounds.x + bounds.width - 17, bounds.y - 16);
   await remote.waitForTimeout(700); // The refinement form must survive snapshot polling while the user thinks.
   await remote.keyboard.type('Make it warmer');
   await remote.keyboard.press('Enter');
   await expect(statusText).toHaveText('Thinking…');
-  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
-  await remote.screenshot({ path: '.local/screenshots/refinement.png' });
-  await editor.press('Tab');
+  await editor.click(); // Refocusing must not cancel the in-flight edit.
   await expect(editor).toHaveText('That sounds lovely. See you then!');
-  console.log('PASS refinement popup and Tab replacement without sending');
-  await editor.fill('Keep this draft');
+  await remote.screenshot({ path: '.local/screenshots/refinement.png' });
+  await remote.evaluate(() => window.finishSelectionFixture());
+  await editor.press('Control+z'); await expect(editor).toHaveText('A long draft to make warmer');
+  console.log('PASS refinement edits the draft after refocusing, without sending, and native Undo restores it');
+  await editor.fill(''); await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   let refineBounds = await editor.boundingBox();
   await remote.mouse.click(refineBounds.x + refineBounds.width - 17, refineBounds.y - 16);
-  await remote.keyboard.type('Make it warmer'); await remote.keyboard.press('Enter');
-  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
+  await clickAssistant('Shorter');
+  await expect.poll(assistantUi).toEqual({ ghost: 'That sounds lovely. See you then!', popupHidden: true });
   refineBounds = await editor.boundingBox();
   await remote.mouse.click(refineBounds.x + refineBounds.width - 17, refineBounds.y - 16);
-  await editor.click(); await editor.press('Tab');
-  await expect(editor).toHaveText('Keep this draft');
-  console.log('PASS reopening refinement options discards the hidden replacement and restores ordinary Tab');
+  await clickAssistant('Warmer'); await editor.click();
+  await expect.poll(assistantUi).toEqual({ ghost: 'That sounds lovely. See you then!', popupHidden: true });
+  await expect(editor).toHaveText(''); await editor.press('Tab');
+  await expect(editor).toHaveText('That sounds lovely. See you then!');
+  expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
+  console.log('PASS repeated refinement updates the inline reply and survives refocusing while pending');
+  await remote.exposeFunction('fixtureReplacementInput', key => remote.keyboard.press(key));
+  for (const [key, expected] of [['X', 'Keep my draftX'], ['Backspace', 'Keep my draf']]) {
+    await editor.fill('Keep my draft');
+    await editor.evaluate((editor, key) => {
+      const selected = () => {
+        if (document.getSelection()?.toString() !== 'Keep my draft') return;
+        document.removeEventListener('selectionchange', selected);
+        void window.fixtureReplacementInput(key);
+      };
+      document.addEventListener('selectionchange', selected);
+    }, key);
+    const rect = await editor.boundingBox(); await remote.mouse.click(rect.x + rect.width - 17, rect.y - 16);
+    await clickAssistant('Warmer');
+    await expect(editor).toHaveText(expected);
+    expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
+    console.log(`PASS ${key} during native selection reconciliation edits only at the original caret`);
+  }
+  await editor.fill('Keep my draft');
+  await editor.evaluate(editor => {
+    window.fixtureSelectionMoved = false;
+    const selected = () => {
+      if (document.getSelection()?.toString() !== 'Keep my draft') return;
+      document.removeEventListener('selectionchange', selected);
+      const range = document.createRange(); range.setStart(editor.firstChild, 0); range.setEnd(editor.firstChild, 4);
+      const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      window.fixtureSelectionMoved = true;
+    };
+    document.addEventListener('selectionchange', selected);
+  });
+  const selectionBounds = await editor.boundingBox(); await remote.mouse.click(selectionBounds.x + selectionBounds.width - 17, selectionBounds.y - 16);
+  await clickAssistant('Warmer');
+  await expect.poll(() => remote.evaluate(() => window.fixtureSelectionMoved)).toBe(true);
+  await remote.waitForTimeout(100);
+  await expect(editor).toHaveText('Keep my draft'); expect(await remote.evaluate(() => document.getSelection()?.toString())).toBe('Keep');
+  console.log('PASS selection changes during replacement preserve the full draft and the new selection');
+  await editor.fill('A draft while searching');
+  await remote.evaluate(() => { const search = document.createElement('input'); search.id = 'fixture-search'; search.setAttribute('aria-label', 'Fixture search'); document.querySelector('#pane-side').prepend(search); });
+  const searchBounds = await editor.boundingBox(); await remote.mouse.click(searchBounds.x + searchBounds.width - 17, searchBounds.y - 16);
+  await clickAssistant('Warmer');
+  const fixtureSearch = remote.getByLabel('Fixture search'); await fixtureSearch.click(); await fixtureSearch.fill('Find this');
+  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss'); await remote.waitForTimeout(100);
+  await expect(fixtureSearch).toBeFocused(); await expect(editor).toHaveText('A draft while searching');
+  await fixtureSearch.press('X'); await expect(fixtureSearch).toHaveValue('Find thisX');
+  await editor.click(); await expect(editor).toHaveText('That sounds lovely. See you then!');
+  await remote.evaluate(() => document.getElementById('fixture-search').remove());
+  console.log('PASS arriving refinement preserves search focus and applies only on returning to the composer');
   await editor.fill('Maybe');
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await editor.press('Escape');

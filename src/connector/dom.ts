@@ -122,8 +122,9 @@ export class DomConnector {
   private stableSince = 0;
   private lastKey = '';
   private lastContentKey = '';
-  private popupMode: 'refine' | 'preview' | 'notice' | 'pending' = 'notice';
+  private popupMode: 'refine' | 'notice' | 'pending' = 'notice';
   private suggestion?: Extract<RemoteCommand, { type: 'suggestion' }>;
+  private replacement?: { command: Extract<RemoteCommand, { type: 'suggestion' }>; editor: HTMLElement; originalRange?: Range };
   private dismissedKey?: string;
   private hiddenPlaceholder?: { element: HTMLElement; visibility: string; priority: string };
   private host!: HTMLElement;
@@ -235,8 +236,9 @@ export class DomConnector {
     this.emit(event);
   };
   private takeover(editing = false) {
+    this.restoreReplacementSelection();
     this.activityGeneration++;
-    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'preview' || this.popupMode === 'pending') this.hidePopup(); }
+    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'pending') this.hidePopup(); }
     this.emit({ type: 'activity', editing });
   }
   private activity = (event: Event) => { if (event.isTrusted && !this.inserting) this.takeover(); };
@@ -245,9 +247,7 @@ export class DomConnector {
   };
   private pointer = (event: Event) => {
     if (!event.isTrusted) return;
-    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event) && this.popupMode !== 'preview') {
-      if (!this.popup.hidden && this.popupMode === 'pending') this.dismissPopup(); else this.hidePopup();
-    }
+    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event) && this.popupMode !== 'pending') this.hidePopup();
     this.activity(event);
   };
   private compositionStart = (event: Event) => {
@@ -281,12 +281,59 @@ export class DomConnector {
     const selection = this.doc.getSelection(); const range = this.doc.createRange();
     range.selectNodeContents(editor); if (!replace) range.collapse(false);
     selection?.removeAllRanges(); selection?.addRange(range);
+    return this.insertAtSelection(text);
+  }
+  private insertAtSelection(text: string) {
     this.inserting = true;
     try { return this.doc.execCommand('insertText', false, text); } finally { this.inserting = false; }
+  }
+  private async replaceDraft(command: Extract<RemoteCommand, { type: 'suggestion' }>) {
+    const editor = this.editor();
+    // Keep the revision pending while the user works in search or another field.
+    // A provider response must never move their keyboard focus to the composer.
+    if (!editor || this.replacement || this.doc.activeElement !== editor || !this.doc.hasFocus()) return;
+    this.hidePopup();
+    const selection = this.doc.getSelection(), range = this.doc.createRange();
+    const originalRange = selection?.rangeCount && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode) ? selection.getRangeAt(0).cloneRange() : undefined;
+    const replacement = this.replacement = { command, editor, originalRange };
+    range.selectNodeContents(editor); selection?.removeAllRanges(); selection?.addRange(range);
+    const activity = this.activityGeneration;
+    // WhatsApp's editor reconciles native selection asynchronously. Inserting in
+    // the same turn can be silently reverted, even when execCommand returns true.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    if (this.replacement !== replacement) return;
+    const snapshot = this.read();
+    if (this.suggestion !== command || editor !== this.editor() || activity !== this.activityGeneration || command.key !== suggestionKey(snapshot) || !snapshot.ready || !snapshot.focused || snapshot.composing || snapshot.draftIssue || !this.wholeDraftSelected(editor)) {
+      if (this.suggestion === command) this.clear();
+      return;
+    }
+    this.replacement = undefined;
+    this.takeover(true);
+    this.insertAtSelection(command.text);
+  }
+  private wholeDraftSelected(editor: HTMLElement) {
+    const selection = this.doc.getSelection();
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed || !editor.contains(selection.anchorNode) || !editor.contains(selection.focusNode)) return false;
+    // The native editor can normalize range endpoints into text nodes. Compare
+    // serialized content, including emoji, rather than exact DOM boundaries.
+    const selected = this.doc.createElement('div'); selected.append(selection.getRangeAt(0).cloneContents());
+    return readDraft(selected) === readDraft(editor);
+  }
+  private restoreReplacementSelection() {
+    const replacement = this.replacement; this.replacement = undefined;
+    if (!replacement) return;
+    if (this.suggestion === replacement.command) this.suggestion = undefined;
+    const { editor, originalRange } = replacement, selection = this.doc.getSelection();
+    // Before native typing, deletion or caret navigation, undo our temporary
+    // select-all. Cancelling only the async insertion would lose the user's draft.
+    if (editor === this.editor() && this.doc.activeElement === editor && originalRange && editor.contains(originalRange.startContainer) && editor.contains(originalRange.endContainer) && this.wholeDraftSelected(editor)) {
+      selection?.removeAllRanges(); selection?.addRange(originalRange);
+    }
   }
   private acceptSuggestion() {
     const suggestion = this.suggestion, snapshot = this.read();
     if (!suggestion || suggestion.key !== suggestionKey(snapshot) || !snapshot.ready || snapshot.composing || snapshot.draftIssue) return;
+    if (suggestion.replace && snapshot.draft.trim()) { void this.replaceDraft(suggestion); return; }
     this.takeover(true); this.hidePopup(); this.insert(suggestion.text, suggestion.replace);
   }
   private hidePopup() { this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); }
@@ -303,6 +350,7 @@ export class DomConnector {
     header.append(label, close); this.popup.append(header);
   }
   private clear() {
+    this.restoreReplacementSelection();
     this.suggestion = undefined; this.ghost.textContent = '';
     if (this.hiddenPlaceholder) {
       const { element, visibility, priority } = this.hiddenPlaceholder;
@@ -334,13 +382,13 @@ export class DomConnector {
       Object.assign(this.ghost.style, { left: `${rect.left + editor.clientLeft}px`, top: `${rect.top + editor.clientTop}px`, width: `${editor.clientWidth}px`, height: `${editor.clientHeight}px`, fontFamily: css.fontFamily, fontSize: css.fontSize, fontWeight: css.fontWeight, fontStyle: css.fontStyle, letterSpacing: css.letterSpacing, lineHeight: css.lineHeight, padding: css.padding, direction: css.direction, textAlign: css.textAlign });
       this.syncGhostScroll();
     }
+    if (snapshot.focused && snapshot.draft.trim() && this.suggestion?.replace && !this.replacement) void this.replaceDraft(this.suggestion);
   }
   private openPopup() {
     const snapshot = this.read(), key = suggestionKey(snapshot);
     const suggested = this.suggestion?.key === key ? this.suggestion : undefined;
     const hasText = Boolean(snapshot.draft.trim() || suggested?.id);
-    if (suggested?.replace && !snapshot.draft.trim()) this.command({ ...suggested, replace: false });
-    else if (this.suggestion?.replace) this.clear();
+    if (suggested?.replace && snapshot.draft.trim()) this.clear();
     this.takeover(); this.popupShell('refine', hasText ? snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion' : 'Reply assistance');
     const request = (instruction?: string) => {
       if (suggestionKey(this.read()) !== key) { this.hidePopup(); return; }
@@ -379,8 +427,23 @@ export class DomConnector {
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
     if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
-    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'preview' || this.popupMode === 'pending') this.hidePopup(); return; }
-    if (command.type === 'notice') { if (this.suggestion?.replace) this.clear(); this.popupShell('notice', 'Reply assistance'); const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text); return; }
+    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'pending') this.hidePopup(); return; }
+    if (command.type === 'notice') {
+      if (command.retryKey && command.retryKey !== suggestionKey(this.read())) return;
+      this.popupShell('notice', 'Reply assistance'); const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text);
+      if (command.retryKey) {
+        const retry = this.doc.createElement('button'); retry.className = 'action'; retry.textContent = 'Try again';
+        retry.addEventListener('click', event => {
+          if (!event.isTrusted || command.retryKey !== suggestionKey(this.read())) return;
+          this.dismissedKey = undefined; this.hidePopup();
+          const editor = this.editor();
+          if (editor) { editor.focus(); const range = this.doc.createRange(); range.selectNodeContents(editor); range.collapse(false); const selection = this.doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); }
+          this.refresh();
+          this.emit({ type: 'request', key: command.retryKey });
+        }); this.popup.append(retry);
+      }
+      return;
+    }
     if (command.type === 'refining') {
       if (command.key !== suggestionKey(this.read()) || command.key === this.dismissedKey) return;
       this.clear(); this.popupShell('pending', 'Refining');
@@ -392,7 +455,11 @@ export class DomConnector {
       const editor = this.editor(), s = this.read();
       if (command.key !== suggestionKey(s) || command.key === this.dismissedKey || !s.ready || s.draftIssue || !editor || this.composing) return;
       this.clear(); this.suggestion = command; this.ghost.replaceChildren();
-      if (!s.draft && !command.replace) {
+      if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup();
+      // An explicit refinement edits a written draft directly. Empty composers
+      // keep the revised reply as ghost text, so Enter can never send it unseen.
+      if (command.replace && s.draft.trim()) { void this.replaceDraft(command); return; }
+      if (!s.draft) {
         const label = editor.getAttribute('aria-placeholder');
         const placeholder = [...(editor.parentElement?.children ?? [])].find(el => el !== editor && el instanceof HTMLElement && el.getAttribute('aria-hidden') === 'true' && label && el.textContent?.trim() === label) as HTMLElement | undefined;
         if (placeholder) {
@@ -401,15 +468,6 @@ export class DomConnector {
         }
       }
       if (!command.replace) { const prefix = this.doc.createElement('span'); prefix.textContent = s.draft; prefix.style.visibility = 'hidden'; this.ghost.append(prefix); }
-      else {
-        this.popupShell('preview', 'Revised text');
-        const text = this.doc.createElement('div'); text.className = 'preview-text'; text.textContent = command.text;
-        const footer = this.doc.createElement('div'); footer.className = 'preview-footer';
-        const hint = this.doc.createElement('kbd'); hint.textContent = 'Tab';
-        const accept = this.doc.createElement('button'); accept.className = 'primary'; accept.textContent = 'Use text';
-        accept.addEventListener('click', event => { if (event.isTrusted) this.acceptSuggestion(); });
-        footer.append(hint, accept); this.popup.append(text, footer); return;
-      }
       const suffix = this.doc.createElement('span'); suffix.textContent = command.text; this.ghost.append(suffix); this.syncGhostScroll();
       if (!this.popup.hidden && this.popupMode === 'refine' && !this.popup.querySelector('input') && command.id) this.openPopup();
       return;
@@ -425,7 +483,7 @@ export class DomConnector {
   }
   private syncGhostScroll() {
     const editor = this.editor();
-    if (!editor || !this.suggestion || this.suggestion.replace) return;
+    if (!editor || !this.suggestion) return;
     this.ghost.scrollTop = editor.scrollTop; this.ghost.scrollLeft = editor.scrollLeft;
     // If the suffix wraps below the viewport, reveal it in the overlay without moving the actual caret.
     const suffix = this.ghost.lastElementChild?.getBoundingClientRect(), viewport = this.ghost.getBoundingClientRect();

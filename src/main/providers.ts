@@ -3,6 +3,9 @@ import { styleFor } from '../core/style';
 import { modelEffort, reasoningBudget } from '../core/model-policy';
 
 export type GenerateInput = { provider: Provider; model: string; key: string; system: string; input: string; effort?: ReasoningEffort; signal?: AbortSignal };
+export class ProviderError extends Error {
+  constructor(message: string, readonly retryable = false) { super(message); }
+}
 export async function generate(request: GenerateInput, fetcher: typeof fetch = fetch): Promise<string> {
   const openai = request.provider === 'openai';
   const effort = modelEffort(request.provider, request.model, request.effort);
@@ -21,7 +24,7 @@ export async function generate(request: GenerateInput, fetcher: typeof fetch = f
     if (!response.ok) {
       // Never echo response bodies: providers can include keys or prompt fragments in errors.
       const reason = response.status === 401 ? 'Key rejected. Add a valid API key.' : response.status === 403 ? 'This key does not have access to the selected model.' : response.status === 429 ? 'Rate limit or quota reached. Check provider usage and billing.' : response.status === 400 || response.status === 404 ? 'Model or request unavailable. Check the model ID and account access.' : 'Provider temporarily unavailable. Try again later.';
-      throw new Error(`${request.provider} (${response.status}): ${reason}`);
+      throw new ProviderError(`${request.provider} (${response.status}): ${reason}`, response.status >= 500 || response.status === 408);
     }
     const data = await response.json() as { status?: string; output?: { type: string; content?: { type: string; text?: string }[] }[]; content?: { type: string; text?: string }[]; stop_reason?: string };
     if (data.status === 'incomplete' || data.stop_reason === 'max_tokens') throw new Error('The provider response was incomplete. Try a shorter request.');
@@ -30,9 +33,9 @@ export async function generate(request: GenerateInput, fetcher: typeof fetch = f
     return text;
   } catch (error) {
     if (request.signal?.aborted) throw new Error('Cancelled');
-    if (signal.aborted) throw new Error(`Provider timed out after ${timeout / 1000} seconds. Try again or lower reasoning effort.`);
-    if (error instanceof Error && /^(openai|anthropic|The provider)/.test(error.message)) throw error;
-    throw new Error('Unable to connect to the provider. Check your network and try again.');
+    if (signal.aborted) throw new ProviderError(`Provider timed out after ${timeout / 1000} seconds. Try again or lower reasoning effort.`, true);
+    if (error instanceof ProviderError || error instanceof Error && /^The provider/.test(error.message)) throw error;
+    throw new ProviderError('Unable to connect to the provider. Check your network and try again.', true);
   }
 }
 

@@ -6,7 +6,7 @@ import { SuggestionGate, snapshotKey, suggestionContext, suggestionKey } from '.
 import { autoDecision, autoSendExpiry } from '../core/auto-reply';
 import { learnStyle } from '../core/style';
 import { savedEffort } from '../core/model-policy';
-import { generate, buildPrompt } from './providers';
+import { generate, buildPrompt, ProviderError } from './providers';
 import type { Store } from './store';
 import type { Vault } from './vault';
 
@@ -34,7 +34,7 @@ export class Assistant {
     this.inlineKey = undefined; this.automatic = false;
     this.offered = undefined;
     this.pending = null; this.attempt = undefined; this.connector.send({ type: 'clear' });
-    if (/^(Tab to accept|Thinking|Preparing an automatic|Automatic reply queued)/.test(this.message)) this.message = 'Ready';
+    if (/^(Tab to accept|Thinking|Connection interrupted|Preparing an automatic|Automatic reply queued)/.test(this.message)) this.message = 'Ready';
   }
   reconfigure() {
     this.cancel(); this.baseline = this.snapshot.messages.at(-1)?.id; this.fresh = undefined;
@@ -123,13 +123,13 @@ export class Assistant {
     }
     this.changed();
   }
-  async request(instruction?: string, automatic = false, source?: { key?: string; suggestionId?: string }) {
+  async request(instruction?: string, automatic = false, source?: { key?: string; suggestionId?: string }, retry = 0) {
     const snapshot = this.snapshot;
     if (source?.key && source.key !== suggestionKey(snapshot)) return;
     if (!snapshot.ready || (automatic && !snapshot.chatId) || snapshot.composing) return;
     clearTimeout(this.timer); clearTimeout(this.sendTimer); this.pending = null;
     if (snapshot.draftIssue) { this.message = this.draftIssueMessage(snapshot); this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
-    if (!automatic && !instruction && snapshot.draft && !snapshot.caretAtEnd) { this.inlineKey = undefined; return; }
+    if (!automatic && !instruction && retry === 0 && snapshot.draft && !snapshot.caretAtEnd) { this.inlineKey = undefined; return; }
     // Only a main-owned suggestion explicitly identified by the visible control
     // can substitute for an empty draft. Never accept arbitrary page-supplied text.
     const suggested = source?.suggestionId && this.offered?.id === source.suggestionId && this.offered.key === suggestionKey(snapshot) ? this.offered.text : undefined;
@@ -139,6 +139,7 @@ export class Assistant {
     if (!preferences.shareContext && !draft) { this.message = 'Enable conversation context in AI settings → Replies to suggest a reply, or type a draft to refine.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
     const ticket = this.gate.begin(snapshot, automatic);
     this.automatic = automatic; this.inlineKey = automatic ? undefined : ticket.key;
+    const previousOffer = this.offered;
     this.offered = undefined;
     if (instruction && !automatic) this.connector.send({ type: 'refining', key: ticket.key });
     this.message = automatic ? 'Preparing an automatic reply…' : 'Thinking…'; this.changed();
@@ -160,8 +161,22 @@ export class Assistant {
       this.changed();
     } catch (error) {
       if (!this.gate.current(ticket, this.snapshot)) return;
+      // Retry only transient inline failures, with a finite backoff. Cancellation,
+      // context changes and explicit requests invalidate the ticket/timer. Never
+      // retry automatic sending, refinement, credentials, quota or model errors.
+      if (!automatic && !instruction && error instanceof ProviderError && error.retryable && retry < 2) {
+        this.message = 'Connection interrupted. Retrying suggestion…'; this.changed();
+        this.timer = setTimeout(() => {
+          if (this.gate.current(ticket, this.snapshot)) void this.request(undefined, false, { key: ticket.key }, retry + 1);
+        }, retry === 0 ? 1000 : 3000);
+        return;
+      }
+      if (instruction && !snapshot.draft.trim() && previousOffer?.key === ticket.key) {
+        this.offered = previousOffer;
+        this.connector.send({ type: 'suggestion', ...previousOffer, replace: false });
+      }
       this.message = error instanceof Error ? error.message : 'Unable to generate a reply.';
-      this.connector.send({ type: 'notice', text: this.message }); this.changed();
+      this.connector.send({ type: 'notice', text: this.message, ...(!automatic && !instruction ? { retryKey: ticket.key } : {}) }); this.changed();
     }
   }
   private draftIssueMessage(snapshot: Snapshot) {
