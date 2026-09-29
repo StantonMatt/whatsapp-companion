@@ -21,6 +21,20 @@ try {
   for (const page of [local,remote]) await page.evaluate(() => { window.dragEvents=[]; for(const name of ['pointerdown','dragstart','dragenter','dragover','drop','dragend']) document.addEventListener(name, event => { if(window.dragEvents.length<30)window.dragEvents.push({type:name,x:event.clientX,y:event.clientY,trust:event.isTrusted,types:event.dataTransfer?[...event.dataTransfer.types]:[]}); },true); });
   const source = local.getByRole('button', { name: /^Edit sticker/ });
   const preview = local.getByRole('dialog', { name: 'Send to Alex', exact: true });
+  const picker = remote.locator('[data-testid="expressions-panel"]');
+  const pickerTrigger = remote.getByRole('button', { name: 'Emojis, GIFs, Stickers', exact: true });
+  const assertPickerFits = async (side = 'left') => {
+    await expect.poll(async () => {
+      const bounds = await picker.boundingBox();
+      const { left, right, width } = await app.evaluate(({ BrowserWindow }) => {
+        const w = BrowserWindow.getAllWindows()[0], overlay = w.contentView.children[1].getBounds();
+        const zoom = w.contentView.children[0].webContents.getZoomFactor();
+        return { left: overlay.x / zoom, right: (overlay.x + overlay.width) / zoom, width: w.getContentSize()[0] / zoom };
+      });
+      const rail = await remote.locator('#pane-side').boundingBox();
+      return !!bounds && bounds.width >= 320 && bounds.x >= (side === 'left' ? right : rail.x) + 7 && bounds.x + bounds.width <= (side === 'left' ? width : left) - 7;
+    }).toBe(true);
+  };
   const drag = async (target = '#main footer') => {
     await source.scrollIntoViewIfNeeded();
     const src = await source.boundingBox(), dst = await remote.locator(target).boundingBox();
@@ -54,14 +68,46 @@ try {
   await drag();
   await expect(preview).toBeVisible();
   await expect(preview.getByRole('button', { name: 'Send sticker', exact: true })).toBeEnabled({ timeout: 15000 });
+  await assertPickerFits();
   expect(await remote.evaluate(() => window.fixtureStickerSent)).toEqual([]);
   await expect(editor).toHaveText('Keep this unsent draft');
   await mkdir('.local/screenshots', { recursive: true });
   await local.screenshot({ path: '.local/screenshots/sticker-drag-preview.png' });
   await local.keyboard.press('Escape');
   await expect(preview).toHaveCount(0); await expect(local.locator('aside')).toBeVisible();
+  await expect(picker).toHaveCount(0);
   expect(await remote.evaluate(() => window.fixtureStickerSent)).toEqual([]);
   console.log('PASS real drag across native views previews the original sticker, preserves the draft and Escape cancels');
+
+  await pickerTrigger.click();
+  const edge = await app.evaluate(({ BrowserWindow }) => { const b = BrowserWindow.getAllWindows()[0].contentView.children[1].getBounds(); return b.x + b.width; });
+  expect(await picker.evaluate((el, edge) => new Promise(resolve => {
+    const start = performance.now(); let fits = true;
+    const frame = () => { const r = el.getBoundingClientRect(); fits &&= r.left >= edge + 7 && r.right <= innerWidth - 7;
+      if (performance.now() - start < 300) requestAnimationFrame(frame); else resolve(fits); };
+    requestAnimationFrame(frame);
+  }), edge)).toBe(true);
+  await assertPickerFits();
+  for (const width of [880, 1500, 1280]) {
+    await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setContentSize(width, 832), width);
+    await assertPickerFits();
+  }
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: null }));
+  await expect.poll(() => picker.evaluate(el => ({ translate: el.parentElement.style.translate, maxWidth: el.parentElement.style.maxWidth }))).toEqual({ translate: '', maxWidth: '560px' });
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'chat' }));
+  for (const width of [880, 1100, 1280, 1500, 1280]) {
+    await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setContentSize(width, 832), width);
+    await assertPickerFits('right');
+  }
+  console.log('PASS right-side chat settings leave the native picker unobscured at narrow and wide widths');
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  await assertPickerFits();
+  await drag(); await expect(preview.getByRole('button', { name: 'Send sticker', exact: true })).toBeEnabled({ timeout: 15000 });
+  await preview.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(picker).toBeVisible(); await assertPickerFits();
+  await pickerTrigger.click(); await expect(picker).toHaveCount(0);
+  expect(await remote.evaluate(() => window.fixtureStickerSent)).toEqual([]);
+  console.log('PASS native picker stays beside the library on resize, restores its layout on close and preserves a manually opened picker');
 
   await drag(); await expect(preview.getByRole('button', { name: 'Send sticker', exact: true })).toBeEnabled({ timeout: 15000 });
   const nonce = await local.evaluate(async () => (await window.companion.status()).stickerPreview.nonce);
@@ -70,6 +116,7 @@ try {
   expect(await remote.evaluate(() => window.fixtureStickerSent[0])).toEqual(await remote.evaluate(() => ({ source: window.fixtureStickerSource, peer: '123456@c.us' })));
   await expect(editor).toHaveText('Keep this unsent draft');
   await expect(local.getByRole('dialog')).toHaveCount(0);
+  await expect(picker).toHaveCount(0);
   const replay = await local.evaluate(nonce => window.companion.action({ type: 'sendSticker', nonce }), nonce);
   expect(replay.ok).toBe(false);
   expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(1);
@@ -104,6 +151,7 @@ try {
   await drag(); await expect(preview.getByRole('button', { name: 'Send sticker', exact: true })).toBeEnabled({ timeout: 15000 });
   await remote.evaluate(() => document.querySelector('#group').click());
   await expect(local.getByRole('dialog')).toHaveCount(0);
+  await expect(picker).toHaveCount(0);
   expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(1);
   console.log('PASS changing chats cancels a pending sticker preview');
 

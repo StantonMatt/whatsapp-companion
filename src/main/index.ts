@@ -62,6 +62,13 @@ async function start() {
   win.contentView.addChildView(remote);
   win.contentView.addChildView(controls);
   controls.setVisible(false);
+  let pendingChrome = false;
+  const syncChrome = () => {
+    if (remote.webContents.isDestroyed()) return;
+    const bounds = controls.getBounds(), zoom = remote.webContents.getZoomFactor();
+    remote.webContents.send('companion:command', { type: 'chrome', panel, pending: pendingChrome,
+      panelBounds: panel ? { left: bounds.x / zoom, right: (bounds.x + bounds.width) / zoom } : null });
+  };
   const layout = () => {
     if (win.isDestroyed() || remote.webContents.isDestroyed()) return;
     const { width, height } = win.contentView.getBounds();
@@ -70,6 +77,7 @@ async function start() {
     const panelWidth = Math.min(width - rail, Math.max(380, panel === 'chat' ? 430 : chrome.listWidth));
     controls.setBounds({ x: panel === 'chat' ? width - panelWidth : rail, y: 0, width: panelWidth, height });
     controls.setVisible(panel !== null);
+    syncChrome();
   };
   // KDE can emit window resize/maximize before committing the content area's new size.
   // Follow the actual parent view bounds, including maximize, restore and fullscreen.
@@ -88,7 +96,7 @@ async function start() {
     sequence++;
     if (panel === 'chat' && panelChat !== assistant.snapshot.settingsId) { panel = null; panelChat = null; layout(); }
     const next = status();
-    if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'chrome', panel, pending: Boolean(assistant.pending) });
+    pendingChrome = Boolean(assistant.pending); syncChrome();
     controls.webContents.send('companion:status', statusUpdate(next, lastState));
     lastState = next.state;
   };

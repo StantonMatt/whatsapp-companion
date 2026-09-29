@@ -112,3 +112,92 @@ test('a short initial sticker batch may grow before the full favorites grid is r
     expect(events).toContainEqual({ type: 'stickerPrepared', nonce: ticket.nonce, found: true });
   } finally { connector.stop(); }
 });
+
+function ownedPicker(delay = 0) {
+  const context = setup();
+  const panel = document.querySelector<HTMLElement>('[data-testid="expressions-panel"]')!;
+  panel.remove();
+  const trigger = document.createElement('button');
+  trigger.setAttribute('aria-label', 'Emojis, GIFs, Stickers');
+  trigger.checkVisibility = () => true;
+  trigger.getBoundingClientRect = context.button.getBoundingClientRect;
+  const toggle = vi.fn(() => {
+    if (panel.isConnected) panel.remove();
+    else if (delay) setTimeout(() => document.body.append(panel), delay);
+    else document.body.append(panel);
+  });
+  trigger.addEventListener('click', toggle); document.querySelector('footer')!.append(trigger);
+  return { ...context, panel, toggle };
+}
+test.each(['cancel', 'send', 'unavailable'])('a picker opened for lookup closes after %s', async outcome => {
+  const { connector, panel, toggle, click, snapshot } = ownedPicker();
+  try {
+    const task = connector.prepare(ticket);
+    if (outcome === 'unavailable') snapshot.revision = 'changed';
+    await vi.advanceTimersByTimeAsync(100); await task;
+    if (outcome === 'cancel') connector.cancel();
+    if (outcome === 'send') await connector.send(ticket, Date.now() + 5000);
+    expect(panel.isConnected).toBe(false); expect(toggle).toHaveBeenCalledTimes(2);
+    expect(click).toHaveBeenCalledTimes(outcome === 'send' ? 1 : 0);
+  } finally { connector.stop(); }
+});
+test('cancelling during an asynchronous open closes the late picker without sending', async () => {
+  const { connector, panel, toggle, click, events } = ownedPicker(150);
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(50); connector.cancel();
+    await vi.advanceTimersByTimeAsync(250); await task;
+    expect(panel.isConnected).toBe(false); expect(toggle).toHaveBeenCalledTimes(2);
+    expect(click).not.toHaveBeenCalled(); expect(events).toEqual([]);
+  } finally { connector.stop(); }
+});
+test('a newer lookup shares an opening picker without a stale cancellation closing it', async () => {
+  const { connector, panel, toggle, events } = ownedPicker(150);
+  try {
+    const older = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(50);
+    const newer = connector.prepare({ ...ticket, nonce: 'newer' });
+    await vi.advanceTimersByTimeAsync(500); await Promise.all([older, newer]);
+    expect(panel.isConnected).toBe(true); expect(toggle).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: 'newer', found: true }]);
+    connector.cancel(); expect(panel.isConnected).toBe(false);
+  } finally { connector.stop(); }
+});
+test('cancelling preserves a picker already opened by the user', async () => {
+  const { connector, click } = setup();
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(100); await task;
+    connector.cancel(); expect(document.querySelector('[data-testid="expressions-panel"]')).not.toBeNull();
+    expect(click).not.toHaveBeenCalled();
+  } finally { connector.stop(); }
+});
+
+test.each([false, true])('a picker mounting after two seconds is tracked even when cancelled=%s', async cancelled => {
+  const { connector, panel, toggle, click, events } = ownedPicker(2200);
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(2050);
+    expect(events).toEqual([]);
+    if (cancelled) connector.cancel();
+    await vi.advanceTimersByTimeAsync(350); await task;
+    expect(events).toEqual(cancelled ? [] : [{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+    expect(panel.isConnected).toBe(!cancelled); expect(click).not.toHaveBeenCalled();
+    connector.cancel(); expect(panel.isConnected).toBe(false); expect(toggle).toHaveBeenCalledTimes(2);
+  } finally { connector.stop(); }
+});
+test('a shared opening uses the latest lookup deadline and emits only the current result', async () => {
+  const { connector, panel, toggle, events } = ownedPicker(61_000);
+  try {
+    const older = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(2000);
+    const newer = connector.prepare({ ...ticket, nonce: 'newer' });
+    await vi.advanceTimersByTimeAsync(59_100); await Promise.all([older, newer]);
+    expect(panel.isConnected).toBe(true); expect(toggle).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: 'newer', found: true }]);
+  } finally { connector.stop(); }
+});
+test('a picker that never mounts stops waiting at the lookup deadline', async () => {
+  const { connector, events } = ownedPicker(0);
+  const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Emojis, GIFs, Stickers"]')!;
+  trigger.click = vi.fn();
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(60_100); await task;
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
+  } finally { connector.stop(); }
+});

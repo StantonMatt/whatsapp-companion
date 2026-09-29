@@ -19,8 +19,11 @@ document.querySelector('#sticker').onclick=()=>{const canvas=document.createElem
 window.fixtureStickerSent=[];
 const pickerTrigger=document.createElement('button');pickerTrigger.setAttribute('aria-label','Emojis, GIFs, Stickers');pickerTrigger.textContent='☺';
 pickerTrigger.onclick=()=>{
-  const existing=document.querySelector('[data-testid="expressions-panel"]');if(existing){existing.remove();return;}
-  const picker=document.createElement('ul');picker.dataset.testid='expressions-panel';picker.style.cssText='position:fixed;right:24px;bottom:90px;width:260px;height:210px;background:#242626;border:1px solid #303333;padding:16px;z-index:10';
+  const existing=document.querySelector('#expressions-panel-container');if(existing){existing.remove();return;}
+  // Match WhatsApp's portal/animated wrapper, which naturally overlaps the chat list.
+  const portal=document.createElement('div');portal.id='expressions-panel-container';
+  const wrapper=document.createElement('div');wrapper.style.cssText=`position:fixed;left:${document.querySelector('#main').getBoundingClientRect().left-200}px;bottom:90px;width:560px;max-width:560px;transform:scale(.7);transform-origin:center bottom;overflow:hidden;z-index:10`;
+  const picker=document.createElement('ul');picker.dataset.testid='expressions-panel';picker.style.cssText='margin:0;width:100%;height:210px;background:#242626;border:1px solid #303333;padding:16px';
   for(const [testid,label] of [['expressions-btn-sticker','Stickers selector'],['panel-starred','Favorite'],['panel-recent','Recent']]){
     const tab=document.createElement('button');tab.dataset.testid=testid;tab.setAttribute('aria-label',label);tab.setAttribute('aria-selected','true');tab.textContent=label;picker.append(tab);
   }
@@ -28,8 +31,9 @@ pickerTrigger.onclick=()=>{
     const send=document.createElement('button');send.setAttribute('aria-label','Send sticker');
     const item=document.createElement('span');item.dataset.testid='sticker-item';
     const img=document.createElement('img');img.alt='sticker';img.src=window.fixtureStickerSource;img.width=100;item.append(img);send.append(item);
-    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});picker.remove();};picker.append(send);
+    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});portal.remove();};picker.append(send);
   }
-  document.body.append(picker);
+  wrapper.append(picker);portal.append(wrapper);document.body.append(portal);
+  requestAnimationFrame(()=>{wrapper.style.transition='transform .2s';wrapper.style.transform='scale(1)';});
 };document.querySelector('footer').prepend(pickerTrigger);
 </script></html>

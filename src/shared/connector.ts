@@ -5,7 +5,7 @@ export type RemoteCommand =
   | ({ type: 'armStickerDrag' | 'prepareSticker' } & StickerTicket)
   | ({ type: 'sendSticker'; expiresAt: number } & StickerTicket)
   | { type: 'cancelSticker' }
-  | { type: 'chrome'; panel: Panel; pending: boolean }
+  | { type: 'chrome'; panel: Panel; pending: boolean; panelBounds?: { left: number; right: number } | null }
   | { type: 'clear' }
   | { type: 'suggestion'; key: string; text: string; replace: boolean }
   | { type: 'autoSend'; key: string; text: string; nonce: string; expiresAt: number }

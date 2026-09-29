@@ -1,4 +1,5 @@
 import { StickerTransferConnector } from './sticker-transfer';
+import { StickerPickerLayout } from './sticker-picker-layout';
 import { Navigation } from './navigation';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
 import type { Snapshot, Message } from '../shared/model';
@@ -105,6 +106,7 @@ export function caretAtEnd(editor: HTMLElement): boolean {
 }
 export class DomConnector {
   private stickerTransfer?: StickerTransferConnector;
+  private stickerPickerLayout?: StickerPickerLayout;
   private navigation?: Navigation;
   private composingEditor: HTMLElement | null = null;
   private get composing() { return Boolean(this.composingEditor && this.composingEditor === this.editor()); }
@@ -182,6 +184,7 @@ export class DomConnector {
       atBottom, revision: String(this.revision), activity: this.activityGeneration, editRevision: this.editRevision };
   }
   start() {
+    this.stickerPickerLayout = new StickerPickerLayout(this.doc);
     this.stickerTransfer = new StickerTransferConnector(this.doc, () => this.read(), this.stickerSources, this.emit, this.authorizeSticker);
     this.navigation = new Navigation(this.doc, this.navigationEvent);
     this.host = this.doc.createElement('div'); this.host.id = 'companion-overlay';
@@ -208,6 +211,7 @@ export class DomConnector {
     this.refresh();
   }
   stop() {
+    this.stickerPickerLayout?.stop();
     this.stickerTransfer?.stop();
     this.composingEditor = null;
     this.clear();
@@ -281,6 +285,7 @@ export class DomConnector {
     }
   }
   private refresh() {
+    this.stickerPickerLayout?.refresh();
     const snapshot = this.read(), key = snapshotKey(snapshot);
     this.navigation?.refresh(snapshot.ready);
     const dark = this.navigation?.theme !== 'light';
@@ -333,7 +338,7 @@ export class DomConnector {
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
-    if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); return; }
+    if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
     if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'preview') this.popup.hidden = true; return; }
     if (command.type === 'notice') { if (this.suggestion?.replace) this.clear(); this.popupMode = 'notice'; this.popup.textContent = command.text; this.popup.classList.add('notice'); this.popup.hidden = false; return; }
     if (command.type === 'suggestion') {

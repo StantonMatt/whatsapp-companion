@@ -4,6 +4,7 @@ import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
 import { sameStickerChat, STICKER_DRAG_TYPE, STICKER_DRAG_PREFIX, type StickerTicket } from '../shared/sticker-transfer';
 
 const pickerSelector = '[data-testid="expressions-panel"]';
+const triggerSelector = '#main footer [aria-label="Emojis, GIFs, Stickers"], #main footer [aria-label="Emojis, GIF y stickers"]';
 const visible = (e: HTMLElement) => e.checkVisibility({ visibilityProperty: true }) && e.getBoundingClientRect().width > 0;
 type Match = { image: HTMLImageElement; button: HTMLElement; source: string };
 
@@ -18,6 +19,10 @@ export class StickerTransferConnector {
   private hint: HTMLElement;
   private hideTimer?: ReturnType<typeof setTimeout>;
   private sendGeneration = 0;
+  private openedPicker?: { panel: HTMLElement; trigger: HTMLElement };
+  private openingPicker?: Promise<void>;
+  private openingDeadline = 0;
+  private stopped = false;
   constructor(private doc: Document, private read: () => Snapshot, private hashes: Map<string, string>, private emit: (event: RemoteEvent) => void, private authorize: (nonce: string) => Promise<boolean> = async () => false) {
     this.host = doc.createElement('div'); this.host.id = 'companion-sticker-drop';
     this.host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483644';
@@ -30,8 +35,8 @@ export class StickerTransferConnector {
     doc.addEventListener('dragend', this.hide, true);
   }
   arm(ticket: StickerTicket) { this.cancel(); if (sameStickerChat(ticket.target, this.read())) { this.armed = ticket; this.armExpires = Date.now() + 30_000; } }
-  cancel() { this.sendGeneration++; this.controller?.abort(); this.controller = undefined; this.armed = undefined; this.prepared = undefined; this.hide(); }
-  stop() { this.cancel(); this.doc.removeEventListener('dragenter', this.over, true); this.doc.removeEventListener('dragover', this.over, true); this.doc.removeEventListener('drop', this.drop, true); this.doc.removeEventListener('dragend', this.hide, true); this.host.remove(); }
+  cancel() { this.sendGeneration++; this.controller?.abort(); this.controller = undefined; this.armed = undefined; this.prepared = undefined; this.closeOpenedPicker(); this.hide(); }
+  stop() { this.stopped = true; this.cancel(); this.doc.removeEventListener('dragenter', this.over, true); this.doc.removeEventListener('dragover', this.over, true); this.doc.removeEventListener('drop', this.drop, true); this.doc.removeEventListener('dragend', this.hide, true); this.host.remove(); }
   private hide = () => { clearTimeout(this.hideTimer); this.hint.hidden = true; };
   private insideChat(event: DragEvent) {
     const main = this.doc.querySelector('#main');
@@ -59,6 +64,28 @@ export class StickerTransferConnector {
     this.emit({ type: 'stickerDrop', nonce: ticket.nonce });
   };
   private picker() { return this.doc.querySelector<HTMLElement>(pickerSelector); }
+  private closeOpenedPicker() {
+    const opened = this.openedPicker; this.openedPicker = undefined;
+    // Do not toggle a closed/replaced picker, or one the user opened beforehand.
+    if (opened && this.picker() === opened.panel && this.doc.querySelector(triggerSelector) === opened.trigger && visible(opened.trigger)) opened.trigger.click();
+  }
+  private async openPicker(deadline: number) {
+    if (this.openingPicker) { this.openingDeadline = Math.max(this.openingDeadline, deadline); return this.openingPicker; }
+    if (this.picker()) return;
+    const trigger = this.doc.querySelector<HTMLElement>(triggerSelector);
+    if (!trigger || !visible(trigger)) return;
+    this.openingDeadline = deadline;
+    // Opening can mount asynchronously. Finish observing that mount even after
+    // cancellation so a late picker is closed, and share it with a newer lookup.
+    this.openingPicker = (async () => {
+      trigger.click();
+      while (!this.stopped && Date.now() < this.openingDeadline && !this.picker() && trigger.isConnected && this.doc.querySelector(triggerSelector) === trigger) await new Promise(resolve => setTimeout(resolve, 100));
+      const panel = this.picker();
+      if (panel && this.doc.querySelector(triggerSelector) === trigger) this.openedPicker = { panel, trigger };
+    })();
+    try { await this.openingPicker; }
+    finally { this.openingPicker = undefined; if (!this.controller) this.closeOpenedPicker(); }
+  }
   private valid(ticket: StickerTicket, signal: AbortSignal) { return !signal.aborted && sameStickerChat(ticket.target, this.read()); }
   private async wait(ticket: StickerTicket, signal: AbortSignal, ms: number) {
     await new Promise<void>(resolve => { const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); }; const timer = setTimeout(finish, ms); signal.addEventListener('abort', finish, { once: true }); });
@@ -113,16 +140,13 @@ export class StickerTransferConnector {
   async prepare(ticket: StickerTicket) {
     this.cancel(); const controller = new AbortController(); this.controller = controller;
     const signal = controller.signal;
+    const lookupDeadline = Date.now() + 60_000;
     const deadline = setTimeout(() => controller.abort(), 60_000);
     let match: Match | undefined;
     try {
       if (!this.valid(ticket, signal)) return;
-      if (!this.picker()) {
-        const open = this.doc.querySelector<HTMLElement>('#main footer [aria-label="Emojis, GIFs, Stickers"], #main footer [aria-label="Emojis, GIF y stickers"]');
-        if (!open || !visible(open)) return;
-        open.click();
-        for (let i = 0; i < 20 && !this.picker(); i++) await this.wait(ticket, signal, 100);
-      }
+      await this.openPicker(lookupDeadline);
+      if (!this.picker() || !this.valid(ticket, signal)) return;
       const stickerTab = this.picker()?.querySelector<HTMLElement>('[data-testid="expressions-btn-sticker"]');
       if (stickerTab && stickerTab.getAttribute('aria-selected') !== 'true') { stickerTab.click(); await this.wait(ticket, signal, 200); }
       // Search the currently open pack first, then favorites and recents. No store purchases/downloads.
@@ -163,6 +187,7 @@ export class StickerTransferConnector {
       clearTimeout(deadline);
       if (this.controller === controller) {
         this.controller = undefined;
+        if (!this.prepared || !this.valid(ticket, signal)) this.closeOpenedPicker();
         this.emit({ type: 'stickerPrepared', nonce: ticket.nonce, found: Boolean(this.prepared && this.valid(ticket, signal)) });
       }
     }
@@ -180,6 +205,7 @@ export class StickerTransferConnector {
     } catch {
       // Lost authorization cannot trigger a click or retry.
     }
+    if (generation === this.sendGeneration) this.closeOpenedPicker();
     this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked });
   }
 }

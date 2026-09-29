@@ -195,3 +195,12 @@ The same final main-process authorization now protects manual sticker sending. C
 Trusted keyboard use of native controls and ordinary Tab navigation also counts as takeover, without intercepting normal keyboard behavior. Reopening refinement options or replacing a preview with a notice discards its stored replacement, so Tab cannot accept an invisible old refinement. Unit and desktop regressions exercise these paths.
 
 The latest release candidate passes build, 217 unit tests and all 60 Electron desktop scenarios, including both delayed-command cancellation regressions. Linux packaging passed and bundled code/assets match the tested build. One desktop rerun was terminated without an assertion failure; a complete subsequent run passed. No live message or sticker was sent.
+
+
+## Native sticker picker overlap correction
+
+WhatsApp positions its expressions picker in a portal outside the chat, with a 560-pixel popup that can overlap the chat list. Companion’s library is a separate native view, so increasing the picker’s DOM z-index cannot bring its obscured portion forward. Main now supplies the actual overlaid panel bounds in the remote page’s coordinate space. The connector constrains the native popup to the uncovered area, preserving its own placement and scale animation. If right-hand chat settings leave less than 320 pixels of chat space, the picker can extend over the uncovered chat list to retain a usable width. Resizing updates the bounds; closing the Companion panel restores the original popup styles.
+
+Sticker lookup tracks pickers it opens itself. Cancellation, unsuccessful lookup and completed sending close those pickers, while a picker opened beforehand by the user remains open. An asynchronous opening is shared with a newer lookup and cleaned up if cancelled before mounting. The original native sticker and one-use main-process authorization remain required for sending; no attachment upload or send-permission change is involved.
+
+Verification: build, 227 unit tests and 62 desktop scenarios passed. The Electron regression fixture now reproduces the real portalled, animated popup overlapping the sidebar. Checks cover animation frames, narrow/wide resizing beside both left and right panels, style restoration, ownership-aware cancellation, picker mounts delayed beyond two seconds, the one-minute lookup deadline and overlapping lookups. Linked-session geometry and rendering were also inspected without sending a live sticker.
