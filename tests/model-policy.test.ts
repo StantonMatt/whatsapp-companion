@@ -69,3 +69,22 @@ test('connection checks use the selected effort', async () => {
   await check.run({ provider: 'openai', model: 'gpt-6-luna', key: 'synthetic', effort: 'high' });
   expect(generator).toHaveBeenCalledWith(expect.objectContaining({ effort: 'high' }));
 });
+
+test('Sol 6.1 is offered only when available, with one alias or newest dated snapshot', () => {
+  expect(currentTextModels('openai', options('gpt-6.1-sol', 'gpt-6.1-sol-2026-09-29', 'gpt-6.1-sol-preview', 'gpt-6.1-sol-codex', 'gpt-6.1-sol-audio', 'gpt-6-sol')))
+    .toEqual(options('gpt-6.1-sol', 'gpt-6-sol'));
+  expect(currentTextModels('openai', options('gpt-6.1-sol-2026-09-28', 'gpt-6.1-sol-2026-09-29'))).toEqual(options('gpt-6.1-sol-2026-09-29'));
+  expect(currentTextModels('openai', options('gpt-6-luna'))).toEqual(options('gpt-6-luna'));
+});
+test('Sol 6.1 has its own saved reasoning range without none and sends the correct API ID', async () => {
+  const state = initialState(); state.models.openai = 'gpt-6-sol';
+  setReasoning(state, 'openai', 'gpt-6-sol', 'none');
+  expect(savedEffort(state, 'openai', 'gpt-6.1-sol')).toBe('low');
+  expect(reasoningLevels('openai', 'gpt-6.1-sol-2026-09-29')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  expect(() => setReasoning(state, 'openai', 'gpt-6.1-sol', 'none')).toThrow('not supported');
+  setReasoning(state, 'openai', 'gpt-6.1-sol', 'max');
+  expect(savedEffort(state)).toBe('none'); expect(state.models.openai).toBe('gpt-6-sol');
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'Hello' }] }] })));
+  await generate({ provider: 'openai', model: 'gpt-6.1-sol', key: 'synthetic', system: 'Reply', input: 'Hello', effort: 'none' }, fetcher);
+  expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toMatchObject({ model: 'gpt-6.1-sol', reasoning: { effort: 'low' } });
+});

@@ -16,3 +16,9 @@ export function resetPreferences(state: State, scope: Scope) {
   if (scope === 'global') state.global = { ...defaults };
   else delete state.chats[scope];
 }
+export function resetStylePreferences(state: State, chatId: string) {
+  const overrides = state.chats[chatId];
+  if (!overrides) return;
+  delete overrides.style; delete overrides.learnFromSent;
+  if (!Object.keys(overrides).length) delete state.chats[chatId];
+}

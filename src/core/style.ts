@@ -1,9 +1,13 @@
 import type { State, Preferences, StyleProfile } from '../shared/model';
 
 // Deliberately extract only aggregate form. Names, phrases, and raw examples are never persisted.
+export const minimumStyleSamples = 5;
+export function styleSamples(examples: string[]) {
+  return examples.map(x => x.trim()).filter(x => x.length >= 3).slice(-100);
+}
 export function learnStyle(examples: string[], source: 'observed' | 'selected', now = Date.now()): StyleProfile | null {
-  const samples = examples.map(x => x.trim()).filter(x => x.length >= 3).slice(-100);
-  if (samples.length < 5) return null;
+  const samples = styleSamples(examples);
+  if (samples.length < minimumStyleSamples) return null;
   const average = Math.round(samples.reduce((n, x) => n + x.split(/\s+/u).length, 0) / samples.length);
   const rate = (re: RegExp) => Math.round(samples.filter(x => re.test(x)).length / samples.length * 100);
   return { description: `Usually writes about ${average} words per message. ${rate(/[.!?]$/u)}% of messages end with punctuation. ${rate(/\p{Extended_Pictographic}/u)}% include emoji. ${rate(/\n/u)}% use multiple lines. ${rate(/^[a-záéíóúñ]/u)}% start in lowercase. Match vocabulary and language to this conversation; do not invent personal details.`, samples: samples.length, updatedAt: now, source };

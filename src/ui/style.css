@@ -111,3 +111,8 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .sticker-preview p { font-size: 13px; line-height: 1.6; color: var(--muted); }
 .sticker-preview .actions { justify-content: flex-end; }
 button.primary { background: var(--green); color: var(--bg); }
+
+.style-details { border-top: 1px solid var(--line); padding-block: 16px; }
+.style-details summary { cursor: pointer; font-size: 13px; }
+.style-details summary:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
+.style-details[open] summary { margin-bottom: 16px; }

@@ -8,8 +8,8 @@ import { Store } from './store';
 import { Conversations } from './conversations';
 import { Vault, promptKey, configuredBackend } from './vault';
 import { Assistant } from './assistant';
-import { setPreferences, resetPreferences } from '../core/settings';
-import { learnStyle } from '../core/style';
+import { setPreferences, resetPreferences, resetStylePreferences } from '../core/settings';
+import { learnStyle, styleSamples, minimumStyleSamples } from '../core/style';
 import { statusUpdate } from '../core/status';
 import { StickerTransfer } from '../core/sticker-transfer';
 import { StickerInbox } from './sticker-inbox';
@@ -90,7 +90,7 @@ async function start() {
     if ((input.control || input.meta) && ['+', '=', '-', '0'].includes(input.key)) event.preventDefault();
   });
   let sequence = 0, lastState: Status['state'] | undefined;
-  const status = (): Status => ({ sequence, panel, stickerLocation, stickerPreview: stickerTransfer.preview, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: assistant.snapshot.ready }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  const status = (): Status => ({ sequence, panel, stickerLocation, stickerPreview: stickerTransfer.preview, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: assistant.snapshot.ready, loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   const publish = () => {
     if (win.isDestroyed() || controls.webContents.isDestroyed()) return;
     sequence++;
@@ -144,7 +144,7 @@ async function start() {
     if (!parsed.success) return { models: [], error: 'Invalid provider.' };
     const provider = parsed.data;
     if (fixture) return { models: currentTextModels(provider, (provider === 'openai'
-      ? ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-luna-2026-05-18', 'gpt-4o', 'text-embedding-3-small', 'gpt-audio']
+      ? ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-sol-2026-09-29', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-luna-2026-05-18', 'gpt-4o', 'text-embedding-3-small', 'gpt-audio']
       : ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-6']).map(id => ({ id, name: id }))) };
     try { return modelCatalog.load(provider, vault.get(provider)); }
     catch (error) { return { models: [], error: error instanceof Error ? error.message : 'Unable to unlock the provider key.' }; }
@@ -159,6 +159,7 @@ async function start() {
       switch (action.type) {
         case 'preferences': store.update(s => setPreferences(s, action.scope, action.patch)); assistant.reconfigure(); break;
         case 'resetPreferences': store.update(s => resetPreferences(s, action.scope)); assistant.reconfigure(); break;
+        case 'resetStylePreferences': store.update(s => resetStylePreferences(s, action.scope)); assistant.reconfigure(); break;
         case 'provider': store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); break;
         case 'reasoning': store.update(s => setReasoning(s, action.provider, action.model, action.effort)); providerChanged(); break;
         case 'key': {
@@ -183,10 +184,11 @@ async function start() {
         case 'autoPermission': assistant.changeAutoPermission(action.chatId, action.permission); break;
         case 'profile': store.update(s => { s.profiles[action.scope] = { description: action.description, samples: 5, updatedAt: Date.now(), source: 'edited' }; }); assistant.reconfigure(); break;
         case 'learn': {
+          if (!action.examples.trim() && (!assistant.snapshot.ready || !action.sourceChatId || action.sourceChatId !== assistant.snapshot.settingsId)) throw new Error('This conversation changed. Reopen Style and try again.');
           if (action.scope !== 'general' && action.scope !== assistant.snapshot.settingsId) throw new Error('Open this conversation to learn its style.');
           const examples = action.examples.trim() ? action.examples.split('\n') : assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text);
           const profile = learnStyle(examples, 'selected');
-          if (!profile) throw new Error('At least five sent messages or selected examples are needed. Add one example per line. Sparse conversations can use your general profile.');
+          if (!profile) throw new Error(action.examples.trim() ? `Add at least ${minimumStyleSamples} messages with three or more characters, one per line.` : `Only ${styleSamples(examples).length} usable sent messages are loaded. Scroll up in WhatsApp to load more; at least ${minimumStyleSamples} are needed.`);
           store.update(s => { s.profiles[action.scope] = profile; }); assistant.reconfigure(); break;
         }
         case 'resetProfile': store.update(s => { delete s.profiles[action.scope]; if (action.scope !== 'general') setPreferences(s, action.scope, { learnFromSent: false }); }); assistant.reconfigure(); break;

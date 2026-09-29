@@ -7,9 +7,9 @@ const key = 'synthetic-key-never-live';
 
 describe('provider model discovery', () => {
   test('OpenAI offers the modern text family and excludes unrelated models; keys stay in request headers', async () => {
-    const fetcher = vi.fn(async () => response({ data: [{ id: 'gpt-6-luna' }, { id: 'text-embedding-3-small' }, { id: 'gpt-6-astra' }, { id: 'gpt-6-luna' }, { id: 'gpt-6-sol' }, { id: 'gpt-4o' }, { id: 'gpt-audio' }] }));
+    const fetcher = vi.fn(async () => response({ data: [{ id: 'gpt-6-luna' }, { id: 'text-embedding-3-small' }, { id: 'gpt-6-astra' }, { id: 'gpt-6-luna' }, { id: 'gpt-6-sol' }, { id: 'gpt-6.1-sol' }, { id: 'gpt-4o' }, { id: 'gpt-audio' }] }));
     const models = await listModels('openai', key, undefined, fetcher);
-    expect(models.map(m => m.id)).toEqual(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
+    expect(models.map(m => m.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']);
     expect(fetcher).toHaveBeenCalledWith('https://api.openai.com/v1/models', expect.objectContaining({ method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${key}` } }));
     expect(JSON.stringify(models)).not.toContain(key);
   });

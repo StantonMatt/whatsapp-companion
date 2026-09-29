@@ -105,7 +105,7 @@ export function initialState(): State {
 export type Status = {
   sequence: number;
   runtimePaused: boolean;
-  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'>;
+  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { loadedSentSamples?: number };
   panel?: Panel; theme?: 'dark' | 'light';
   stickerLocation?: { id: string; state: 'looking' | 'found' | 'missing' | 'unavailable' } | null;
   stickerPreview?: StickerPreview | null;
@@ -116,6 +116,7 @@ export type StatusUpdate = Omit<Status, 'state'> & { state?: Omit<State, 'sticke
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesSchema.partial() }).strict(),
   z.object({ type: z.literal('resetPreferences'), scope: scopeSchema }).strict(),
+  z.object({ type: z.literal('resetStylePreferences'), scope: settingsIdSchema }).strict(),
   z.object({ type: z.literal('provider'), provider: providerSchema, model: modelIdSchema }).strict(),
   z.object({ type: z.literal('reasoning'), provider: providerSchema, model: modelIdSchema, effort: reasoningEffortSchema }).strict(),
   z.object({ type: z.literal('key'), provider: providerSchema, persist: z.boolean() }).strict(),
@@ -124,7 +125,7 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('autoRules'), chatId: chatIdSchema, patch: autoPatchSchema }).strict(),
   z.object({ type: z.literal('autoPermission'), chatId: chatIdSchema, permission: autoPermissionSchema }).strict(),
   z.object({ type: z.literal('profile'), scope: z.union([z.literal('general'), settingsIdSchema]), description: z.string().max(2000) }).strict(),
-  z.object({ type: z.literal('learn'), scope: z.union([z.literal('general'), settingsIdSchema]), examples: z.string().max(20000) }).strict(),
+  z.object({ type: z.literal('learn'), scope: z.union([z.literal('general'), settingsIdSchema]), examples: z.string().max(20000), sourceChatId: settingsIdSchema.optional() }).strict(),
   z.object({ type: z.literal('resetProfile'), scope: z.union([z.literal('general'), settingsIdSchema]) }).strict(),
   z.object({ type: z.literal('sticker'), id: z.string().regex(/^[a-f0-9]{64}$/), searchTerms: searchTermsSchema }).strict(),
   z.object({ type: z.literal('forgetSticker'), id: z.string().max(64) }).strict(),

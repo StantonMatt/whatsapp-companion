@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission } from '../shared/model';
 import { resolveSettings } from '../core/settings';
-import { styleFor } from '../core/style';
+import { minimumStyleSamples, styleSamples } from '../core/style';
 import { reasoningLevels, savedEffort } from '../core/model-policy';
 import type { Act } from './index';
 
@@ -39,9 +39,6 @@ function ReplySettings({ status, act, scope }: { status: Status; act: Act; scope
     <Choice label="Emoji" value={values.emoji} options={['match', 'none', 'light']} note={inherited('emoji')} onChange={v => patch({ emoji: v as Preferences['emoji'] })}/>
     <TextSetting key={`${scope}-language-${values.language}`} label="Language" value={values.language} note={inherited('language')} save={value => act({ type: 'preferences', scope, patch: { language: value } })}/>
     <TextSetting key={`${scope}-instructions-${values.instructions}`} label="Custom instructions" value={values.instructions} multiline note={inherited('instructions')} save={value => act({ type: 'preferences', scope, patch: { instructions: value } })}/>
-    <Choice label="Match my writing style" value={values.style} options={['off', 'general', 'conversation']} note={inherited('style')} onChange={v => patch({ style: v as Preferences['style'] })}/>
-    <Toggle label="Learn style from my loaded sent messages" checked={values.learnFromSent} onChange={v => patch({ learnFromSent: v })} note={inherited('learnFromSent')}/>
-    <p className="hint">Observation applies only in conversation style mode. Only aggregate writing traits are saved. General style is created from examples you explicitly select.</p>
     <button onClick={() => void act({ type: 'resetPreferences', scope })}>{scope === 'global' ? 'Restore initial defaults' : 'Reset all to global settings'}</button>
   </>;
 }
@@ -115,15 +112,45 @@ function ReasoningSlider({ status, act }: { status: Status; act: Act }) {
 }
 function StyleSettings({ status, act, scope }: { status: Status; act: Act; scope: string }) {
   const [examples, setExamples] = useState('');
-  const profile = status.state.profiles[scope];
-  const resolved = status.chat.settingsId ? styleFor(status.state, resolveSettings(status.state, status.chat.kind, status.chat.settingsId).values, status.chat.settingsId) : null;
+  const [busy, setBusy] = useState(false);
+  const global = scope === 'general', preferencesScope = global ? 'global' : scope;
+  const { values, sources } = resolveSettings(status.state, status.chat.kind, global ? null : scope);
+  const inherited = (key: keyof Preferences) => global ? undefined : sources[key] === 'conversation' ? 'Custom for this chat' : 'Use global setting';
+  const profile = status.state.profiles[scope], generalProfile = status.state.profiles.general;
+  const loaded = status.chat.loadedSentSamples ?? 0;
+  const learn = async (examples: string) => {
+    setBusy(true);
+    try { if (await act({ type: 'learn', scope, examples, ...(!examples.trim() && status.chat.settingsId ? { sourceChatId: status.chat.settingsId } : {}) })) setExamples(''); }
+    finally { setBusy(false); }
+  };
+  const stateText = values.style === 'off' ? 'Style matching is off.'
+    : values.style === 'general' ? generalProfile ? 'Using your general style.' : 'No general style saved yet.'
+    : global ? 'Each conversation uses its own writing style.'
+    : profile ? 'Using the style saved for this chat.'
+    : generalProfile ? 'No style learned for this chat yet. Using your general style for now.' : 'No style learned for this chat yet. Replies still use the conversation context you allow.';
   return <>
-
-    <p className="hint">Profiles describe writing habits, not private facts. Raw examples stay in memory only. General profiles can be reused across chats; conversation profiles never leave their own chat.</p>
-    {resolved?.fallback && <p className="notice">This conversation has sparse history. It uses the approved general profile when available.</p>}
-    {profile ? <><p className="hint">{profile.samples} samples · {profile.source} · {new Date(profile.updatedAt).toLocaleDateString()}</p><TextSetting key={`${scope}-${profile.updatedAt}`} label="Writing traits" value={profile.description} multiline save={description => act({ type: 'profile', scope, description })}/><button onClick={() => void act({ type: 'resetProfile', scope })}>{scope === 'general' ? 'Reset profile' : 'Reset profile and stop learning'}</button></> : <p className="empty-small">No profile yet. Style matching is off until enabled in Replies.</p>}
-    <label>Selected examples<textarea rows={6} value={examples} maxLength={20000} onChange={e => setExamples(e.target.value)} placeholder="At least five of your messages, one per line"/></label>
-    <div className="actions"><button disabled={!examples.trim()} onClick={async () => { if (await act({ type: 'learn', scope, examples })) setExamples(''); }}>Learn from examples</button><button disabled={!status.chat.ready} onClick={() => void act({ type: 'learn', scope, examples: '' })}>Use my loaded sent messages</button></div>
+    <Choice label="Match my writing style" value={values.style} options={['off', 'general', 'conversation']} labels={{ general: 'General style', conversation: global ? 'Match each conversation' : 'This conversation' }} note={inherited('style')} onChange={style => void act({ type: 'preferences', scope: preferencesScope, patch: { style: style as Preferences['style'] } })}/>
+    <p className="hint" role="status">{stateText}</p>
+    {values.style === 'conversation' && <>
+      <Toggle label="Learn automatically from my messages" checked={values.learnFromSent} note={inherited('learnFromSent')} onChange={learnFromSent => void act({ type: 'preferences', scope: preferencesScope, patch: { learnFromSent } })}/>
+      <p className="hint">Learns from your sent messages as you open and scroll through chats. Each chat’s style stays separate.{profile && profile.source !== 'observed' && !global ? ' Your saved style is kept until you reset it.' : ''}</p>
+    </>}
+    {!global && values.style === 'general' ? <p className="hint">Edit your general style in global AI settings → Style.</p> : <>
+      {global && <p className="hint">{values.style === 'conversation' ? 'A general style is optional and can help chats without their own style.' : 'Your general style can be used across conversations.'}</p>}
+      <button className="primary" disabled={busy || !status.chat.ready || !status.chat.settingsId || loaded < minimumStyleSamples} onClick={() => void learn('')}>{global ? 'Learn general style from this chat' : 'Learn from this chat'}</button>
+      <p className="hint" data-testid="style-history">{status.chat.ready ? `${loaded} sent message${loaded === 1 ? '' : 's'} loaded${loaded < minimumStyleSamples ? ` · ${minimumStyleSamples} needed` : ''}. Scroll up in WhatsApp to load older messages.` : 'Open a conversation to learn from your sent messages.'}</p>
+      <p className="hint">Style learning runs on this computer and saves only writing habits.</p>
+      {profile && <details className="style-details"><summary>View or edit saved style</summary>
+        <p className="hint">{profile.samples} messages · {new Date(profile.updatedAt).toLocaleDateString()}</p>
+        <TextSetting key={`${scope}-${profile.updatedAt}`} label="Writing traits" value={profile.description} multiline save={description => act({ type: 'profile', scope, description })}/>
+        <button onClick={() => void act({ type: 'resetProfile', scope })}>{global ? 'Reset profile' : 'Reset profile and stop learning'}</button>
+      </details>}
+      <details className="style-details"><summary>Add examples manually</summary>
+        <label>Selected examples<textarea rows={4} value={examples} maxLength={20000} onChange={e => setExamples(e.target.value)} placeholder="Five or more of your messages, one per line"/></label>
+        <button disabled={busy || styleSamples(examples.split('\n')).length < minimumStyleSamples} onClick={() => void learn(examples)}>Learn from examples</button>
+      </details>
+    </>}
+    {!global && <button className="quiet" onClick={() => void act({ type: 'resetStylePreferences', scope })}>Use global style settings</button>}
   </>;
 }
 function AutoSettings({ status, act }: { status: Status; act: Act }) {
@@ -148,9 +175,9 @@ function AutoSettings({ status, act }: { status: Status; act: Act }) {
 function Toggle({ label, checked, onChange, note, preserveAuto }: { label: string; checked: boolean; onChange: (value: boolean) => void; note?: string; preserveAuto?: boolean }) {
   return <label className="toggle" data-preserve-auto={preserveAuto ? '' : undefined}><span>{label}{note && <small>{note}</small>}</span><input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}/></label>;
 }
-function Choice({ label, value, options, onChange, note }: { label: string; value: string; options: string[]; onChange: (value: string) => void; note?: string }) {
+function Choice({ label, value, options, onChange, note, labels }: { label: string; value: string; options: string[]; onChange: (value: string) => void; note?: string; labels?: Record<string, string> }) {
   const names: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', match: 'Match conversation', conversation: 'This conversation' };
-  return <label className="choice-setting"><span>{label}{note && <small>{note}</small>}</span><select value={value} onChange={e => onChange(e.target.value)}>{options.map(option => <option key={option} value={option}>{names[option] ?? option[0].toUpperCase() + option.slice(1)}</option>)}</select></label>;
+  return <label className="choice-setting"><span>{label}{note && <small>{note}</small>}</span><select value={value} onChange={e => onChange(e.target.value)}>{options.map(option => <option key={option} value={option}>{labels?.[option] ?? names[option] ?? option[0].toUpperCase() + option.slice(1)}</option>)}</select></label>;
 }
 function TextSetting({ label, value, save, multiline, note }: { label: string; value: string; save: (value: string) => Promise<boolean>; multiline?: boolean; note?: string }) {
   const [text, setText] = useState(value);

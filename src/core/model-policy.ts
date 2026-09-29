@@ -2,11 +2,12 @@ import type { ModelOption, Provider, ReasoningEffort, State } from '../shared/mo
 
 const full: ReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 const thinking = full.slice(1);
-// General-purpose text models in the official provider catalogs, checked 2026-09-28.
+// General-purpose text models in the official provider catalogs, checked 2026-09-29.
 // Keep this explicit: a prefix match would admit audio, coding-only and preview variants.
 const current: Record<Provider, { id: string; efforts: ReasoningEffort[] }[]> = {
   openai: [
     { id: 'gpt-6-astra', efforts: thinking },
+    { id: 'gpt-6.1-sol', efforts: thinking },
     { id: 'gpt-6-sol', efforts: full },
     { id: 'gpt-6-luna', efforts: full }
   ],

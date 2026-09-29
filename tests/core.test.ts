@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { initialState, emptySnapshot, defaultAuto, actionSchema, stickerSchema, type Snapshot } from '../src/shared/model';
-import { resolveSettings, setPreferences, resetPreferences } from '../src/core/settings';
-import { learnStyle, styleFor } from '../src/core/style';
+import { resolveSettings, setPreferences, resetPreferences, resetStylePreferences } from '../src/core/settings';
+import { learnStyle, styleFor, styleSamples } from '../src/core/style';
 import { SuggestionGate } from '../src/core/suggestions';
 import { autoDecision, autoSendExpiry } from '../src/core/auto-reply';
 import { searchStickers, upsertSticker } from '../src/core/stickers';
@@ -651,4 +651,20 @@ describe('suggestion recovery', () => {
     const request = { provider: 'openai' as const, model: 'configured-model', key: 'synthetic', system: 'Test', input: 'Test' };
     await expect(generate(request, (async () => new Response('Private error body', { status })) as typeof fetch)).rejects.toMatchObject({ retryable });
   });
+});
+
+test('style availability counts only usable examples, using the same threshold as learning', () => {
+  const examples = ['  ', 'Hi', 'yes', ' Thanks! ', 'See you soon', 'Sounds lovely', 'Let me check'];
+  expect(styleSamples(examples)).toHaveLength(5); expect(learnStyle(examples, 'selected')?.samples).toBe(5);
+  expect(styleSamples(Array(110).fill('Hello'))).toHaveLength(100);
+});
+test('resetting chat style restores inheritance without erasing reply settings or learned profiles', () => {
+  const state = initialState(); state.global.style = 'general';
+  setPreferences(state, chat, { style: 'conversation', learnFromSent: true, tone: 'professional', shareContext: false });
+  state.profiles[chat] = { description: 'Own profile', samples: 5, source: 'selected', updatedAt: 1 };
+  resetStylePreferences(state, chat);
+  expect(state.chats[chat]).toEqual({ tone: 'professional', shareContext: false });
+  expect(resolveSettings(state, 'direct', chat)).toMatchObject({ values: { style: 'general', learnFromSent: false }, sources: { style: 'global', learnFromSent: 'global', tone: 'conversation' } });
+  expect(state.profiles[chat].description).toBe('Own profile');
+  setPreferences(state, group, { style: 'off' }); resetStylePreferences(state, group); expect(state.chats[group]).toBeUndefined();
 });
