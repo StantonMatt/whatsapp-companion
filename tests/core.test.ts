@@ -489,3 +489,60 @@ describe('real provider request formats and safe failures', () => {
     await expect(generate(request, (async () => { throw new Error(request.key); }) as typeof fetch)).rejects.toThrow('Unable to connect');
   });
 });
+
+describe('refinement source', () => {
+  function setup() {
+    const store = new Store(directory()); store.update(s => { s.global.shareContext = true; });
+    const commands: RemoteCommand[] = [];
+    const generator = vi.fn<typeof generate>().mockResolvedValueOnce('An offered reply').mockResolvedValue('A refined reply');
+    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const offered = () => commands.filter((c): c is Extract<RemoteCommand, { type: 'suggestion' }> => c.type === 'suggestion').at(-1)!;
+    return { assistant, generator, commands, offered };
+  }
+  test('refines the offered reply without inserting it or granting send permission', async () => {
+    const { assistant, generator, commands, offered } = setup();
+    try {
+      assistant.receive(snap()); await assistant.request(); const source = offered();
+      await assistant.request('Make it warmer.', false, { key: source.key, suggestionId: source.id });
+      expect(JSON.parse(generator.mock.calls[1][0].input)).toMatchObject({ draft: 'An offered reply', refinement: 'Make it warmer.' });
+      expect(assistant.snapshot.draft).toBe(''); expect(offered()).toMatchObject({ replace: true, text: 'A refined reply', key: source.key });
+      expect(offered().id).not.toBe(source.id); expect(commands.some(c => c.type === 'autoSend')).toBe(false);
+      // A revised suggestion can itself be refined while the actual composer stays empty.
+      const revised = offered(); await assistant.request('Shorter.', false, { key: revised.key, suggestionId: revised.id });
+      expect(JSON.parse(generator.mock.calls[2][0].input).draft).toBe('A refined reply');
+    } finally { assistant.cancel(); }
+  });
+  test('a typed draft wins over a continuation and can be refined from a middle caret', async () => {
+    const { assistant, generator, offered } = setup();
+    try {
+      assistant.receive(snap({ draft: 'My entire written draft' })); await assistant.request(); const source = offered();
+      assistant.receive({ ...assistant.snapshot, caretAtEnd: false });
+      await assistant.request('Shorter.', false, { key: source.key, suggestionId: source.id });
+      expect(JSON.parse(generator.mock.calls[1][0].input).draft).toBe('My entire written draft');
+    } finally { assistant.cancel(); }
+  });
+  test.each(['dismiss', 'chat', 'messages', 'draft', 'settings', 'wrong-id'])('never refines an old suggestion after %s', async change => {
+    const { assistant, generator, offered } = setup();
+    try {
+      assistant.receive(snap()); await assistant.request(); const source = offered();
+      if (change === 'dismiss') assistant.dismiss();
+      if (change === 'chat') assistant.receive(snap({ chatId: group }));
+      if (change === 'messages') assistant.receive(snap({ messages: [{ id: 'new', text: 'Different message', outgoing: false }] }));
+      if (change === 'draft') assistant.receive(snap({ draft: 'New text' }));
+      if (change === 'settings') assistant.reconfigure();
+      await assistant.request('Shorter.', false, { key: source.key, suggestionId: change === 'wrong-id' ? 'unrecognized' : source.id });
+      expect(generator).toHaveBeenCalledTimes(1);
+    } finally { assistant.cancel(); }
+  });
+  test('editing cancels refinement even when the provider ignores its abort signal', async () => {
+    const { assistant, generator, commands, offered } = setup();
+    let finish!: (text: string) => void;
+    try {
+      assistant.receive(snap()); await assistant.request(); const source = offered();
+      generator.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      const work = assistant.request('Shorter.', false, { key: source.key, suggestionId: source.id });
+      assistant.activity(true); finish('Stale refinement'); await work;
+      expect(commands.some(c => c.type === 'suggestion' && c.text === 'Stale refinement')).toBe(false);
+    } finally { assistant.cancel(); }
+  });
+});

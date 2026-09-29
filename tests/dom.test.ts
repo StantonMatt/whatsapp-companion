@@ -406,3 +406,44 @@ test('a quoted-message suggestion survives main-process schema validation and di
     expect(connector['ghost'].textContent).toBe('Thanks for sharing!');
   } finally { connector.stop(); }
 });
+
+test('an empty assistance menu becomes suggestion refinement when the ghost reply arrives', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = '';
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); connector['openPopup']();
+    expect(connector['popup'].getAttribute('aria-label')).toBe('Reply assistance');
+    expect(connector['popup'].querySelector('input')).toBeNull();
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), id: '00000000-0000-4000-8000-000000000001', text: 'The visible suggestion', replace: false });
+    expect(connector['popup'].getAttribute('aria-label')).toBe('Refine suggestion');
+    expect(connector['popup'].querySelectorAll('.action')).toHaveLength(4);
+    expect(connector['ghost'].textContent).toBe('The visible suggestion');
+    expect(editor.textContent).toBe('');
+  } finally { connector.stop(); }
+});
+test('typing during pending refinement hides it and rejects a queued result', async () => {
+  vi.useFakeTimers(); const editor = fixture();
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+    connector.command({ type: 'refining', key }); expect(connector['popup'].hidden).toBe(false);
+    connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+    expect(connector['popup'].hidden).toBe(true); expect(connector['button'].getAttribute('aria-expanded')).toBe('false');
+    connector.command({ type: 'suggestion', key, text: 'Stale result', replace: true });
+    expect(connector['popup'].hidden).toBe(true); expect(editor.textContent).toBe('A draft');
+  } finally { connector.stop(); }
+});
+
+test('reopening refinement of an empty-composer result keeps that text visible as a ghost', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = '';
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), id: '00000000-0000-4000-8000-000000000002', text: 'A revised reply', replace: true });
+    connector['openPopup']();
+    expect(connector['popup'].getAttribute('aria-label')).toBe('Refine suggestion');
+    connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
+    expect(connector['popup'].hidden).toBe(true); expect(connector['ghost'].textContent).toBe('A revised reply');
+    expect(editor.textContent).toBe('');
+  } finally { connector.stop(); }
+});

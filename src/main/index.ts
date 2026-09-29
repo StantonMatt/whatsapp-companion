@@ -271,7 +271,7 @@ async function start() {
         case 'cancelAuto': assistant.activity(); break;
         case 'activity': { const v = z.object({ type: z.literal('activity'), editing: z.boolean().optional() }).strict().safeParse(raw); if (v.success) assistant.activity(v.data.editing); break; }
         case 'dismiss': assistant.dismiss(); break;
-        case 'request': { const v = z.object({ type: z.literal('request'), instruction: z.string().max(1000).optional() }).strict().safeParse(raw); if (v.success) void assistant.request(v.data.instruction); break; }
+        case 'request': { const v = z.object({ type: z.literal('request'), instruction: z.string().max(1000).optional(), key: z.string().max(1_000_000).optional(), suggestionId: z.string().uuid().optional() }).strict().safeParse(raw); if (v.success) void assistant.request(v.data.instruction, false, v.data); break; }
         case 'result': { const v = z.object({ type: z.literal('result'), nonce: z.string().uuid(), sent: z.boolean() }).strict().safeParse(raw); if (v.success) assistant.result(v.data.nonce, v.data.sent); break; }
         case 'sticker': {
           const v = z.object({ type: z.literal('sticker'), image: stickerImageSchema }).strict().safeParse(raw);

@@ -11,6 +11,17 @@ try {
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const local = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   const remote = await expect.poll(async () => (await app.windows()).find(p => p.url().endsWith('fixture.html'))).not.toBeUndefined().then(async () => (await app.windows()).find(p => p.url().endsWith('fixture.html')));
+  const clickAssistant = async (name) => {
+    // Closed shadow roots remain discoverable to accessibility tools. Click the
+    // actual button with trusted pointer input rather than invoking its handler.
+    const session = await remote.context().newCDPSession(remote);
+    try {
+      let node;
+      await expect.poll(async () => { node = (await session.send('Accessibility.getFullAXTree')).nodes.find(n => n.role?.value === 'button' && n.name?.value === name); return !!node; }).toBe(true);
+      const { model } = await session.send('DOM.getBoxModel', { backendNodeId: node.backendDOMNodeId });
+      await remote.mouse.click((model.border[0] + model.border[4]) / 2, (model.border[1] + model.border[5]) / 2);
+    } finally { await session.detach(); }
+  };
   const openPanel = async (panel, page = remote) => {
     // Closing a native view crosses IPC; wait before toggling the same panel again.
     await expect.poll(async () => (await local.evaluate(() => window.companion.status())).panel).not.toBe(panel);
@@ -198,7 +209,6 @@ try {
   const emptyComposer = remote.getByRole('textbox', { name: 'Type a message' });
   const emptyBounds = await emptyComposer.boundingBox();
   await remote.mouse.click(emptyBounds.x + emptyBounds.width - 17, emptyBounds.y - 16);
-  for (let i = 0; i < 5; i++) await remote.keyboard.press('Shift+Tab');
   await remote.keyboard.press('Enter');
   const accessibility = await remote.context().newCDPSession(remote);
   await expect.poll(async () => (await accessibility.send('Accessibility.getFullAXTree')).nodes.some(node => node.name?.value?.includes('Enable conversation context in AI settings'))).toBe(true);
@@ -240,6 +250,33 @@ try {
   await editor.press('Tab'); await expect(editor).toHaveText('Sounds good, see you then!');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
   console.log('PASS empty composer suggests after the owner sent the latest message');
+  await editor.fill(''); await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
+  let starBounds = await editor.boundingBox();
+  await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
+  await remote.screenshot({ path: '.local/screenshots/refine-suggestion-menu.png' });
+  await clickAssistant('Shorter');
+  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
+  await expect(editor).toHaveText('');
+  await remote.screenshot({ path: '.local/screenshots/refine-suggestion-preview.png' });
+  await clickAssistant('Use text');
+  await expect(editor).toHaveText('That sounds lovely. See you then!');
+  expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
+  console.log('PASS star refines an empty-composer suggestion and Use text inserts without sending');
+  await editor.fill('Translate this written message');
+  starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
+  await clickAssistant('Translate…'); await remote.keyboard.type('Spanish'); await remote.keyboard.press('Enter');
+  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss'); await editor.press('Tab');
+  await expect(editor).toHaveText('That sounds lovely. See you then!');
+  expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
+  console.log('PASS compact translation action accepts a language and Tab replaces the existing draft without sending');
+  await editor.fill('Keep this text while cancelling');
+  starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
+  await clickAssistant('Warmer'); await expect(statusText).toHaveText('Thinking…'); await remote.keyboard.press('Escape');
+  await remote.waitForTimeout(400);
+  await expect(editor).toHaveText('Keep this text while cancelling');
+  await expect(statusText).not.toHaveText('Tab to accept · Esc to dismiss');
+  expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
+  console.log('PASS Escape cancels pending refinement without a late preview or draft changes');
   await editor.fill('Thanks,');
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await openPanel('settings');

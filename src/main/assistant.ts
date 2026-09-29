@@ -25,12 +25,14 @@ export class Assistant {
   private attempt?: { nonce: string; ticket: ReturnType<SuggestionGate['begin']>; expiresAt: number; reservation: { at: number; messageId: string }; approved: boolean };
   private dismissedContext?: string;
   private inlineKey?: string;
+  private offered?: { id: string; key: string; text: string };
   private automatic = false;
   private observed = new Map<string, Map<string, string>>();
   constructor(private store: Store, private vault: Vault, private connector: Connector, private changed: () => void, private fixture: boolean, private generator: typeof generate = generate) {}
   cancel() {
     this.gate.cancel(); clearTimeout(this.timer); clearTimeout(this.sendTimer);
     this.inlineKey = undefined; this.automatic = false;
+    this.offered = undefined;
     this.pending = null; this.attempt = undefined; this.connector.send({ type: 'clear' });
     if (/^(Tab to accept|Thinking|Preparing an automatic|Automatic reply queued)/.test(this.message)) this.message = 'Ready';
   }
@@ -121,27 +123,34 @@ export class Assistant {
     }
     this.changed();
   }
-  async request(instruction?: string, automatic = false) {
+  async request(instruction?: string, automatic = false, source?: { key?: string; suggestionId?: string }) {
     const snapshot = this.snapshot;
+    if (source?.key && source.key !== suggestionKey(snapshot)) return;
     if (!snapshot.ready || (automatic && !snapshot.chatId) || snapshot.composing) return;
     clearTimeout(this.timer); clearTimeout(this.sendTimer); this.pending = null;
     if (snapshot.draftIssue) { this.message = this.draftIssueMessage(snapshot); this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
-    if (!automatic && snapshot.draft && !snapshot.caretAtEnd) { this.inlineKey = undefined; return; }
-    if (instruction && !snapshot.draft.trim()) { this.message = 'Type a draft before refining it.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
+    if (!automatic && !instruction && snapshot.draft && !snapshot.caretAtEnd) { this.inlineKey = undefined; return; }
+    // Only a main-owned suggestion explicitly identified by the visible control
+    // can substitute for an empty draft. Never accept arbitrary page-supplied text.
+    const suggested = source?.suggestionId && this.offered?.id === source.suggestionId && this.offered.key === suggestionKey(snapshot) ? this.offered.text : undefined;
+    const draft = snapshot.draft.trim() ? snapshot.draft : instruction ? suggested ?? '' : snapshot.draft;
+    if (instruction && !draft.trim()) { this.message = 'Write a message or wait for a suggestion, then try again.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
     const preferences = resolveSettings(this.store.state, snapshot.kind, snapshot.settingsId ?? snapshot.chatId).values;
-    if (!preferences.shareContext && !snapshot.draft) { this.message = 'Enable conversation context in AI settings → Replies to suggest a reply, or type a draft to refine.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
+    if (!preferences.shareContext && !draft) { this.message = 'Enable conversation context in AI settings → Replies to suggest a reply, or type a draft to refine.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
     const ticket = this.gate.begin(snapshot, automatic);
     this.automatic = automatic; this.inlineKey = automatic ? undefined : ticket.key;
+    this.offered = undefined;
+    if (instruction && !automatic) this.connector.send({ type: 'refining', key: ticket.key });
     this.message = automatic ? 'Preparing an automatic reply…' : 'Thinking…'; this.changed();
     try {
       const state = this.store.state;
-      const prompt = buildPrompt(state, preferences, snapshot, instruction);
+      const prompt = buildPrompt(state, preferences, { ...snapshot, draft }, instruction);
       let text = this.fixture ? instruction ? 'That sounds lovely. See you then!' : snapshot.draft ? ' see you then!' : 'Sounds good, see you then!' : await this.generator({ provider: state.provider, model: state.models[state.provider], effort: savedEffort(state), key: this.vault.get(state.provider), ...prompt, signal: ticket.signal });
       if (this.fixture) await new Promise(resolve => setTimeout(resolve, 200));
       if (!this.gate.current(ticket, this.snapshot)) return;
       // A continuation may complete a word ("Thank" + "s!") or start a new one. Preserve its spacing.
       if (!snapshot.draft || instruction) text = text.trim();
-      if (!automatic) { this.connector.send({ type: 'suggestion', text, key: ticket.key, replace: Boolean(instruction) }); this.message = 'Tab to accept · Esc to dismiss'; }
+      if (!automatic) { this.offered = { id: randomUUID(), text, key: ticket.key }; this.connector.send({ type: 'suggestion', ...this.offered, replace: Boolean(instruction) }); this.message = 'Tab to accept · Esc to dismiss'; }
       else {
         const rules = this.store.state.auto[snapshot.chatId!] ?? defaultAuto;
         this.pending = { text, due: Date.now() + rules.delaySeconds * 1000 };

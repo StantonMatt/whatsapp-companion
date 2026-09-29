@@ -1,4 +1,5 @@
 import { StickerTransferConnector } from './sticker-transfer';
+import { composerStyle } from './composer-style';
 import { StickerPickerLayout } from './sticker-picker-layout';
 import { Navigation } from './navigation';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
@@ -121,7 +122,7 @@ export class DomConnector {
   private stableSince = 0;
   private lastKey = '';
   private lastContentKey = '';
-  private popupMode: 'refine' | 'preview' | 'notice' = 'notice';
+  private popupMode: 'refine' | 'preview' | 'notice' | 'pending' = 'notice';
   private suggestion?: Extract<RemoteCommand, { type: 'suggestion' }>;
   private dismissedKey?: string;
   private hiddenPlaceholder?: { element: HTMLElement; visibility: string; priority: string };
@@ -191,12 +192,17 @@ export class DomConnector {
     this.host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483646';
     const shadow = this.host.attachShadow({ mode: 'closed' });
     const style = this.doc.createElement('style');
-    style.textContent = `*{box-sizing:border-box}button,input{font:13px system-ui}button{cursor:pointer;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);padding:7px 10px}button:hover{background:var(--hover)}button:focus-visible,input:focus-visible{outline:2px solid #168468;outline-offset:2px}.ghost{position:fixed;color:#79938b;opacity:.8;overflow:hidden;pointer-events:none;white-space:pre-wrap;overflow-wrap:anywhere}.popup{position:fixed;width:310px;padding:12px;background:var(--background);color:var(--ink);box-shadow:0 6px 30px #0002;border:1px solid var(--line);border-radius:14px;pointer-events:auto;font:13px system-ui}.row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}input{width:100%;padding:9px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:8px;margin-bottom:8px}.trigger{position:fixed;pointer-events:auto;padding:4px 9px;color:#21c063}.notice{font:12px system-ui;line-height:1.5}`;
+    style.textContent = composerStyle;
     this.ghost = this.doc.createElement('div'); this.ghost.className = 'ghost'; this.ghost.setAttribute('aria-hidden', 'true');
     this.popup = this.doc.createElement('div'); this.popup.className = 'popup'; this.popup.hidden = true;
     this.popup.setAttribute('role', 'dialog'); this.popup.setAttribute('aria-label', 'Refine reply');
     this.button = this.doc.createElement('button'); this.button.className = 'trigger'; this.button.textContent = '✦'; this.button.title = 'Suggest or refine reply'; this.button.setAttribute('aria-label', 'Suggest or refine reply');
-    this.button.addEventListener('click', event => { if (event.isTrusted) this.openPopup(); });
+    this.button.setAttribute('aria-haspopup', 'dialog'); this.button.setAttribute('aria-expanded', 'false');
+    this.button.addEventListener('click', event => { if (event.isTrusted) {
+      if (!this.popup.hidden && this.popupMode === 'pending') { this.dismissPopup(); this.editor()?.focus(); }
+      else if (!this.popup.hidden && this.popupMode === 'refine') { this.hidePopup(); this.editor()?.focus(); }
+      else this.openPopup();
+    } });
     shadow.append(style, this.ghost, this.popup, this.button); this.doc.documentElement.append(this.host);
     this.doc.addEventListener('keydown', this.keydown, true);
     this.doc.addEventListener('beforeinput', this.beforeInput, true);
@@ -230,7 +236,7 @@ export class DomConnector {
   };
   private takeover(editing = false) {
     this.activityGeneration++;
-    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'preview') this.popup.hidden = true; }
+    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'preview' || this.popupMode === 'pending') this.hidePopup(); }
     this.emit({ type: 'activity', editing });
   }
   private activity = (event: Event) => { if (event.isTrusted && !this.inserting) this.takeover(); };
@@ -239,7 +245,9 @@ export class DomConnector {
   };
   private pointer = (event: Event) => {
     if (!event.isTrusted) return;
-    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event) && this.popupMode !== 'preview') this.popup.hidden = true;
+    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event) && this.popupMode !== 'preview') {
+      if (!this.popup.hidden && this.popupMode === 'pending') this.dismissPopup(); else this.hidePopup();
+    }
     this.activity(event);
   };
   private compositionStart = (event: Event) => {
@@ -254,7 +262,7 @@ export class DomConnector {
     const editor = this.editor();
     if (event.key === 'Escape' && (editor?.contains(event.target as Node) || event.composedPath().includes(this.host)) && (this.suggestion || !this.popup.hidden)) {
       this.dismissedKey = suggestionKey(this.read());
-      event.preventDefault(); event.stopImmediatePropagation(); this.takeover(); this.clear(); this.popup.hidden = true; this.emit({ type: 'dismiss' }); editor?.focus(); return;
+      event.preventDefault(); event.stopImmediatePropagation(); this.dismissPopup(); editor?.focus(); return;
     }
     if (event.target !== editor && !editor?.contains(event.target as Node)) {
       if (!['Shift', 'Control', 'Meta', 'Alt'].includes(event.key)) this.takeover();
@@ -263,7 +271,7 @@ export class DomConnector {
     if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && this.suggestion && editor && caretAtEnd(editor)) {
       if (suggestionKey(this.read()) !== this.suggestion.key) { this.clear(); return; }
       event.preventDefault(); event.stopImmediatePropagation();
-      const suggestion = this.suggestion; this.takeover(true); this.insert(suggestion.text, suggestion.replace); return;
+      this.acceptSuggestion(); return;
     }
     if (!['Shift', 'Control', 'Meta', 'Alt'].includes(event.key)) this.takeover(event.key === 'Enter');
   };
@@ -275,6 +283,24 @@ export class DomConnector {
     selection?.removeAllRanges(); selection?.addRange(range);
     this.inserting = true;
     try { return this.doc.execCommand('insertText', false, text); } finally { this.inserting = false; }
+  }
+  private acceptSuggestion() {
+    const suggestion = this.suggestion, snapshot = this.read();
+    if (!suggestion || suggestion.key !== suggestionKey(snapshot) || !snapshot.ready || snapshot.composing || snapshot.draftIssue) return;
+    this.takeover(true); this.hidePopup(); this.insert(suggestion.text, suggestion.replace);
+  }
+  private hidePopup() { this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); }
+  private dismissPopup() {
+    this.dismissedKey = suggestionKey(this.read()); this.takeover(); this.clear(); this.hidePopup(); this.emit({ type: 'dismiss' });
+  }
+  private popupShell(mode: typeof this.popupMode, title: string) {
+    this.popupMode = mode; this.popup.replaceChildren(); this.popup.className = `popup ${mode}`;
+    this.popup.hidden = false; this.popup.setAttribute('aria-label', title); this.button.setAttribute('aria-expanded', 'true');
+    const header = this.doc.createElement('div'); header.className = 'popup-header';
+    const label = this.doc.createElement('span'); label.textContent = title;
+    const close = this.doc.createElement('button'); close.className = 'close'; close.textContent = '×'; close.setAttribute('aria-label', 'Close reply assistance');
+    close.addEventListener('click', event => { if (!event.isTrusted) return; if (mode === 'refine') this.hidePopup(); else this.dismissPopup(); this.editor()?.focus(); });
+    header.append(label, close); this.popup.append(header);
   }
   private clear() {
     this.suggestion = undefined; this.ghost.textContent = '';
@@ -289,12 +315,12 @@ export class DomConnector {
     const snapshot = this.read(), key = snapshotKey(snapshot);
     this.navigation?.refresh(snapshot.ready);
     const dark = this.navigation?.theme !== 'light';
-    for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', line: '#373b3c', hover: '#2a3942' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
+    for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', muted: '#9babae', line: '#373b3c', hover: '#2a3942' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', muted: '#667781', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
     const contentKey = suggestionKey(snapshot);
     if (key !== this.lastKey && !(this.dispatch && this.dispatchMatches(this.dispatch, snapshot))) {
       this.lastKey = key;
       if (this.suggestion && this.suggestion.key !== contentKey) this.clear();
-      if (contentKey !== this.lastContentKey) this.popup.hidden = true;
+      if (contentKey !== this.lastContentKey) this.hidePopup();
       this.lastContentKey = contentKey;
       this.emit({ type: 'snapshot', snapshot });
     }
@@ -302,36 +328,50 @@ export class DomConnector {
     this.button.hidden = !snapshot.ready;
     if (rect && editor) {
       this.button.style.left = `${Math.max(12, rect.right - 30)}px`; this.button.style.top = `${rect.top - 29}px`;
-      this.popup.style.left = `${Math.max(8, rect.right - 310)}px`; this.popup.style.bottom = `${this.doc.documentElement.clientHeight - rect.top + 12}px`;
+      this.popup.style.left = `${Math.max(8, Math.min(rect.right - 272, this.doc.documentElement.clientWidth - 280))}px`; this.popup.style.bottom = `${this.doc.documentElement.clientHeight - rect.top + 36}px`;
+      this.popup.style.maxHeight = `${Math.max(80, rect.top - 44)}px`;
       const css = getComputedStyle(editor);
       Object.assign(this.ghost.style, { left: `${rect.left + editor.clientLeft}px`, top: `${rect.top + editor.clientTop}px`, width: `${editor.clientWidth}px`, height: `${editor.clientHeight}px`, fontFamily: css.fontFamily, fontSize: css.fontSize, fontWeight: css.fontWeight, fontStyle: css.fontStyle, letterSpacing: css.letterSpacing, lineHeight: css.lineHeight, padding: css.padding, direction: css.direction, textAlign: css.textAlign });
       this.syncGhostScroll();
     }
   }
   private openPopup() {
-    if (this.suggestion?.replace) this.clear();
-    this.takeover(); this.popupMode = 'refine'; this.popup.replaceChildren(); this.popup.hidden = false;
-    const row = this.doc.createElement('div'); row.className = 'row';
+    const snapshot = this.read(), key = suggestionKey(snapshot);
+    const suggested = this.suggestion?.key === key ? this.suggestion : undefined;
+    const hasText = Boolean(snapshot.draft.trim() || suggested?.id);
+    if (suggested?.replace && !snapshot.draft.trim()) this.command({ ...suggested, replace: false });
+    else if (this.suggestion?.replace) this.clear();
+    this.takeover(); this.popupShell('refine', hasText ? snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion' : 'Reply assistance');
     const request = (instruction?: string) => {
+      if (suggestionKey(this.read()) !== key) { this.hidePopup(); return; }
       this.dismissedKey = undefined;
-      this.popup.hidden = true;
+      this.hidePopup();
       const editor = this.editor();
       if (editor) { editor.focus(); const range = this.doc.createRange(); range.selectNodeContents(editor); range.collapse(false); const selection = this.doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); }
-      this.refresh(); this.emit({ type: 'request', instruction });
+      this.refresh(); this.emit({ type: 'request', instruction, key, ...(instruction && !snapshot.draft.trim() && suggested?.id ? { suggestionId: suggested.id } : {}) });
     };
-    for (const label of ['Suggest', 'Shorter', 'Warmer', 'More direct', 'Translate']) {
-      const b = this.doc.createElement('button'); b.textContent = label;
+    if (!hasText) {
+      const suggest = this.doc.createElement('button'); suggest.className = 'action'; suggest.textContent = 'Suggest reply';
+      suggest.addEventListener('click', event => { if (event.isTrusted) request(); }); this.popup.append(suggest); suggest.focus(); return;
+    }
+    const row = this.doc.createElement('div'); row.className = 'actions';
+    let translating = false;
+    for (const label of ['Shorter', 'Warmer', 'More direct', 'Translate…']) {
+      const b = this.doc.createElement('button'); b.className = 'action'; b.textContent = label;
       b.addEventListener('click', e => {
         if (!e.isTrusted) return;
-        if (label === 'Translate') { instruction.value = 'Translate to '; instruction.focus(); }
-        else request(label === 'Suggest' ? undefined : `Make the draft ${label.toLowerCase()}.`);
+        if (label === 'Translate…') { translating = true; instruction.value = ''; instruction.placeholder = 'Language, e.g. Spanish'; instruction.setAttribute('aria-label', 'Translation language'); apply.disabled = true; instruction.focus(); }
+        else request(`Make the draft ${label.toLowerCase()}.`);
       }); row.append(b);
     }
-    const instruction = this.doc.createElement('input'); instruction.placeholder = 'Translate to Spanish, or another instruction…'; instruction.setAttribute('aria-label', 'Refinement instruction'); instruction.maxLength = 1000;
-    const apply = this.doc.createElement('button'); apply.textContent = 'Refine draft';
-    apply.addEventListener('click', e => { if (e.isTrusted && instruction.value.trim()) request(instruction.value.trim()); });
-    instruction.addEventListener('keydown', e => { if (e.isTrusted && e.key === 'Enter' && !e.isComposing) { e.preventDefault(); if (instruction.value.trim()) request(instruction.value.trim()); } });
-    this.popup.append(row, instruction, apply); instruction.focus();
+    const field = this.doc.createElement('div'); field.className = 'instruction';
+    const instruction = this.doc.createElement('input'); instruction.placeholder = 'Ask for a change…'; instruction.setAttribute('aria-label', 'Refinement instruction'); instruction.maxLength = 950;
+    const apply = this.doc.createElement('button'); apply.className = 'apply'; apply.textContent = '↑'; apply.setAttribute('aria-label', 'Apply instruction'); apply.disabled = true;
+    const submit = () => { const text = instruction.value.trim(); if (text) request(translating ? `Translate the draft to ${text}.` : text); };
+    instruction.addEventListener('input', () => { apply.disabled = !instruction.value.trim(); });
+    apply.addEventListener('click', e => { if (e.isTrusted) submit(); });
+    instruction.addEventListener('keydown', e => { if (e.isTrusted && e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); e.stopPropagation(); submit(); } });
+    field.append(instruction, apply); this.popup.append(row, field); instruction.focus();
   }
   command(command: RemoteCommand) {
     if (command.type === 'armStickerDrag') { this.stickerTransfer?.arm(command); return; }
@@ -339,8 +379,15 @@ export class DomConnector {
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
     if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
-    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'preview') this.popup.hidden = true; return; }
-    if (command.type === 'notice') { if (this.suggestion?.replace) this.clear(); this.popupMode = 'notice'; this.popup.textContent = command.text; this.popup.classList.add('notice'); this.popup.hidden = false; return; }
+    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'preview' || this.popupMode === 'pending') this.hidePopup(); return; }
+    if (command.type === 'notice') { if (this.suggestion?.replace) this.clear(); this.popupShell('notice', 'Reply assistance'); const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text); return; }
+    if (command.type === 'refining') {
+      if (command.key !== suggestionKey(this.read()) || command.key === this.dismissedKey) return;
+      this.clear(); this.popupShell('pending', 'Refining');
+      const progress = this.doc.createElement('div'); progress.className = 'pending-text'; progress.setAttribute('role', 'status');
+      const spinner = this.doc.createElement('span'); spinner.className = 'spinner'; spinner.setAttribute('aria-hidden', 'true');
+      progress.append(spinner, 'Working on your text…'); this.popup.append(progress); return;
+    }
     if (command.type === 'suggestion') {
       const editor = this.editor(), s = this.read();
       if (command.key !== suggestionKey(s) || command.key === this.dismissedKey || !s.ready || s.draftIssue || !editor || this.composing) return;
@@ -354,8 +401,18 @@ export class DomConnector {
         }
       }
       if (!command.replace) { const prefix = this.doc.createElement('span'); prefix.textContent = s.draft; prefix.style.visibility = 'hidden'; this.ghost.append(prefix); }
-      else { this.popupMode = 'preview'; this.popup.textContent = `${command.text}\n\nTab to replace · Esc to dismiss`; this.popup.style.whiteSpace = 'pre-wrap'; this.popup.hidden = false; return; }
-      const suffix = this.doc.createElement('span'); suffix.textContent = command.text; this.ghost.append(suffix); this.syncGhostScroll(); return;
+      else {
+        this.popupShell('preview', 'Revised text');
+        const text = this.doc.createElement('div'); text.className = 'preview-text'; text.textContent = command.text;
+        const footer = this.doc.createElement('div'); footer.className = 'preview-footer';
+        const hint = this.doc.createElement('kbd'); hint.textContent = 'Tab';
+        const accept = this.doc.createElement('button'); accept.className = 'primary'; accept.textContent = 'Use text';
+        accept.addEventListener('click', event => { if (event.isTrusted) this.acceptSuggestion(); });
+        footer.append(hint, accept); this.popup.append(text, footer); return;
+      }
+      const suffix = this.doc.createElement('span'); suffix.textContent = command.text; this.ghost.append(suffix); this.syncGhostScroll();
+      if (!this.popup.hidden && this.popupMode === 'refine' && !this.popup.querySelector('input') && command.id) this.openPopup();
+      return;
     }
     if (command.type === 'autoSend') {
       void this.sendAutomatic(command); return;

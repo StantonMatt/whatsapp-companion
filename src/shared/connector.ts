@@ -7,7 +7,8 @@ export type RemoteCommand =
   | { type: 'cancelSticker' }
   | { type: 'chrome'; panel: Panel; pending: boolean; panelBounds?: { left: number; right: number } | null }
   | { type: 'clear' }
-  | { type: 'suggestion'; key: string; text: string; replace: boolean }
+  | { type: 'suggestion'; key: string; text: string; replace: boolean; id?: string }
+  | { type: 'refining'; key: string }
   | { type: 'autoSend'; key: string; text: string; nonce: string; expiresAt: number }
   | { type: 'locateSticker'; id: string; nonce: string }
   | { type: 'notice'; text: string };
@@ -15,4 +16,4 @@ export interface Connector {
   send(command: RemoteCommand): void;
   focus(): void;
 }
-export type RemoteEvent = { type: 'stickerDrop'; nonce: string } | { type: 'stickerPrepared'; nonce: string; found: boolean } | { type: 'stickerSent'; nonce: string; clicked: boolean } | { type: 'stickerLocated'; nonce: string; found: boolean } | { type: 'navigate'; panel: Panel } | { type: 'chrome'; rail: number; listWidth: number; theme: 'dark' | 'light' } | { type: 'cancelAuto' } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'activity'; editing?: boolean } | { type: 'dismiss' } | { type: 'request'; instruction?: string } | { type: 'result'; nonce: string; sent: boolean } | { type: 'sticker'; image: string };
+export type RemoteEvent = { type: 'stickerDrop'; nonce: string } | { type: 'stickerPrepared'; nonce: string; found: boolean } | { type: 'stickerSent'; nonce: string; clicked: boolean } | { type: 'stickerLocated'; nonce: string; found: boolean } | { type: 'navigate'; panel: Panel } | { type: 'chrome'; rail: number; listWidth: number; theme: 'dark' | 'light' } | { type: 'cancelAuto' } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'activity'; editing?: boolean } | { type: 'dismiss' } | { type: 'request'; instruction?: string; key?: string; suggestionId?: string } | { type: 'result'; nonce: string; sent: boolean } | { type: 'sticker'; image: string };
