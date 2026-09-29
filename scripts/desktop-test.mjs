@@ -754,6 +754,18 @@ try {
   await expect.poll(() => app.evaluate(() => globalThis.attributionSnapshot?.messages.at(-1)?.sender)).toBe('Another participant');
   expect((await remote.evaluate(() => window.fixtureSent)).length).toBe(sentBeforeModern);
   console.log('PASS group/quote attribution reaches main and Tab accepts the validated suggestion without sending');
+  await remote.evaluate(() => {
+    document.querySelector('.messages').innerHTML = '<div data-id="DIEGO_DOCUMENT" data-testid="conv-msg-DIEGO_DOCUMENT"><div data-testid="msg-container"><span data-testid="author">Diego</span><div data-testid="document-thumb" title="View file"><div data-testid="image-thumb"></div><span dir="auto">Outdoor article.pdf</span><span data-testid="type">PDF</span></div></div></div><div data-id="DIEGO_CAPTION" data-testid="conv-msg-DIEGO_CAPTION"><div data-testid="msg-container"><span data-testid="author">Diego</span><span data-testid="selectable-text">Salimos en el mercurio</span></div></div><div data-id="GIORGIO_REPLY" data-testid="conv-msg-GIORGIO_REPLY"><div data-testid="msg-container"><span data-testid="author">Giorgio</span><div data-testid="quoted-message"><span data-testid="author">Diego</span><div data-testid="document-thumb"><span dir="auto">Outdoor article.pdf</span></div></div><span data-testid="selectable-text">Se pasooo</span></div></div>';
+  });
+  await expect.poll(() => app.evaluate(() => globalThis.attributionSnapshot?.messages)).toEqual([
+    { id: 'DIEGO_DOCUMENT', sender: 'Diego', outgoing: false, text: '', attachment: 'document', attachmentName: 'Outdoor article.pdf' },
+    { id: 'DIEGO_CAPTION', sender: 'Diego', outgoing: false, text: 'Salimos en el mercurio' },
+    { id: 'GIORGIO_REPLY', sender: 'Giorgio', outgoing: false, text: 'Se pasooo', quoted: { text: '', sender: 'Diego', attachment: 'document', attachmentName: 'Outdoor article.pdf' } }
+  ]);
+  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
+  await editor.click(); await editor.press('Tab'); await expect(editor).toHaveText('Sounds good, see you then!'); await editor.fill('');
+  expect((await remote.evaluate(() => window.fixtureSent)).length).toBe(sentBeforeModern);
+  console.log('PASS PDF filenames and quoted files reach main; Tab accepts the validated suggestion without sending');
 
   await local.evaluate(() => window.companion.action({ type: 'panel', panel: null }));
   await remote.locator('#friend').click();

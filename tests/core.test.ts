@@ -2,10 +2,10 @@ import { describe, test, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { initialState, emptySnapshot, defaultAuto, actionSchema, stickerSchema, type Snapshot } from '../src/shared/model';
+import { initialState, emptySnapshot, defaultAuto, actionSchema, stickerSchema, snapshotSchema, type Snapshot } from '../src/shared/model';
 import { resolveSettings, setPreferences, resetPreferences, resetStylePreferences } from '../src/core/settings';
 import { learnStyle, styleFor, styleSamples } from '../src/core/style';
-import { SuggestionGate } from '../src/core/suggestions';
+import { SuggestionGate, snapshotKey, suggestionKey, suggestionContext } from '../src/core/suggestions';
 import { autoDecision, autoSendExpiry } from '../src/core/auto-reply';
 import { searchStickers, upsertSticker } from '../src/core/stickers';
 import { Store } from '../src/main/store';
@@ -83,6 +83,35 @@ describe('style isolation', () => {
   });
 });
 describe('stale suggestions', () => {
+  test('document context confirms the shared file with sender and filename, respects opt-out, and never includes file bytes', () => {
+    const state = initialState(), snapshot = snap({ kind: 'group', messages: [
+      { id: 'file', text: '', outgoing: false, sender: 'Diego', attachment: 'document', attachmentName: 'Outdoor article.pdf' },
+      { id: 'caption', text: 'Salimos en el mercurio', outgoing: false, sender: 'Diego' },
+      { id: 'reply', text: 'Se pasooo', outgoing: false, sender: 'Giorgio', quoted: { text: '', sender: 'Diego', attachment: 'document', attachmentName: 'Outdoor article.pdf' } }
+    ] });
+    const prompt = buildPrompt(state, { ...state.global, shareContext: true }, snapshot);
+    const context = JSON.parse(prompt.input).context;
+    expect(context[0]).toEqual({ speaker: 'contact', sender: 'Diego', text: '', attachment: { type: 'document', name: 'Outdoor article.pdf', contents: 'unavailable' } });
+    expect(context[2].quoted).toEqual({ sender: 'Diego', text: '', attachment: { type: 'document', name: 'Outdoor article.pdf', contents: 'unavailable' } });
+    expect(prompt.system).toContain('Do not ask them to send the same attachment again');
+    expect(prompt.system).toContain('Never claim to have read the document');
+    expect(JSON.parse(buildPrompt(state, state.global, snapshot).input).context).toEqual([]);
+    expect(snapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(snapshotSchema.safeParse(snap({ messages: [{ ...snapshot.messages[0], attachmentName: 'a'.repeat(256) }] })).success).toBe(false);
+  });
+  test.each(['own', 'quoted'])('changed %s document names invalidate suggestions, dismissed context and send tickets', target => {
+    const message = { id: 'file', text: '', outgoing: false, attachment: 'document' as const, attachmentName: 'Article.pdf' };
+    const original = snap({ messages: [target === 'own' ? message : { id: 'reply', text: 'Interesting', outgoing: false, quoted: { text: '', attachment: 'document', attachmentName: 'Article.pdf' } }] });
+    const next = structuredClone(original);
+    if (target === 'own') next.messages[0].attachmentName = 'Other article.pdf';
+    else next.messages[0].quoted!.attachmentName = 'Other article.pdf';
+    for (const key of [suggestionKey, snapshotKey, suggestionContext]) {
+      expect(key(next)).not.toBe(key(original));
+      expect(key(snapshotSchema.parse(original))).toBe(key(original));
+    }
+    const gate = new SuggestionGate(); expect(gate.current(gate.begin(original), next)).toBe(false);
+    expect(gate.current(gate.begin(original, true), next)).toBe(false);
+  });
   test('changing reasoning cancels old work and passes the saved effort to the next suggestion', async () => {
     const store = new Store(directory()); store.update(s => { s.global.shareContext = true; });
     let finish!: (text: string) => void;
@@ -99,17 +128,17 @@ describe('stale suggestions', () => {
     expect(commands.some(command => command.type === 'suggestion' && command.text === 'Current effort reply')).toBe(true);
     expect(commands.some(command => command.type === 'autoSend')).toBe(false); assistant.cancel();
   });
-  test('image-only context starts a suggestion promptly, marks unseen contents and cannot trigger automatic sending', async () => {
+  test.each(['image', 'document'] as const)('%s-only context starts a suggestion promptly, marks unseen contents and cannot trigger automatic sending', async attachment => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; s.auto[chat] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0 }; });
     const generator = vi.fn(async () => 'Thanks for sending that.'), commands: RemoteCommand[] = [];
     const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
-    const image = snap({ focused: false, caretAtEnd: false, messages: [{ id: 'photo', text: '', outgoing: false, attachment: 'image' }] });
+    const image = snap({ focused: false, caretAtEnd: false, messages: [{ id: 'media', text: '', outgoing: false, attachment }] });
     assistant.receive(image); await vi.advanceTimersByTimeAsync(0);
     expect(generator).toHaveBeenCalledOnce(); expect(commands.some(c => c.type === 'suggestion')).toBe(true);
     expect(autoDecision(store.state.auto[chat], image, [], new Date())).toBe('No new incoming text');
     expect(commands.some(c => c.type === 'autoSend')).toBe(false);
     const prompt = buildPrompt(store.state, store.state.global, image);
-    expect(JSON.parse(prompt.input).context).toEqual([{ speaker: 'contact', text: '', attachment: { type: 'image', contents: 'unavailable' } }]);
+    expect(JSON.parse(prompt.input).context).toEqual([{ speaker: 'contact', text: '', attachment: { type: attachment, contents: 'unavailable' } }]);
     expect(prompt.system).toContain('without describing, judging, or inventing');
     expect(JSON.parse(buildPrompt(store.state, { ...store.state.global, shareContext: false }, image).input).context).toEqual([]);
     assistant.cancel();

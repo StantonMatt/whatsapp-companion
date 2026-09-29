@@ -83,11 +83,29 @@ test('Escape rejects an already-queued reply and leaves navigation in other fiel
     connector.command(command); expect(connector['ghost'].textContent).toBe('');
   } finally { connector.stop(); }
 });
-test.each([['image-thumb', 'image'], ['sticker-container', 'sticker'], ['ptt-status', 'audio'], ['video-thumb', 'video']])('observes %s without reading attachment contents', (testid, attachment) => {
+test.each([['image-thumb', 'image'], ['sticker-container', 'sticker'], ['ptt-status', 'audio'], ['video-thumb', 'video'], ['document-thumb', 'document']])('observes %s without reading attachment contents', (testid, attachment) => {
   modernFixture(); const node = document.querySelector('#main [data-id]')!;
   node.innerHTML = `<span data-testid="${testid}"><img alt="Private content must not become a caption" src="data:image/png;base64,AA=="></span>`;
   const connector = new DomConnector(document, () => {});
   expect(connector.read().messages[0]).toEqual({ id: 'ABC123456', text: '', outgoing: null, attachment });
+});
+test('a shared PDF retains its visible filename and caption, without treating its preview as an image', () => {
+  modernFixture(); const node = document.querySelector('#main [data-id]')!;
+  node.innerHTML = '<span data-testid="author">Diego</span><div data-testid="document-thumb" title="View file"><div data-testid="image-thumb"><img src="blob:private-document-preview" alt="Private preview"></div><span dir="auto">Binder1 OUTDOOR 29092026.pdf</span><span data-testid="type">PDF</span><span>753 kB</span></div><span data-testid="selectable-text">Salimos en el mercurio</span>';
+  const connector = new DomConnector(document, () => {});
+  expect(connector.read().messages[0]).toEqual({ id: 'ABC123456', outgoing: false, sender: 'Diego', text: 'Salimos en el mercurio', attachment: 'document', attachmentName: 'Binder1 OUTDOOR 29092026.pdf' });
+  const card = node.querySelector('[data-testid="document-thumb"]')!;
+  card.querySelector('[dir="auto"]')!.textContent = 'a'.repeat(300);
+  expect(connector.read().messages[0].attachmentName).toHaveLength(255);
+  card.querySelector('[dir="auto"]')!.textContent = '  ';
+  expect(connector.read().messages[0].attachmentName).toBeUndefined();
+});
+test('a quoted document stays separate from the current message attachment and filename', () => {
+  modernFixture(); const node = document.querySelector('#main [data-id]')!;
+  node.innerHTML = '<span data-testid="author">Alex</span><div data-testid="quoted-message"><span data-testid="author">Diego</span><div data-testid="document-thumb"><span dir="auto">Article.pdf</span></div></div><div data-testid="image-thumb"></div><span data-testid="selectable-text">Here is a photo too</span>';
+  const snapshot = new DomConnector(document, () => {}).read();
+  expect(snapshot.messages[0]).toEqual({ id: 'ABC123456', outgoing: false, sender: 'Alex', text: 'Here is a photo too', attachment: 'image', quoted: { text: '', sender: 'Diego', attachment: 'document', attachmentName: 'Article.pdf' } });
+  expect(suggestionKey(snapshotSchema.parse(snapshot))).toBe(suggestionKey(snapshot));
 });
 test('avatars and inline emoji alone do not identify an image attachment', () => {
   modernFixture(); document.querySelector('#main [data-id]')!.innerHTML = '<img width="55" height="55"><img alt="😀" data-plain-text="😀">';

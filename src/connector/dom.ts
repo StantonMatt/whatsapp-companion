@@ -37,11 +37,17 @@ function messageDirection(node: HTMLElement): boolean | null {
 }
 function messageAttachment(node: HTMLElement): Message['attachment'] {
   // Observe media type only. Never fetch URLs, upload bytes or mistake avatars/emoji for photos.
+  // A document's preview belongs to the file card, not a separate photo message.
+  if (ownElements(node, '[data-testid="document-thumb"]').length) return 'document';
   if (ownElements(node, '[data-testid="sticker-container"]').length) return 'sticker';
   if (ownElements(node, '[data-testid="ptt-status"], [data-icon="ptt-status"], audio').length) return 'audio';
   if (ownElements(node, 'video, [data-testid="video-thumb"], [data-testid="video-content"]').length) return 'video';
   if (ownElements(node, '[data-testid="image-thumb"]').length) return 'image';
   return undefined;
+}
+function attachmentName(node: HTMLElement): string | undefined {
+  // Read only the visible filename, not the preview, download URL or localized action title.
+  return ownElements(node, '[data-testid="document-thumb"] span[dir="auto"]')[0]?.textContent?.trim().slice(0, 255) || undefined;
 }
 function messageText(node: HTMLElement) {
   return ownElements(node, textSelector).filter(n => !n.parentElement?.closest(textSelector)).map(n => readDraft(n)).join('\n').slice(0, 4000);
@@ -49,8 +55,8 @@ function messageText(node: HTMLElement) {
 function quotedMessage(node: HTMLElement): Message['quoted'] {
   const quote = node.querySelector<HTMLElement>(quoteSelector);
   if (!quote) return undefined;
-  const sender = senderLabel(quote), attachment = messageAttachment(quote);
-  return { text: messageText(quote), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}) };
+  const sender = senderLabel(quote), attachment = messageAttachment(quote), name = attachmentName(quote);
+  return { text: messageText(quote), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}), ...(name ? { attachmentName: name } : {}) };
 }
 export function readDraft(editor: HTMLElement): string {
   const serialize = (node: Node): string => {
@@ -157,10 +163,10 @@ export class DomConnector {
       this.observedMessages.clear();
     }
     const messages: Message[] = nodes.slice(-30).map(node => {
-      const attachment = messageAttachment(node), sender = senderLabel(node), quoted = quotedMessage(node);
+      const attachment = messageAttachment(node), name = attachmentName(node), sender = senderLabel(node), quoted = quotedMessage(node);
       const message: Message = { id: node.dataset.id!.slice(0, 250),
         text: messageText(node),
-        outgoing: messageDirection(node), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}), ...(quoted ? { quoted } : {}) };
+        outgoing: messageDirection(node), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}), ...(name ? { attachmentName: name } : {}), ...(quoted ? { quoted } : {}) };
       // WhatsApp replaces offscreen modern bubbles with empty height placeholders when resizing.
       // Keep only previously observed content in this chat; mounted edits/deletions still replace it.
       if (!peerFromMessageId(message.id) && !node.querySelector('[data-testid="msg-container"]') && !message.text && message.outgoing === null && !attachment && !sender && !quoted) return this.observedMessages.get(message.id) ?? message;

@@ -2,8 +2,8 @@ import type { Snapshot } from '../shared/model';
 
 // IPC validation may reorder object properties. Compare semantic fields in a fixed order.
 function messagesForKey(s: Snapshot) {
-  return s.messages.map(m => [m.id, m.text, m.outgoing, m.sender ?? null, m.attachment ?? null,
-    m.quoted ? [m.quoted.sender ?? null, m.quoted.text, m.quoted.attachment ?? null] : null]);
+  return s.messages.map(m => [m.id, m.text, m.outgoing, m.sender ?? null, m.attachment ?? null, m.attachmentName ?? null,
+    m.quoted ? [m.quoted.sender ?? null, m.quoted.text, m.quoted.attachment ?? null, m.quoted.attachmentName ?? null] : null]);
 }
 
 export function snapshotKey(s: Snapshot): string {

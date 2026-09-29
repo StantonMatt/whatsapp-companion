@@ -46,11 +46,12 @@ export const defaults: Preferences = {
   suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
   emoji: 'match', instructions: '', style: 'off', learnFromSent: false, shareContext: false
 };
-const attachmentSchema = z.enum(['image', 'sticker', 'audio', 'video']);
+const attachmentSchema = z.enum(['image', 'sticker', 'audio', 'video', 'document']);
+const attachmentNameSchema = z.string().min(1).max(255);
 export const messageSchema = z.object({
   id: z.string().max(250), text: z.string().max(4000), outgoing: z.boolean().nullable(),
-  sender: z.string().min(1).max(150).optional(), attachment: attachmentSchema.optional(),
-  quoted: z.object({ sender: z.string().min(1).max(150).optional(), text: z.string().max(4000), attachment: attachmentSchema.optional() }).strict().optional()
+  sender: z.string().min(1).max(150).optional(), attachment: attachmentSchema.optional(), attachmentName: attachmentNameSchema.optional(),
+  quoted: z.object({ sender: z.string().min(1).max(150).optional(), text: z.string().max(4000), attachment: attachmentSchema.optional(), attachmentName: attachmentNameSchema.optional() }).strict().optional()
 }).strict();
 export type Message = z.infer<typeof messageSchema>;
 export const snapshotSchema = z.object({

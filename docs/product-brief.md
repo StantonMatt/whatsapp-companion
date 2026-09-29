@@ -39,6 +39,7 @@ Search can cover only stickers the application has indexed. Determine how the av
 - Escape dismisses a suggestion; Tab retains its ordinary navigation behavior when there is no suggestion.
 - Preserve the user's configured Enter/send behavior and avoid interfering with input methods or ongoing typing.
 - An empty composer may show a suggested response. A partially written draft may receive a continuation.
+- Recognize when an image or document has already been shared, retain its sender and visible document filename, and avoid asking for the same attachment again. Attachment contents are not currently read; suggestions must not pretend they have seen or read them.
 - Keep suggestions relevant when new messages arrive or the user switches conversations. Preserve individual group senders and distinguish attachment ownership: if Mum posts photos and a sibling praises them, draft as a fellow recipient rather than thanking them as the photographer. Keep quoted content separate from the current speaker.
 - Provide a small, discreet pop-up for refining the draft, with actions such as shorter, warmer, more direct, translation, and a free-form instruction.
 - Avoid a permanent AI sidebar as the default experience.

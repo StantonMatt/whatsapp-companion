@@ -31,7 +31,7 @@ function ReplySettings({ status, act, scope }: { status: Status; act: Act; scope
   const patch = (value: Partial<Preferences>) => { void act({ type: 'preferences', scope, patch: value }); };
   return <>
     <Toggle label="Share recent conversation context" checked={values.shareContext} onChange={v => patch({ shareContext: v })} note={inherited('shareContext')}/>
-    <p className="hint">When enabled, up to 30 loaded text messages from the current chat go to your chosen provider for assistance. Attachments are excluded.</p>
+    <p className="hint">When enabled, up to 30 loaded messages from the current chat go to your chosen provider for assistance, including attachment types and visible document filenames. File and image contents are excluded.</p>
     <Toggle label="Inline suggestions" checked={values.suggestions} onChange={v => patch({ suggestions: v })} note={inherited('suggestions')}/>
     
     <Choice label="Tone" value={values.tone} options={['natural', 'friendly', 'professional', 'direct']} note={inherited('tone')} onChange={v => patch({ tone: v as Preferences['tone'] })}/>
