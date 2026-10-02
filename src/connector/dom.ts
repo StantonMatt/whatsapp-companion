@@ -1,4 +1,5 @@
 import { StickerTransferConnector } from './sticker-transfer';
+import { stickerImageState } from './sticker-image-state';
 import { composerStyle } from './composer-style';
 import { StickerPickerLayout } from './sticker-picker-layout';
 import { Navigation } from './navigation';
@@ -428,7 +429,6 @@ export class DomConnector {
     field.append(instruction, apply); this.popup.append(row, field); instruction.focus();
   }
   command(command: RemoteCommand) {
-    if (command.type === 'armStickerDrag') { this.stickerTransfer?.arm(command); return; }
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
@@ -482,7 +482,7 @@ export class DomConnector {
       void this.sendAutomatic(command); return;
     }
     if (command.type === 'locateSticker') {
-      const image = [...this.doc.images].find(img => this.stickerSources.get(img.currentSrc || img.src) === command.id && img.checkVisibility({ visibilityProperty: true }) && img.getBoundingClientRect().width > 0);
+      const image = [...this.doc.images].find(img => stickerImageState(img) === 'ready' && this.stickerSources.get(img.currentSrc || img.src) === command.id && img.checkVisibility({ visibilityProperty: true }) && img.getBoundingClientRect().width > 0);
       if (image) { image.scrollIntoView({ block: 'center' }); image.animate([{ outline: '4px solid #24ae85' }, { outline: '4px solid transparent' }], { duration: 1800 }); }
       this.emit({ type: 'stickerLocated', nonce: command.nonce, found: Boolean(image) });
     }
@@ -534,12 +534,11 @@ export class DomConnector {
       const candidates = [...this.doc.querySelectorAll<HTMLImageElement>('img[data-testid*="sticker"], [data-testid*="sticker"] img, img[alt*="sticker" i], img[alt*="pegatina" i], img[alt*="figurinha" i]')]
         .filter(img => {
           const src = img.currentSrc || img.src;
-          return img.complete && img.naturalWidth && (src.startsWith('blob:') || src.startsWith('data:image/webp;')) && !this.stickerSources.has(src) && !this.failedSources.has(src);
+          return stickerImageState(img) === 'ready' && !this.stickerSources.has(src) && !this.failedSources.has(src);
         }).slice(0, 150);
       for (const img of candidates) {
         const src = img.currentSrc || img.src;
-        if (!img.complete || !img.naturalWidth || this.stickerSources.has(src) || this.failedSources.has(src)) continue;
-        if (!src.startsWith('blob:') && !src.startsWith('data:image/webp;')) continue;
+        if (stickerImageState(img) !== 'ready' || this.stickerSources.has(src) || this.failedSources.has(src)) continue;
         try {
           const response = await fetch(src, { signal: AbortSignal.timeout(5000) });
           const blob = await response.blob();

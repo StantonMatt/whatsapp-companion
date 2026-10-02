@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { test, expect, vi, afterEach } from 'vitest';
 import { DomConnector, peerFromMessageId, caretAtEnd, readDraft } from '../src/connector/dom';
+import { stickerImageState } from '../src/connector/sticker-image-state';
 import { snapshotSchema } from '../src/shared/model';
 import { snapshotKey, suggestionKey } from '../src/core/suggestions';
 import type { RemoteEvent } from '../src/shared/connector';
@@ -314,8 +315,60 @@ function mockStickerData(size = 20, type = 'image/webp') {
 }
 function stickerImage(i: number) {
   const img = document.createElement('img'); img.alt = 'sticker'; img.src = `data:image/webp;base64,AA${i}`;
-  Object.defineProperties(img, { complete: { value: true }, naturalWidth: { value: 100 } }); document.body.append(img); return img;
+  Object.defineProperties(img, { complete: { value: true, configurable: true }, naturalWidth: { value: 100, configurable: true } }); document.body.append(img); return img;
 }
+function setStickerLoadState(img: HTMLImageElement, state: string) {
+  Object.defineProperties(img, { complete: { value: state === 'broken', configurable: true }, naturalWidth: { value: 0, configurable: true } });
+  if (state === 'error') { stickerImageState(img); img.dispatchEvent(new Event('error')); }
+}
+
+test.each(['pending', 'broken', 'error'])('discovery indexes ready stickers beyond a full batch of %s images', async state => {
+  mockStickerData();
+  for (let i = 0; i < 150; i++) setStickerLoadState(stickerImage(i), state);
+  const ready = stickerImage(151);
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, e => events.push(e));
+  await connector['indexStickers']();
+  expect(events).toEqual([{ type: 'sticker', image: 'data:image/webp;base64,AQID' }]);
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(ready.src, expect.anything());
+});
+
+test('discovery retries a loading sticker once ready, without suppressing other ready stickers', async () => {
+  mockStickerData(); const loading = stickerImage(1); setStickerLoadState(loading, 'pending'); stickerImage(2);
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, e => events.push(e));
+  await connector['indexStickers'](); expect(events).toHaveLength(1);
+  Object.defineProperties(loading, { complete: { value: true }, naturalWidth: { value: 100 } });
+  loading.dispatchEvent(new Event('load'));
+  await connector['indexStickers'](); expect(events).toHaveLength(2);
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+test.each(['pending', 'broken', 'error'])('Locate in WhatsApp finds a ready match after a %s image with the same indexed hash', async state => {
+  mockStickerData(); const unavailable = stickerImage(1), ready = stickerImage(2);
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, e => events.push(e));
+  await connector['indexStickers'](); events.length = 0;
+  setStickerLoadState(unavailable, state);
+  for (const image of [unavailable, ready]) {
+    image.scrollIntoView = vi.fn(); image.animate = vi.fn(); image.checkVisibility = () => true;
+    image.getBoundingClientRect = () => ({ width: 100 } as DOMRect);
+  }
+  connector.command({ type: 'locateSticker', id: '0'.repeat(64), nonce: 'locate' });
+  expect(ready.scrollIntoView).toHaveBeenCalled(); expect(unavailable.scrollIntoView).not.toHaveBeenCalled();
+  expect(events).toEqual([{ type: 'stickerLocated', nonce: 'locate', found: true }]);
+});
+test('Locate shares error/source retry readiness without granting native activation', async () => {
+  mockStickerData(); const image = stickerImage(1);
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event));
+  await connector['indexStickers'](); events.length = 0;
+  image.checkVisibility = () => true; image.getBoundingClientRect = () => ({ width: 100 } as DOMRect);
+  image.scrollIntoView = vi.fn(); image.animate = vi.fn(); image.click = vi.fn();
+  setStickerLoadState(image, 'error');
+  connector.command({ type: 'locateSticker', id: '0'.repeat(64), nonce: 'failed' });
+  Object.defineProperties(image, { complete: { value: true, configurable: true }, naturalWidth: { value: 100, configurable: true } });
+  image.dispatchEvent(new Event('load'));
+  connector.command({ type: 'locateSticker', id: '0'.repeat(64), nonce: 'retried' });
+  expect(events).toEqual([{ type: 'stickerLocated', nonce: 'failed', found: false }, { type: 'stickerLocated', nonce: 'retried', found: true }]);
+  expect(image.scrollIntoView).toHaveBeenCalledOnce(); expect(image.click).not.toHaveBeenCalled();
+});
 test.each([[936210, 'image/webp', 1], [1048576, 'image/webp', 1], [1048577, 'image/webp', 0], [936210, 'image/png', 0]])('sticker intake handles %i bytes of %s within its size/type boundary', async (size, type, count) => {
   mockStickerData(size as number, type as string); stickerImage(1);
   const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event));
@@ -526,7 +579,7 @@ test.each(['typing', 'Backspace', 'ArrowLeft', 'composition', 'clear'])('tempora
   } finally { connector.stop(); }
 });
 
-test('a selection drag during replacement preserves both the draft and the new selection', async () => {
+test('a pointer selection during replacement preserves both the draft and the new selection', async () => {
   vi.useFakeTimers(); const editor = fixture(); const connector = new DomConnector(document, () => {}); connector.start();
   const insert = vi.fn(() => true); document.execCommand = insert;
   try {

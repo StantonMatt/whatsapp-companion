@@ -27,11 +27,13 @@ pickerTrigger.onclick=()=>{
   for(const [testid,label] of [['expressions-btn-sticker','Stickers selector'],['panel-starred','Favorite'],['panel-recent','Recent']]){
     const tab=document.createElement('button');tab.dataset.testid=testid;tab.setAttribute('aria-label',label);tab.setAttribute('aria-selected','true');tab.textContent=label;picker.append(tab);
   }
+  // Keep the rendered category container present even when its collection is empty.
+  const content=document.createElement('div');content.setAttribute('role','list');picker.append(content);
   if(window.fixtureStickerSource&&!window.fixtureHideSticker){
     const send=document.createElement('button');send.setAttribute('aria-label','Send sticker');
     const item=document.createElement('span');item.dataset.testid='sticker-item';
     const img=document.createElement('img');img.alt='sticker';img.src=window.fixtureStickerSource;img.width=100;item.append(img);send.append(item);
-    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});portal.remove();};picker.append(send);
+    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});};content.append(send);
   }
   wrapper.append(picker);portal.append(wrapper);document.body.append(portal);
   requestAnimationFrame(()=>{wrapper.style.transition='transform .2s';wrapper.style.transform='scale(1)';});

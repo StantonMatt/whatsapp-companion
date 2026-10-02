@@ -22,9 +22,9 @@ Implementation was authorized on September 28, 2026, superseding the original pl
 
 - Add editable search terms to stickers to find the right reaction quickly. The September 29 correction combines tags, keywords and phrases into one field, with English and Spanish equivalents for the indexed collection.
 - Search alongside favorites, packs, and recently used stickers where those collections are available.
-- Drag from the library into an open chat, show a preview with Send/Cancel, and send the original native sticker only after confirmation. Preserve animation; never substitute an image or GIF.
+- Send the original native sticker with one trusted click on its card, with cancellation while finding and feedback on the card. Preserve animation; never substitute an image or GIF.
 - Preserve personal metadata independently of the recent-sticker list.
-- Provide a convenient way to edit tags, such as a context menu.
+- Provide an Edit search terms button on each sticker card.
 - Associate metadata with the same sticker across conversations when its identity can be established.
 
 Important correction from hands-on observation: the user initially saw mostly recent stickers in WhatsApp Web and Whatsie on Linux. After selecting the favorites star and waiting, more stickers loaded. Whatsie appeared to load more than the browser. Do not assume favorites are inaccessible, that Linux cannot render the stickers, or that a new sticker synchronization system is already necessary. Loading progress, caching, session differences, and actual collection completeness remain unverified.

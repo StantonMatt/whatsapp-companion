@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MAX_STICKER_DATA_URL_LENGTH } from './sticker-limits';
-import type { StickerPreview } from './sticker-transfer';
+import type { StickerSend } from './sticker-transfer';
 
 export const providerSchema = z.enum(['openai', 'anthropic']);
 export type Provider = z.infer<typeof providerSchema>;
@@ -106,10 +106,10 @@ export function initialState(): State {
 export type Status = {
   sequence: number;
   runtimePaused: boolean;
-  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { loadedSentSamples?: number };
+  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { loadedSentSamples?: number; destinationToken?: string };
   panel?: Panel; theme?: 'dark' | 'light';
   stickerLocation?: { id: string; state: 'looking' | 'found' | 'missing' | 'unavailable' } | null;
-  stickerPreview?: StickerPreview | null;
+  stickerSend?: StickerSend | null;
   keys: Record<Provider, boolean>; secureStorage: boolean; fixture: boolean;
   message: string; pending: { text: string; due: number } | null;
 };
@@ -130,9 +130,8 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('resetProfile'), scope: z.union([z.literal('general'), settingsIdSchema]) }).strict(),
   z.object({ type: z.literal('sticker'), id: z.string().regex(/^[a-f0-9]{64}$/), searchTerms: searchTermsSchema }).strict(),
   z.object({ type: z.literal('forgetSticker'), id: z.string().max(64) }).strict(),
-  z.object({ type: z.literal('locateSticker'), id: z.string().max(64) }).strict(),
-  z.object({ type: z.literal('beginStickerDrag'), id: z.string().regex(/^[a-f0-9]{64}$/), nonce: z.string().uuid() }).strict(),
-  z.object({ type: z.literal('sendSticker'), nonce: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('locateSticker'), id: z.string().max(64), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/) }).strict(),
+  z.object({ type: z.literal('sendSticker'), id: z.string().regex(/^[a-f0-9]{64}$/), nonce: z.string().uuid(), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/) }).strict(),
   z.object({ type: z.literal('cancelSticker') }).strict(),
   z.object({ type: z.literal('panel'), panel: panelSchema }).strict(),
   z.object({ type: z.literal('reload') }).strict(),

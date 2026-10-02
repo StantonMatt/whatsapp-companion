@@ -16,7 +16,7 @@ button:hover { filter: brightness(1.1); }
 button:disabled, select:disabled { opacity: .45; cursor: default; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 button[aria-pressed=true] { background: var(--selected); color: var(--green); }
-.panel { position: absolute; inset: 0; overflow: auto; background: var(--bg); border-inline: 1px solid var(--line); padding-bottom: 48px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.panel { position: absolute; inset: 0; overflow: auto; background: var(--bg); border-inline: 1px solid var(--line); padding-bottom: 48px; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .panel-title { height: 72px; display: flex; align-items: center; gap: 16px; padding: 12px 20px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
 .panel-title button { width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; }
 .panel-title button:hover { background: var(--hover); }
@@ -81,13 +81,50 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .empty > span { font-size: 48px; color: var(--green); }
 .empty p { font-size: 16px; color: var(--text); }
 .empty small, .empty-small { font-size: 12px; line-height: 1.7; color: var(--muted); }
-.sticker-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.sticker { padding: 8px; min-width: 0; border-radius: 12px; background: var(--surface); }
-.sticker img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; }
-.sticker span { font-size: 10px; display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 4px; color: var(--muted); }
-.sticker-location { margin: 16px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.sticker-editor .panel-title { padding-inline: 0; position: static; }
-.sticker-editor .panel-title img { width: 70px; height: 70px; object-fit: contain; }
+.sticker-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.sticker { padding: 8px; min-width: 0; border-radius: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
+.sticker[data-attached] { background: var(--selected); }
+.sticker-art { position: relative; aspect-ratio: 1; }
+.sticker-art img { display: block; width: 100%; height: 100%; object-fit: contain; transition: opacity .15s; }
+.sticker-art[data-busy] img { opacity: .08; filter: blur(2px); }
+.sticker-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; font-size: 11px; font-weight: 500; text-align: center; }
+.sticker-overlay.muted { color: var(--muted); }
+.spinner { width: 24px; height: 24px; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--green); animation: spin .8s linear infinite; }
+@keyframes spin { to { rotate: 1turn; } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.done { width: 28px; height: 28px; border-radius: 50%; background: var(--green); color: var(--bg); display: grid; place-items: center; }
+.done svg { width: 18px; height: 18px; }
+.sticker-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.sticker-actions button { position: relative; min-width: 0; min-height: 32px; height: 32px; padding: 0; border-radius: 16px; background: var(--bg); color: var(--muted); display: grid; place-items: center; }
+.sticker-actions svg { width: 18px; height: 18px; }
+.sticker-actions button:hover { filter: none; background: var(--line); color: var(--text); }
+.sticker-actions .send { color: var(--green); }
+.sticker-actions .send:hover { background: var(--selected); color: var(--green); }
+.sticker[data-attached] .send:not([aria-disabled=true]):hover { background: var(--bg); box-shadow: inset 0 0 0 1.5px var(--green); }
+.sticker-actions .cancel { color: var(--text); font-size: 20px; line-height: 1; }
+.sticker-actions button[aria-disabled=true] { cursor: default; }
+.sticker-actions button[aria-disabled=true]:hover { background: var(--bg); }
+.sticker-actions .edit[aria-disabled=true]:hover { color: var(--muted); }
+.sticker-actions button[aria-disabled=true] > svg { opacity: .35; }
+.sticker-actions button[aria-expanded=true], .sticker-actions button[aria-expanded=true]:hover { background: var(--green); color: var(--bg); }
+.untagged::after { content: ""; position: absolute; top: 6px; right: calc(50% - 14px); width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.sticker-actions button[aria-expanded=true].untagged::after { background: var(--bg); }
+.sticker-detail { --col: 1; grid-column: 1 / -1; position: relative; background: var(--surface); border-radius: 12px; padding: 14px 16px 16px; margin-top: -2px; scroll-margin-block: 84px 12px; }
+.sticker-detail::before { content: ""; position: absolute; top: -6px; width: 14px; height: 14px; rotate: 45deg; background: var(--selected); clip-path: polygon(0 0, 100% 0, 0 100%); border-radius: 2px; left: calc((100% - 24px) / 3 * (var(--col) - .5) + 12px * (var(--col) - 1) - 7px); }
+.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -4px -6px 8px 0; }
+.detail-head label { margin: 0; }
+.icon-close { width: 32px; height: 32px; min-height: 32px; padding: 0; border-radius: 50%; background: transparent; font-size: 20px; line-height: 1; color: var(--muted); flex-shrink: 0; }
+.icon-close:hover { filter: none; background: var(--hover); color: var(--text); }
+.sticker-detail textarea { background: var(--bg); margin: 0 0 14px; }
+.sticker-detail button:not(.primary):not(.quiet):not(.icon-close) { background: var(--bg); }
+.discard { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.discard span { font-size: 13px; flex-basis: 100%; }
+.discard button { font-size: 12px; }
+.sticker-message { display: flex; align-items: flex-start; gap: 10px; padding: 10px 6px 10px 14px; }
+.sticker-message.inline { padding: 0; margin: 0 0 10px; }
+.sticker-message p { margin: 6px 0; font-size: 12px; line-height: 1.6; flex: 1; overflow-wrap: anywhere; }
+.sticker-message .mark { flex-shrink: 0; margin-top: 6px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--bg); color: var(--muted); }
+.sticker-location { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .error-banner { position: fixed; right: 12px; top: 76px; left: 12px; z-index: 3; border: 1px solid #995344; background: #492d28; padding: 14px; color: #ffddcf; font-size: 13px; line-height: 1.5; border-radius: 9px; box-shadow: 0 3px 14px #0002; }
 .error-banner button { border: 0; background: transparent; padding: 0 5px; min-height: 24px; float: right; }
 .danger { color: #f4a897; }
@@ -102,14 +139,6 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .reasoning-setting input[type=range] { accent-color: var(--green); padding: 0; border: 0; background: transparent; cursor: pointer; height: 24px; }
 .reasoning-setting label { margin-bottom: 0; }
 
-.sticker[draggable=true] { cursor: grab; }
-.sticker[draggable=true]:active { cursor: grabbing; }
-.sticker-preview { width: calc(100% - 40px); max-width: 420px; max-height: calc(100% - 40px); padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--text); overflow: auto; }
-.sticker-preview::backdrop { background: #0009; }
-.sticker-preview h2 { font-size: 17px; font-weight: 500; margin: 0; overflow-wrap: anywhere; }
-.sticker-preview > img { display: block; width: 100%; height: min(240px, 32vh); object-fit: contain; margin: 24px auto; }
-.sticker-preview p { font-size: 13px; line-height: 1.6; color: var(--muted); }
-.sticker-preview .actions { justify-content: flex-end; }
 button.primary { background: var(--green); color: var(--bg); }
 
 .style-details { border-top: 1px solid var(--line); padding-block: 16px; }

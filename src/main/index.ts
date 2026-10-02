@@ -49,7 +49,7 @@ async function start() {
   let stickerSendTimer: ReturnType<typeof setTimeout> | undefined;
   let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
   let stickerLocation: Status['stickerLocation'] = null;
-  let locateRequest: { nonce: string; timer: ReturnType<typeof setTimeout> } | undefined;
+  let locateRequest: { nonce: string; destinationToken: string; timer: ReturnType<typeof setTimeout> } | undefined;
   let chrome = { rail: 64, listWidth: 430, theme: 'dark' as 'dark' | 'light' };
   const win = new BrowserWindow({ width: 1280, height: 860, minWidth: 880, minHeight: 620, backgroundColor: '#161717', title: 'WhatsApp Companion',
     icon: join(root, 'icon.png'),
@@ -90,7 +90,7 @@ async function start() {
     if ((input.control || input.meta) && ['+', '=', '-', '0'].includes(input.key)) event.preventDefault();
   });
   let sequence = 0, lastState: Status['state'] | undefined;
-  const status = (): Status => ({ sequence, panel, stickerLocation, stickerPreview: stickerTransfer.preview, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: assistant.snapshot.ready, loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  const status = (): Status => ({ sequence, panel, stickerLocation, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: assistant.snapshot.ready, loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   const publish = () => {
     if (win.isDestroyed() || controls.webContents.isDestroyed()) return;
     sequence++;
@@ -101,7 +101,17 @@ async function start() {
     lastState = next.state;
   };
   const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => remote.webContents.focus() }, publish, fixture);
-  const cancelSticker = () => { clearTimeout(stickerSendTimer); stickerTransfer.cancel(); if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'cancelSticker' }); };
+  const stopStickerLookup = () => { clearTimeout(stickerSendTimer); if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'cancelSticker' }); };
+  const cancelSticker = () => { if (stickerTransfer.cancel()) stopStickerLookup(); };
+  const observeStickerDestination = (snapshot: typeof assistant.snapshot) => {
+    const revoked = stickerTransfer.observe(snapshot);
+    if (revoked) stopStickerLookup();
+    if (locateRequest && locateRequest.destinationToken !== stickerTransfer.destinationToken(snapshot)) {
+      clearTimeout(locateRequest.timer); locateRequest = undefined;
+      if (stickerLocation) stickerLocation = { id: stickerLocation.id, state: 'unavailable' };
+    }
+    return revoked;
+  };
   const openPanel = (next: Panel) => {
     cancelSticker();
     if (next === 'chat' && (!assistant.snapshot.ready || !assistant.snapshot.settingsId)) {
@@ -192,29 +202,27 @@ async function start() {
           store.update(s => { s.profiles[action.scope] = profile; }); assistant.reconfigure(); break;
         }
         case 'resetProfile': store.update(s => { delete s.profiles[action.scope]; if (action.scope !== 'general') setPreferences(s, action.scope, { learnFromSent: false }); }); assistant.reconfigure(); break;
-        case 'beginStickerDrag': {
-          if (panel !== 'stickers' || !store.state.stickers.some(s => s.id === action.id)) throw new Error('Open the sticker library and choose an indexed sticker.');
-          const ticket = stickerTransfer.begin(action.id, action.nonce, assistant.snapshot);
-          remote.webContents.send('companion:command', { type: 'armStickerDrag', id: ticket.id, nonce: ticket.nonce, target: ticket.target }); break;
-        }
         case 'cancelSticker': cancelSticker(); break;
         case 'sendSticker': {
-          const ticket = stickerTransfer.confirm(action.nonce, assistant.snapshot);
+          if (panel !== 'stickers' || !store.state.stickers.some(s => s.id === action.id)) throw new Error('Open the sticker library and choose an indexed sticker.');
+          const ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot);
+          assistant.activity();
           clearTimeout(stickerSendTimer);
-          stickerSendTimer = setTimeout(() => { stickerTransfer.result(ticket.nonce, false); remote.webContents.send('companion:command', { type: 'cancelSticker' }); publish(); }, 6000);
-          remote.webContents.send('companion:command', { type: 'sendSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, expiresAt: Date.now() + 5000 }); break;
+          stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { stopStickerLookup(); publish(); } }, 60_000);
+          remote.webContents.send('companion:command', { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target }); break;
         }
         case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
         case 'forgetSticker': stickerInbox.discard(action.id); store.update(s => { s.stickers = s.stickers.filter(x => x.id !== action.id); }); break;
         case 'locateSticker': {
+          stickerTransfer.requireDestination(action.destinationToken, assistant.snapshot);
           if (!store.state.stickers.some(s => s.id === action.id)) throw new Error('Sticker no longer indexed.');
           clearTimeout(locateRequest?.timer);
           const nonce = randomUUID();
           stickerLocation = { id: action.id, state: 'looking' };
-          locateRequest = { nonce, timer: setTimeout(() => {
+          locateRequest = { nonce, destinationToken: action.destinationToken, timer: setTimeout(() => {
             locateRequest = undefined; stickerLocation = { id: action.id, state: 'unavailable' }; publish();
           }, 3000) };
-          remote.webContents.send('companion:command', { ...action, nonce }); break;
+          remote.webContents.send('companion:command', { type: 'locateSticker', id: action.id, nonce }); break;
         }
         case 'panel': openPanel(action.panel); break;
         case 'reload': assistant.reconfigure(); await remote.webContents.loadURL(remoteURL); break;
@@ -229,24 +237,25 @@ async function start() {
     if (!envelope.success) return;
     try {
       switch (envelope.data.type) {
-        case 'stickerDrop': {
-          const v = z.object({ type: z.literal('stickerDrop'), nonce: z.string().uuid() }).strict().safeParse(raw);
-          if (v.success && panel === 'stickers') {
-            const ticket = stickerTransfer.drop(v.data.nonce, assistant.snapshot);
-            if (ticket) { assistant.activity(); remote.webContents.send('companion:command', { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target }); publish(); controls.webContents.focus(); }
-          } break;
-        }
         case 'stickerPrepared': {
           const v = z.object({ type: z.literal('stickerPrepared'), nonce: z.string().uuid(), found: z.boolean() }).strict().safeParse(raw);
-          if (v.success) { stickerTransfer.prepared(v.data.nonce, v.data.found, assistant.snapshot); publish(); } break;
+          if (v.success) {
+            const ticket = stickerTransfer.prepared(v.data.nonce, v.data.found, assistant.snapshot);
+            if (ticket) {
+              clearTimeout(stickerSendTimer);
+              stickerSendTimer = setTimeout(() => { stickerTransfer.result(ticket.nonce, false); stopStickerLookup(); publish(); }, 6000);
+              remote.webContents.send('companion:command', { type: 'sendSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, expiresAt: Date.now() + 5000 });
+            } else if (stickerTransfer.send?.nonce === v.data.nonce && stickerTransfer.send.state !== 'sending') stopStickerLookup();
+            publish();
+          } break;
         }
         case 'stickerSent': {
           const v = z.object({ type: z.literal('stickerSent'), nonce: z.string().uuid(), clicked: z.boolean() }).strict().safeParse(raw);
-          if (v.success) { if (stickerTransfer.preview?.nonce === v.data.nonce) clearTimeout(stickerSendTimer); stickerTransfer.result(v.data.nonce, v.data.clicked); publish(); } break;
+          if (v.success) { if (stickerTransfer.send?.nonce === v.data.nonce && stickerTransfer.send.state === 'sending') clearTimeout(stickerSendTimer); stickerTransfer.result(v.data.nonce, v.data.clicked); publish(); } break;
         }
         case 'stickerLocated': {
           const v = z.object({ type: z.literal('stickerLocated'), nonce: z.string().uuid(), found: z.boolean() }).strict().safeParse(raw);
-          if (v.success && locateRequest?.nonce === v.data.nonce && stickerLocation) {
+          if (v.success && locateRequest?.nonce === v.data.nonce && locateRequest.destinationToken === stickerTransfer.destinationToken(assistant.snapshot) && stickerLocation) {
             clearTimeout(locateRequest.timer); locateRequest = undefined;
             stickerLocation = { id: stickerLocation.id, state: v.data.found ? 'found' : 'missing' }; publish();
           } break;
@@ -256,10 +265,15 @@ async function start() {
           if (s.success) {
             let settingsId: string | null;
             try { settingsId = conversations.identify(s.data); }
-            catch (error) { assistant.receive({ ...s.data, settingsId: null, ready: false }); throw error; }
+            catch (error) {
+              const unavailable = { ...s.data, settingsId: null, ready: false };
+              observeStickerDestination(unavailable);
+              assistant.receive(unavailable); throw error;
+            }
             const snapshot = { ...s.data, settingsId };
-            if (stickerTransfer.observe(snapshot)) cancelSticker();
+            const revoked = observeStickerDestination(snapshot);
             assistant.receive(snapshot);
+            if (revoked) publish();
           } break;
         }
         case 'navigate': {
@@ -313,7 +327,7 @@ async function start() {
   remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { cancelSticker(); assistant.reconfigure(); } });
   remote.webContents.on('render-process-gone', () => { cancelSticker(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
-  win.on('closed', () => { clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
+  win.on('closed', () => { stickerTransfer.cancel(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
