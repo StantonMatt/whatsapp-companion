@@ -17,6 +17,8 @@ import { StickerReadiness } from '../core/sticker-readiness';
 import { STICKER_PICKER_WATCHDOG_MS, STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS, stickerMakerDetails, stickerLookupDiagnosticsSchema, type StickerLookupDiagnostics } from '../shared/sticker-transfer';
 import { storedSticker } from './sticker-bytes';
 import { StickerInbox } from './sticker-inbox';
+import { decodeStickerPixels } from './sticker-fingerprint';
+import { forgetSticker } from '../core/stickers';
 import { ProviderCheck } from './provider-check';
 import { ModelCatalog } from './models';
 import { currentTextModels, savedEffort, setReasoning } from '../core/model-policy';
@@ -78,6 +80,7 @@ async function start() {
   let shieldRestoreTimer: ReturnType<typeof setTimeout> | undefined;
   let shieldRestoreNonce: string | undefined;
   let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
+  let closing = false, indexDrained = false;
   let stickerLocation: Status['stickerLocation'] = null;
   let locateRequest: { nonce: string; destinationToken: string; timer: ReturnType<typeof setTimeout> } | undefined;
   let chrome = { rail: 64, listWidth: 430, theme: 'dark' as 'dark' | 'light' };
@@ -358,9 +361,10 @@ async function start() {
   controls.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
     if (mainFrame && !inPlace) { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); assistant.activity(); }
   });
-  const stickerInbox = new StickerInbox(store, publish, () => { assistant.message = 'Sticker indexing could not be saved. Check disk space, then reload WhatsApp to retry.'; publish(); });
+  const stickerInbox = new StickerInbox(store, publish, () => { assistant.message = 'Sticker indexing could not be saved. Check disk space, then reload WhatsApp to retry.'; publish(); }, image =>
+    controls.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(${decodeStickerPixels.toString()})(${JSON.stringify(image)})` }]));
   const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === controls.webContents && event.senderFrame === controls.webContents.mainFrame && event.senderFrame.url === uiURL;
-  const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === remote.webContents && event.senderFrame === remote.webContents.mainFrame && (fixture ? event.senderFrame.url === remoteURL : new URL(event.senderFrame.url).origin === 'https://web.whatsapp.com');
+  const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => !closing && event.sender === remote.webContents && event.senderFrame === remote.webContents.mainFrame && (fixture ? event.senderFrame.url === remoteURL : new URL(event.senderFrame.url).origin === 'https://web.whatsapp.com');
   ipcMain.handle('companion:authorize-auto', (event, raw: unknown) => {
     if (!isRemote(event)) return false;
     const nonce = z.string().uuid().safeParse(raw);
@@ -411,7 +415,7 @@ async function start() {
     catch (error) { return { models: [], error: error instanceof Error ? error.message : 'Unable to unlock the provider key.' }; }
   });
   ipcMain.handle('companion:action', async (event, raw: unknown) => {
-    if (!isLocal(event)) return { ok: false, error: 'Denied' };
+    if (closing || !isLocal(event)) return { ok: false, error: 'Denied' };
     const parsed = actionSchema.safeParse(raw);
     if (!parsed.success) return { ok: false, error: 'Invalid setting. Check the value and try again.' };
     const action = parsed.data;
@@ -482,7 +486,7 @@ async function start() {
           remote.webContents.send('companion:command', route === 'maker' ? { type: 'makeSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route, image: stored.image } : { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route }); break;
         }
         case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
-        case 'forgetSticker': stickerInbox.discard(action.id); store.update(s => { s.stickers = s.stickers.filter(x => x.id !== action.id); }); break;
+        case 'forgetSticker': store.update(s => forgetSticker(s, action.id)); stickerInbox.discard(action.id); break;
         case 'locateSticker': {
           stickerTransfer.requireDestination(action.destinationToken, assistant.snapshot);
           if (!store.state.stickers.some(s => s.id === action.id)) throw new Error('Sticker no longer indexed.');
@@ -611,6 +615,8 @@ async function start() {
           const bytes = Buffer.from(v.data.image.split(',')[1], 'base64');
           if (bytes.length > MAX_STICKER_BYTES || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WEBP') break;
           const id = createHash('sha256').update(bytes).digest('hex');
+          storedSticker(v.data.image, id);
+          if (store.state.forgottenStickers.includes(id)) break;
           const existing = store.state.stickers.find(x => x.id === id);
           if (existing && Date.now() - existing.lastSeen < 60000) break;
           const sticker = stickerSchema.parse({ id, image: v.data.image, searchTerms: '', firstSeen: Date.now(), lastSeen: Date.now() });
@@ -644,9 +650,18 @@ async function start() {
   controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); });
   remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
-  win.on('close', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
+  win.on('close', event => {
+    cancelSticker(); stopMakerInput(); assistant.cancel(); publish(); clearStickerShield(true);
+    if (!indexDrained) {
+      event.preventDefault();
+      if (!closing) {
+        closing = true;
+        void stickerInbox.close().finally(() => { indexDrained = true; win.close(); });
+      }
+    }
+  });
   app.on('before-quit', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
-  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
+  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));

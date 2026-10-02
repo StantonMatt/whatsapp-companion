@@ -8,7 +8,8 @@ export function statusUpdate(status: Status, previous?: State): StatusUpdate {
   const old = new Map(previous.stickers.map(s => [s.id, s]));
   const upsert = stickers.filter(s => {
     const before = old.get(s.id); old.delete(s.id);
-    return !before || s.image !== before.image || s.searchTerms !== before.searchTerms || s.lastSeen !== before.lastSeen || s.firstSeen !== before.firstSeen;
+    return !before || s.image !== before.image || s.searchTerms !== before.searchTerms || s.lastSeen !== before.lastSeen || s.firstSeen !== before.firstSeen
+      || s.fingerprint?.hash !== before.fingerprint?.hash || s.fingerprint?.pixels !== before.fingerprint?.pixels || s.fingerprint?.animated !== before.fingerprint?.animated;
   });
   const removed = [...old.keys()];
   return { ...transient, state: settings, ...(upsert.length || removed.length ? { stickerChanges: { upsert, removed } } : {}) };

@@ -930,12 +930,45 @@ try {
   await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click();
   const temporaryCard = stickerPanel.getByRole('group', { name: 'temporary fixture sticker', exact: true });
   await temporaryCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  const forgottenFixtureImage = await remote.locator('#fixture-extra-sticker').getAttribute('src');
   await remote.locator('#fixture-extra-sticker').evaluate(image => image.remove());
   await stickerEditor.getByRole('button', { name: 'Forget', exact: true }).click();
   await expect(temporaryCard).toHaveCount(0); await expect(stickerEditor).toHaveCount(0);
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
   await expect(sendCard()).toBeFocused();
   console.log('PASS Save closes the editor and Forget removes the disposable card and returns focus to the remaining Send');
+  const observeFixtureImage = async (application, image) => application.evaluate(({ ipcMain, BrowserWindow }, image) => {
+    const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
+    ipcMain.emit('companion:event', { sender: contents, senderFrame: contents.mainFrame }, { type: 'sticker', image });
+  }, image);
+  // Reobserve through the fixture IPC: a loaded source is normally remembered
+  // by the connector, so replacing just its DOM node would not rediscover it.
+  await observeFixtureImage(app, forgottenFixtureImage);
+  await remote.waitForTimeout(750);
+  expect((await local.evaluate(() => window.companion.status())).state.stickers.map(s => s.id)).toEqual([firstStickerId]);
+  expect((await local.evaluate(() => window.companion.status())).state.forgottenStickers).toContain(otherStickerId);
+  console.log('PASS a forgotten sticker is ignored when observed again');
+
+  const dedupeFixtures = JSON.parse(await readFile('tests/fixtures/sticker-dedupe/images.json', 'utf8'));
+  await observeFixtureImage(app, dedupeFixtures.original.image);
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(2);
+  const dedupeOriginal = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id !== firstStickerId);
+  expect(dedupeOriginal.fingerprint).toMatchObject({ version: 1, animated: false });
+  await local.evaluate(id => window.companion.action({ type: 'sticker', id, searchTerms: 'dedupe original' }), dedupeOriginal.id);
+  await observeFixtureImage(app, dedupeFixtures.reencoded.image);
+  // Adding a different image in the same batch also establishes that intake has
+  // completed; this assertion cannot pass just before the suppression runs.
+  await observeFixtureImage(app, dedupeFixtures.different.image);
+  await observeFixtureImage(app, dedupeFixtures.animated.image);
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(4);
+  const deduped = (await local.evaluate(() => window.companion.status())).state.stickers;
+  expect(deduped.filter(s => s.searchTerms === 'dedupe original')).toHaveLength(1);
+  expect(deduped.filter(s => s.fingerprint?.animated)).toHaveLength(2);
+  for (const saved of deduped.filter(s => s.id !== firstStickerId)) {
+    expect((await local.evaluate(id => window.companion.action({ type: 'forgetSticker', id }), saved.id)).ok).toBe(true);
+  }
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
+  console.log('PASS trusted canvas fingerprints suppress a re-encoding, retain different content and separate animation');
 
   await holdStickerCommand('prepareSticker'); await sendCard().click();
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
@@ -1999,6 +2032,11 @@ try {
   console.log('PASS direct sticker opt-in survives unrelated preference patches and actual application restart');
   await reopened.getByLabel('Close panel').click();
   const remoteReopened = (await app.windows()).find(p => p.url().endsWith('fixture.html'));
+  expect(reopenedState.forgottenStickers).toContain(otherStickerId);
+  await observeFixtureImage(app, forgottenFixtureImage);
+  await remoteReopened.waitForTimeout(750);
+  expect((await reopened.evaluate(() => window.companion.status())).state.stickers.map(s => s.id)).toEqual([firstStickerId]);
+  console.log('PASS Forget survives actual restart and another observation without hiding the original sticker');
   await remoteReopened.evaluate(html => { document.querySelector('.messages').innerHTML = html; }, modernHtml);
   await expect.poll(async () => (await reopened.evaluate(() => window.companion.status())).chat.settingsId).toBe(modernChat);
   await remoteReopened.locator('#companion-chat-settings').click();

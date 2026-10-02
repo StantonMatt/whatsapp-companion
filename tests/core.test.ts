@@ -325,14 +325,14 @@ describe('sticker persistence and search', () => {
     for (let i = 0; i < 150; i++) inbox.add({ ...sticker, id: i.toString(16).padStart(64, '0') });
     expect(write).not.toHaveBeenCalled(); await vi.advanceTimersByTimeAsync(501);
     expect(write).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledTimes(1); expect(store.state.stickers).toHaveLength(150);
-    inbox.flush(); expect(write).toHaveBeenCalledTimes(1);
+    await inbox.flush(); expect(write).toHaveBeenCalledTimes(1);
   });
-  test('a failed sticker batch preserves state and can be retried', () => {
+  test('a failed sticker batch preserves state and can be retried', async () => {
     const store = new Store(directory()), failed = vi.fn(), write = vi.spyOn(store, 'update');
     const inbox = new StickerInbox(store, () => {}, failed); inbox.add(sticker);
-    write.mockImplementationOnce(() => { throw new Error('Disk full'); }); expect(inbox.flush()).toBe(false);
+    write.mockImplementationOnce(() => { throw new Error('Disk full'); }); expect(await inbox.flush()).toBe(false);
     expect(store.state.stickers).toHaveLength(0); expect(failed).toHaveBeenCalledTimes(1);
-    expect(inbox.flush()).toBe(true); expect(store.state.stickers).toHaveLength(1);
+    expect(await inbox.flush()).toBe(true); expect(store.state.stickers).toHaveLength(1);
   });
 });
 describe('bounded automatic replies', () => {

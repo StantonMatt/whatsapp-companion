@@ -6,7 +6,7 @@ import { STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS } from '../src/shar
 type Contents = EventEmitter & { mainFrame: { url: string }; send: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; isFocused: ReturnType<typeof vi.fn> };
 const mocks = vi.hoisted(() => ({
   views: [] as { webContents: Contents; getBounds: () => ViewBounds }[],
-  win: undefined as (EventEmitter & { contentView: EventEmitter }) | undefined,
+  win: undefined as (EventEmitter & { contentView: EventEmitter; close: () => void }) | undefined,
   handlers: new Map<string, (...args: any[]) => any>(),
   ipc: undefined as EventEmitter | undefined,
   app: undefined as EventEmitter | undefined,
@@ -57,6 +57,11 @@ vi.mock('electron', async () => {
     constructor() { super(); mocks.win = this; }
     isDestroyed = () => false;
     loadURL = this.webContents.loadURL;
+    close() {
+      const event = { preventDefault: vi.fn() };
+      this.emit('close', event);
+      if (!event.preventDefault.mock.calls.length) this.emit('closed');
+    }
   }
   const app = Object.assign(new EventEmitter(), {
     commandLine: { removeSwitch: vi.fn(), hasSwitch: () => true },
@@ -214,7 +219,7 @@ test('clicked replenishes the confirmation and cleanup budget after a delayed gr
 
 const inputExits = interruptions.filter(({ name }) => name !== 'shield cap');
 inputExits.push(
-  { name: 'window close', run: () => mocks.win!.emit('close') },
+  { name: 'window close', run: () => mocks.win!.close() },
   { name: 'app quit', run: () => mocks.app!.emit('before-quit') },
   { name: 'window closed', run: () => mocks.win!.emit('closed') }
 );
