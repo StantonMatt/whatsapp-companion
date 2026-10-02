@@ -33,7 +33,7 @@ import { StickerInbox } from '../src/main/sticker-inbox';
 import type { Status, StatusUpdate } from '../src/shared/model';
 
 const chat = '123@c.us', group = '456@g.us';
-const snap = (patch: Partial<Snapshot> = {}): Snapshot => ({ ...emptySnapshot, chatId: chat, name: 'Alex', ready: true, atBottom: true, caretAtEnd: true, messages: [{ id: 'a', text: 'Hello', outgoing: false }], ...patch });
+const snap = (patch: Partial<Snapshot> = {}): Snapshot => ({ ...emptySnapshot, chatId: chat, name: 'Alex', conversationOpen: true, ready: true, atBottom: true, caretAtEnd: true, messages: [{ id: 'a', text: 'Hello', outgoing: false }], ...patch });
 const dirs: string[] = [];
 const directory = () => { const dir = mkdtempSync(join(tmpdir(), 'companion-test-')); dirs.push(dir); return dir; };
 afterEach(() => { vi.useRealTimers(); dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })); });
@@ -180,6 +180,21 @@ describe('stale suggestions', () => {
     expect(inline.current(inline.begin(original), snap(patch))).toBe(true);
     expect(sending.current(sending.begin(original, true), snap(patch))).toBe(false);
   });
+  test('maker ownership changes deliver snapshots without invalidating inline suggestion content', () => {
+    const original = snap(), assigned = { ...original, stickerPreparation: 'maker-1' };
+    expect(snapshotKey(assigned)).not.toBe(snapshotKey(original));
+    expect(snapshotKey({ ...original, stickerPreparation: undefined })).toBe(snapshotKey(original));
+    expect(suggestionKey(assigned)).toBe(suggestionKey(original));
+    const changed = vi.fn(), store = new Store(directory());
+    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, changed, true);
+    assistant.receive(original); changed.mockClear();
+    assistant.receive(assigned);
+    expect(assistant.snapshot.stickerPreparation).toBe('maker-1');
+    expect(changed).toHaveBeenCalled(); changed.mockClear();
+    assistant.receive(original);
+    expect(assistant.snapshot.stickerPreparation).toBeUndefined();
+    expect(changed).toHaveBeenCalled(); assistant.cancel();
+  });
   test.each([['Thank', 's!'], ['Thanks', ' again!']])('preserves a provider suffix after %s', async (draft, suffix) => {
     const store = new Store(directory()), commands: RemoteCommand[] = [];
     const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, async () => suffix);
@@ -250,7 +265,7 @@ describe('stale suggestions', () => {
   });
 });
 describe('incremental desktop status', () => {
-  const full = (sequence: number): Status => ({ sequence, runtimePaused: false, state: initialState(), chat: { chatId: null, name: '', kind: 'direct', ready: false }, keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: 'Ready', pending: null });
+  const full = (sequence: number): Status => ({ sequence, runtimePaused: false, state: initialState(), chat: { chatId: null, name: '', kind: 'direct', ready: false, canSendSticker: false }, keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: 'Ready', pending: null });
   const update = (sequence: number): StatusUpdate => { const { state: _state, ...transient } = full(sequence); return { ...transient, message: 'Thinking' }; };
   test('preserves the existing library without copying it for transient updates', () => {
     const cache = new StatusCache(), initial = full(1); cache.accept(initial);

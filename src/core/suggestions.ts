@@ -7,11 +7,13 @@ function messagesForKey(s: Snapshot) {
 }
 
 export function snapshotKey(s: Snapshot): string {
-  return JSON.stringify([s.chatId, s.name, s.revision, s.activity, s.editRevision, s.ready, s.atBottom, s.composing, s.focused, s.caretAtEnd, s.draft, s.draftIssue, messagesForKey(s)]);
+  // Maker assignment/teardown can leave the composer unchanged. Deliver both
+  // ownership transitions even when no other semantic snapshot field changes.
+  return JSON.stringify([s.chatId, s.name, s.revision, s.activity, s.editRevision, s.conversationOpen, s.ready, s.atBottom, s.composing, s.focused, s.caretAtEnd, s.draft, s.draftIssue, s.stickerPreparation ?? null, messagesForKey(s)]);
 }
 // Inline drafts survive navigation and focus; automatic sends still use the full snapshot.
 export function suggestionKey(s: Snapshot): string {
-  return JSON.stringify([s.chatId, s.name, s.revision, s.editRevision, s.ready, s.composing, s.draft, s.draftIssue, messagesForKey(s)]);
+  return JSON.stringify([s.chatId, s.name, s.revision, s.editRevision, s.conversationOpen, s.ready, s.composing, s.draft, s.draftIssue, messagesForKey(s)]);
 }
 export function suggestionContext(s: Snapshot): string {
   return JSON.stringify([s.chatId, s.name, s.revision, s.editRevision, s.draft, messagesForKey(s)]);

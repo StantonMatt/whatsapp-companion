@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopAPI, StatusUpdate } from '../shared/model';
 const api: DesktopAPI = {
+  shieldReady: (nonce, reducedMotion) => ipcRenderer.invoke('companion:shield-ready', { nonce, reducedMotion }),
+  shieldFaded: nonce => ipcRenderer.invoke('companion:shield-faded', nonce),
   status: () => ipcRenderer.invoke('companion:status'),
   models: provider => ipcRenderer.invoke('companion:models', provider),
   action: action => ipcRenderer.invoke('companion:action', action),

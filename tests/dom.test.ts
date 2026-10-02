@@ -3,13 +3,17 @@ import { test, expect, vi, afterEach } from 'vitest';
 import { DomConnector, peerFromMessageId, caretAtEnd, readDraft } from '../src/connector/dom';
 import { stickerImageState } from '../src/connector/sticker-image-state';
 import { snapshotSchema } from '../src/shared/model';
+import { StickerTransfer, canSendSticker, stickerRoute } from '../src/core/sticker-transfer';
 import { snapshotKey, suggestionKey } from '../src/core/suggestions';
 import type { RemoteEvent } from '../src/shared/connector';
+import { composerProvablyEmpty } from '../src/connector/draft';
+import { emptyComposers } from './fixtures/empty-composers';
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.getSelection()?.removeAllRanges(); document.body.replaceChildren(); });
 function fixture() {
   document.body.innerHTML = '<div id="main"><header><span title="A friend">A friend</span></header><div data-id="false_123@c.us_one"><span class="selectable-text copyable-text">Hi</span></div><footer><div contenteditable="true" role="textbox">A draft</div></footer></div>';
   const editor = document.querySelector<HTMLElement>('[role=textbox]')!;
   editor.getBoundingClientRect = () => ({ height: 40, width: 500, x: 0, y: 200, top: 200, bottom: 240, left: 0, right: 500, toJSON() {} });
+  document.querySelector('#main')!.getBoundingClientRect = () => ({ height: 600, width: 600 } as DOMRect);
   return editor;
 }
 test('message identity recognizes personal, LID and group peers without relying on display names', () => {
@@ -25,6 +29,59 @@ test('connector waits for a stable identity, fails closed on mixed peers and det
   expect(connector.read().revision).not.toBe(first.revision);
   const other = document.createElement('div'); other.dataset.id = 'false_456@g.us_second'; document.querySelector('#main')!.append(other);
   expect(connector.read().chatId).toBeNull(); expect(connector.read().ready).toBe(false);
+});
+test.each(['display', 'visibility', 'ancestor', 'zero-size'] as const)('a hidden conversation (%s) retains identity but cannot authorize sending', mode => {
+  vi.useFakeTimers(); fixture();
+  const connector = new DomConnector(document, () => {}), transfer = new StickerTransfer();
+  connector.read(); vi.advanceTimersByTime(600);
+  const before = connector.read(), displayed = transfer.destinationToken(before);
+  expect(before.conversationOpen).toBe(true);
+  const main = document.querySelector<HTMLElement>('#main')!;
+  if (mode === 'display') main.style.display = 'none';
+  if (mode === 'visibility') main.style.visibility = 'hidden';
+  if (mode === 'ancestor') document.body.style.display = 'none';
+  if (mode === 'zero-size') main.getBoundingClientRect = () => ({ width: 0, height: 0 } as DOMRect);
+  try {
+    const hidden = snapshotSchema.parse(connector.read());
+    expect(hidden).toMatchObject({ chatId: before.chatId, name: before.name, conversationOpen: false, ready: false });
+    expect(canSendSticker(hidden)).toBe(false);
+    expect(transfer.destinationToken(hidden)).not.toBe(displayed);
+    expect(() => transfer.begin('a'.repeat(64), 'hidden', transfer.destinationToken(hidden), hidden)).toThrow('Open a conversation');
+    expect(transfer.send).toBeNull();
+  } finally { document.body.style.display = ''; }
+});
+test.each(['missing', 'hidden', 'empty'] as const)('a visible conversation with a %s composer selects the appropriate static route', mode => {
+  vi.useFakeTimers(); const editor = fixture(); editor.replaceChildren();
+  const connector = new DomConnector(document, () => {}), transfer = new StickerTransfer();
+  connector.read(); vi.advanceTimersByTime(600);
+  if (mode === 'missing') editor.remove();
+  if (mode === 'hidden') editor.style.display = 'none';
+  const snapshot = snapshotSchema.parse(connector.read());
+  expect(snapshot.conversationOpen).toBe(true);
+  expect(snapshot.ready).toBe(mode === 'empty');
+  expect(canSendSticker(snapshot)).toBe(true);
+  const route = stickerRoute(snapshot, false);
+  expect(route).toBe(mode === 'empty' ? 'maker' : 'picker');
+  transfer.begin('a'.repeat(64), mode, transfer.destinationToken(snapshot), snapshot, 0, route, false);
+  expect(transfer.send).toMatchObject({ route, state: mode === 'empty' ? 'preparing' : 'finding' });
+});
+test('conversation openness is required and strictly boolean at the remote schema boundary', () => {
+  fixture(); const snapshot = new DomConnector(document, () => {}).read();
+  const { conversationOpen, ...missing } = snapshot;
+  expect(snapshotSchema.safeParse(snapshot).success).toBe(true);
+  for (const value of [missing, { ...snapshot, conversationOpen: 'true' }, { ...snapshot, conversationOpen: null }, { ...snapshot, visible: true }]) {
+    expect(snapshotSchema.safeParse(value).success).toBe(false);
+  }
+});
+test('a visible chat settling without a composer still publishes its open state to main', () => {
+  vi.useFakeTimers(); fixture().remove();
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event));
+  connector.start();
+  try {
+    expect(events.find(event => event.type === 'snapshot')).toMatchObject({ snapshot: { conversationOpen: false, ready: false } });
+    vi.advanceTimersByTime(800);
+    expect(events.filter(event => event.type === 'snapshot').at(-1)).toMatchObject({ snapshot: { conversationOpen: true, ready: false } });
+  } finally { connector.stop(); }
 });
 function modernFixture() {
   const editor = fixture();
@@ -608,4 +665,59 @@ test.each(['return', 'edit', 'incoming'])('a revision arriving in another field 
     if (action === 'return') expect(insert).toHaveBeenCalledExactlyOnceWith('insertText', false, 'Revised draft');
     else expect(insert).not.toHaveBeenCalled();
   } finally { connector.stop(); }
+});
+
+
+test.each(['newline', 'breaks', 'empty-mention'] as const)('normalized %s draft cannot be advertised as a provably empty composer', kind => {
+  const editor = fixture(); editor.replaceChildren();
+  if (kind === 'newline') editor.textContent = '\n';
+  if (kind === 'breaks') editor.innerHTML = '<p><br></p><p><br></p>';
+  if (kind === 'empty-mention') editor.innerHTML = '<span contenteditable="false"></span>';
+  const connector = new DomConnector(document, () => {});
+  const snapshot = connector.read();
+  expect(snapshot.draft !== '' || snapshot.draftIssue !== null).toBe(true);
+});
+
+test('a native empty paragraph placeholder remains an empty composer', () => {
+  const editor = fixture(); editor.innerHTML = '<p><br></p>';
+  const connector = new DomConnector(document, () => {});
+  expect(connector.read()).toMatchObject({ draft: '', draftIssue: null });
+});
+
+test.each(Object.entries(emptyComposers))('live empty composer %s selects maker through the validated snapshot', (_name, markup) => {
+  vi.useFakeTimers(); const editor = modernFixture();
+  editor.dataset.testid = 'conversation-compose-box-input'; editor.dataset.lexicalEditor = 'true'; editor.innerHTML = markup;
+  // Frameworks can retain empty Text nodes alongside the paragraph.
+  editor.prepend(document.createTextNode('')); editor.append(document.createTextNode(''));
+  const connector = new DomConnector(document, () => {});
+  connector.read(); vi.advanceTimersByTime(600);
+  const snapshot = snapshotSchema.parse(connector.read());
+  expect(composerProvablyEmpty(editor, false)).toBe(true);
+  expect(readDraft(editor)).toBe('');
+  expect(snapshot).toMatchObject({ conversationOpen: true, ready: true, draft: '', draftIssue: null, composing: false });
+  expect(stickerRoute(snapshot, false)).toBe('maker');
+  expect(stickerRoute(snapshot, true, true)).toBe('maker');
+  expect(stickerRoute(snapshot, true)).toBe('picker');
+  expect(composerProvablyEmpty(editor, true)).toBe(false);
+});
+
+test.each([
+  '<p><span data-lexical-text="true">\u200bDraft\ufeff</span><br></p>',
+  '<p> </p>', '<p>\n</p>', '<p>\u00a0</p>', '<p>\u200c</p>',
+  '<p><br><br></p>', '<p><br></p><p><br></p>',
+  '<div><span><p></p></span><span><p></p></span></div>', '<p></p><span><br></span>',
+  '<p><span data-lexical-text="true" contenteditable="false">Real text</span></p>',
+  '<span data-lexical-placeholder="true">Real editable text</span>',
+  '<span contenteditable="false" data-mention="true"></span>',
+  '<span data-lexical-placeholder="true" contenteditable="false"><img></span>',
+  '<span data-placeholder="true" contenteditable="false" data-mention="true"></span>',
+  '<img alt="">', '<svg></svg>', '<embed>', '<span data-plain-text="🙂"></span>'
+])('user content or uncertain markup selects picker: %s', markup => {
+  vi.useFakeTimers(); const editor = fixture(); editor.innerHTML = markup;
+  const connector = new DomConnector(document, () => {});
+  connector.read(); vi.advanceTimersByTime(600);
+  const snapshot = snapshotSchema.parse(connector.read());
+  expect(composerProvablyEmpty(editor, false)).toBe(false);
+  expect(snapshot.draft !== '' || snapshot.draftIssue !== null).toBe(true);
+  expect(stickerRoute(snapshot, false)).toBe('picker');
 });

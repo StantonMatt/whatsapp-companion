@@ -1,3 +1,9 @@
+import { readDraft, composerProvablyEmpty } from './draft';
+export { readDraft } from './draft';
+import { messageDirection, ownElements, quoteSelector, peerFromMessageId } from './message-direction';
+export { peerFromMessageId } from './message-direction';
+import { StickerReadiness } from '../core/sticker-readiness';
+import type { StickerAuthorization } from '../shared/sticker-transfer';
 import { StickerTransferConnector } from './sticker-transfer';
 import { stickerImageState } from './sticker-image-state';
 import { composerStyle } from './composer-style';
@@ -9,33 +15,21 @@ import type { Snapshot, Message } from '../shared/model';
 import { snapshotKey, suggestionKey } from '../core/suggestions';
 import type { RemoteCommand, RemoteEvent } from '../shared/connector';
 
-export function peerFromMessageId(id: string): string | null {
-  return /^(?:true|false)_([\d-]+@(?:c\.us|s\.whatsapp\.net|g\.us|lid))_/.exec(id)?.[1] ?? null;
-}
-// Quotes are context belonging to another message, never authorship/direction of this one.
-const quoteSelector = '[data-testid="quoted-message"], [data-testid="quoted-message-container"], [data-testid="quoted-msg"], [data-testid="reply-context"]';
 const textSelector = '.selectable-text.copyable-text, [data-testid="msg-text"], [data-testid="selectable-text"]';
-function ownElements(node: HTMLElement, selector: string) {
-  return [...node.querySelectorAll<HTMLElement>(selector)].filter(el => {
-    const quote = el.closest(quoteSelector);
-    return !quote || quote === node;
-  });
+function visible(element: Element | null): boolean {
+  if (!element) return false;
+  const bounds = element.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return false;
+  for (let node: Element | null = element; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.contentVisibility === 'hidden') return false;
+  }
+  return true;
 }
 function senderLabel(node: HTMLElement): string | undefined {
   const author = ownElements(node, '[data-testid="author"]')[0];
   const label = author ? readDraft(author) : ownElements(node, '[data-pre-plain-text]').map(el => /^\[[^\]]+\]\s*(.+):\s*$/.exec(el.getAttribute('data-pre-plain-text') ?? '')?.[1]).find(Boolean);
   return label?.trim().slice(0, 150) || undefined;
-}
-function messageDirection(node: HTMLElement): boolean | null {
-  if (peerFromMessageId(node.dataset.id ?? '')) return node.dataset.id!.startsWith('true_');
-  if (node.matches('.message-out') || ownElements(node, '[data-icon="tail-out"], [data-testid="tail-out"], .message-out').length) return true;
-  if (node.matches('.message-in') || ownElements(node, '[data-icon="tail-in"], [data-testid="tail-in"], .message-in').length) return false;
-  const labels = ownElements(node, '[aria-label]').map(el => el.getAttribute('aria-label')?.trim() ?? '');
-  if (labels.some(label => /^(You|Tú|Você):$/.test(label))) return true;
-  // The visible group-author header identifies another participant, including media without tails.
-  if (ownElements(node, '[data-testid="author"]').length) return false;
-  // Copy metadata names alone do not establish whether a sender is the account owner.
-  return null;
 }
 function messageAttachment(node: HTMLElement): Message['attachment'] {
   // Observe media type only. Never fetch URLs, upload bytes or mistake avatars/emoji for photos.
@@ -59,25 +53,6 @@ function quotedMessage(node: HTMLElement): Message['quoted'] {
   if (!quote) return undefined;
   const sender = senderLabel(quote), attachment = messageAttachment(quote), name = attachmentName(quote);
   return { text: messageText(quote), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}), ...(name ? { attachmentName: name } : {}) };
-}
-export function readDraft(editor: HTMLElement): string {
-  const serialize = (node: Node): string => {
-    if (node.nodeType === 3) return node.textContent ?? '';
-    if (!(node instanceof Element)) return '';
-    const tag = node.tagName.toUpperCase();
-    if (tag === 'BR') return '\n';
-    if (tag === 'IMG') return node.getAttribute('data-plain-text') || node.getAttribute('alt') || '\ufffc';
-    if (['SVG', 'CANVAS', 'VIDEO', 'AUDIO', 'IFRAME', 'OBJECT'].includes(tag)) return '\ufffc';
-    let text = '';
-    for (const child of node.childNodes) {
-      const block = child instanceof Element && ['DIV', 'P', 'LI'].includes(child.tagName);
-      if (block && text && !text.endsWith('\n')) text += '\n';
-      text += serialize(child);
-      if (block && child.nextSibling && !text.endsWith('\n')) text += '\n';
-    }
-    return text || (node.getAttribute('contenteditable') === 'false' ? '\ufffc' : '');
-  };
-  return serialize(editor).replace(/\u200b/g, '').replace(/\n$/, '');
 }
 export function caretAtEnd(editor: HTMLElement): boolean {
   const selection = editor.ownerDocument.getSelection();
@@ -123,11 +98,13 @@ export class DomConnector {
   private activityGeneration = 0;
   private editRevision = 0;
   private identity = '';
+  private conversationVisible = false;
   private root: Element | null = null;
   private editorRoot: Element | null = null;
   private selectedChat: Element | null = null;
   private observedMessages = new Map<string, Message>();
   private stableSince = 0;
+  private composerStableSince = 0;
   private lastKey = '';
   private lastContentKey = '';
   private popupMode: 'refine' | 'notice' | 'pending' = 'notice';
@@ -146,13 +123,14 @@ export class DomConnector {
   private indexing = false;
   private inserting = false;
   private dispatch?: { command: Extract<RemoteCommand, { type: 'autoSend' }>; before: Snapshot; editor: HTMLElement };
-  constructor(private doc: Document, private emit: (event: RemoteEvent) => void, private authorizeAutomatic: (nonce: string) => Promise<boolean> = async () => false, private authorizeSticker: (nonce: string) => Promise<boolean> = async () => false) {}
+  constructor(private doc: Document, private emit: (event: RemoteEvent) => void, private authorizeAutomatic: (nonce: string) => Promise<boolean> = async () => false, private authorizeSticker: (nonce: string | StickerAuthorization) => Promise<boolean> = async () => false) {}
   editor() { return this.doc.querySelector<HTMLElement>('#main footer [contenteditable="true"][role="textbox"], #main [data-testid="conversation-compose-box-input"][contenteditable="true"]'); }
   read(): Snapshot {
     const main = this.doc.querySelector('#main');
     const editor = this.editor();
     if (this.composingEditor !== editor) this.composingEditor = null;
-    const draft = editor ? readDraft(editor) : '';
+    const emptyComposer = composerProvablyEmpty(editor, this.composing);
+    const draft = emptyComposer ? '' : editor ? readDraft(editor) : '';
     const title = main?.querySelector('header [data-testid="conversation-info-header-chat-title"]');
     const name = (title?.textContent ?? main?.querySelector('header [title]')?.getAttribute('title') ?? main?.querySelector('header')?.textContent ?? '').trim().slice(0, 150);
     const selected = this.doc.querySelector('#pane-side [aria-selected="true"]');
@@ -160,8 +138,13 @@ export class DomConnector {
     const peers = [...new Set(nodes.map(n => peerFromMessageId(n.dataset.id!)).filter((id): id is string => id !== null))];
     const chatId = peers.length === 1 ? peers[0] : null;
     const identity = `${name}|${chatId}`;
-    if (main !== this.root || identity !== this.identity || editor !== this.editorRoot || selected !== this.selectedChat) {
-      this.revision++; this.stableSince = Date.now(); this.identity = identity; this.root = main; this.editorRoot = editor; this.selectedChat = selected;
+    const conversationVisible = visible(main);
+    const conversationChanged = main !== this.root || identity !== this.identity || selected !== this.selectedChat || conversationVisible !== this.conversationVisible;
+    if (conversationChanged || editor !== this.editorRoot) {
+      this.revision++; this.composerStableSince = Date.now();
+      if (conversationChanged) this.stableSince = Date.now();
+      this.identity = identity; this.root = main; this.editorRoot = editor; this.selectedChat = selected;
+      this.conversationVisible = conversationVisible;
       this.observedMessages.clear();
     }
     const messages: Message[] = nodes.slice(-30).map(node => {
@@ -187,15 +170,19 @@ export class DomConnector {
       const last = nodes.at(-1)?.getBoundingClientRect(), footer = editor?.getBoundingClientRect();
       atBottom = Boolean(last && footer && last.height > 0 && last.bottom <= footer.top && last.top > 0);
     }
-    return { chatId, name, kind: chatId ? chatId.endsWith('@g.us') ? 'group' : 'direct' : nodes.some(n => ownElements(n, '[data-testid="author"]').length) ? 'group' : 'unknown', messages,
-      draft: draft.slice(0, 8000), draftIssue: draft.length > 8000 ? 'too-long' : draft.includes('\ufffc') || editor?.querySelector('[contenteditable="false"]:not(img)') ? 'unsupported' : null,
+    const conversationOpen = Boolean(conversationVisible && peers.length <= 1 && (chatId || (title && selected && nodes.length)) && name && Date.now() - this.stableSince >= 500);
+    const snapshot: Snapshot = { chatId, name, conversationOpen, kind: chatId ? chatId.endsWith('@g.us') ? 'group' : 'direct' : nodes.some(n => ownElements(n, '[data-testid="author"]').length) ? 'group' : 'unknown', messages,
+      draft: draft.slice(0, 8000), draftIssue: draft.length > 8000 ? 'too-long' : !emptyComposer && (draft.includes('\ufffc') || editor?.querySelector('[contenteditable="false"]:not(img)') || (editor && !draft)) ? 'unsupported' : null,
       composing: this.composing, focused: Boolean(editor && this.doc.hasFocus() && this.doc.activeElement === editor), caretAtEnd: Boolean(editor && caretAtEnd(editor)),
-      ready: Boolean(editor && editor.getBoundingClientRect().height && peers.length <= 1 && (chatId || (title && selected && nodes.length)) && name && Date.now() - this.stableSince >= 500),
+      ready: conversationOpen && visible(editor) && Date.now() - this.composerStableSince >= 500,
       atBottom, revision: String(this.revision), activity: this.activityGeneration, editRevision: this.editRevision };
+    const preparation = this.stickerTransfer?.preparation(snapshot);
+    if (preparation) snapshot.stickerPreparation = preparation;
+    return snapshot;
   }
   start() {
     this.stickerPickerLayout = new StickerPickerLayout(this.doc);
-    this.stickerTransfer = new StickerTransferConnector(this.doc, () => this.read(), this.stickerSources, this.emit, this.authorizeSticker);
+    this.stickerTransfer = new StickerTransferConnector(this.doc, () => this.read(), this.stickerSources, this.emit, nonce => this.authorizeSticker(nonce), request => this.authorizeSticker(request));
     this.navigation = new Navigation(this.doc, this.navigationEvent);
     this.host = this.doc.createElement('div'); this.host.id = 'companion-overlay';
     this.host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483646';
@@ -366,10 +353,11 @@ export class DomConnector {
       this.hiddenPlaceholder = undefined;
     }
   }
+  private stickerReadiness = new StickerReadiness();
   private refresh() {
     this.stickerPickerLayout?.refresh();
     const snapshot = this.read(), key = snapshotKey(snapshot);
-    this.navigation?.refresh(snapshot.ready);
+    this.navigation?.refresh(this.stickerReadiness.present(snapshot, snapshot.stickerPreparation).ready);
     const dark = this.navigation?.theme !== 'light';
     for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', muted: '#9babae', line: '#373b3c', hover: '#2a3942' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', muted: '#667781', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
     const contentKey = suggestionKey(snapshot);
@@ -431,6 +419,7 @@ export class DomConnector {
   }
   command(command: RemoteCommand) {
     if (command.type === 'captureStickerPickerLayout') { this.emit({ type: 'stickerPickerLayout', nonce: command.nonce, result: captureStickerPicker(this.doc) }); return; }
+    if (command.type === 'makeSticker') { void this.stickerTransfer?.make(command, command.image); return; }
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }

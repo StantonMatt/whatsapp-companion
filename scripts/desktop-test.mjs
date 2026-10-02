@@ -508,6 +508,8 @@ try {
   // are explicitly bound to the fixture's Alex conversation.
   await remote.getByRole('button', { name: /^Alex/ }).click();
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Alex', chatId: '123456@c.us', ready: true });
+  // Keep the existing lookup/race scenarios animated; static routes are tested below.
+  await remote.evaluate(() => { window.fixtureAnimatedSticker = true; });
   await remote.getByRole('button', { name: 'Load sticker', exact: true }).click();
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
   await openPanel('stickers');
@@ -552,8 +554,11 @@ try {
   await remote.locator('.messages').getByRole('img', { name: 'sticker', exact: true }).evaluate(el => el.remove());
   await stickerEditor.getByRole('button', { name: 'Locate in WhatsApp', exact: true }).click();
   await expect(stickerLocation).toContainText('This sticker isn’t loaded in WhatsApp.');
-  // No composer used to leave the notice at (0,0), behind the native controls view.
+  // A hidden conversation can retain stale DOM identity but must be unavailable.
+  const tokenBeforeHiding = (await local.evaluate(() => window.companion.status())).chat.destinationToken;
   await remote.evaluate(() => { document.querySelector('#main').style.display = 'none'; });
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Alex', ready: false, canSendSticker: false });
+  expect((await local.evaluate(() => window.companion.status())).chat.destinationToken).not.toBe(tokenBeforeHiding);
   await stickerEditor.getByRole('button', { name: 'Locate in WhatsApp', exact: true }).click();
   await expect(stickerPanel.getByRole('button', { name: 'Open a chat to send', exact: true })).toHaveAttribute('aria-disabled', 'true');
   await expect(stickerPanel.locator('.hint')).toHaveText('1 stickers indexed · Open a chat to send');
@@ -561,6 +566,11 @@ try {
   // the handler's guard while retaining the button's focusability.
   await stickerPanel.getByRole('button', { name: 'Open a chat to send', exact: true }).click({ force: true });
   expect((await local.evaluate(() => window.companion.status())).stickerSend).toBeNull();
+  const hiddenSend = await local.evaluate(async () => {
+    const status = await window.companion.status();
+    return window.companion.action({ type: 'sendSticker', id: status.state.stickers[0].id, nonce: crypto.randomUUID(), destinationToken: status.chat.destinationToken });
+  });
+  expect(hiddenSend).toEqual({ ok: false, error: 'Open a conversation before sending a sticker.' });
   await expect(stickerLocation).toBeVisible();
   await stickerLocation.scrollIntoViewIfNeeded();
   const noticeFits = await stickerLocation.evaluate(el => {
@@ -571,6 +581,7 @@ try {
   await expect(local.locator('.connection-status')).toHaveCount(0);
   await local.screenshot({ path: '.local/screenshots/sticker-location.png' });
   await remote.evaluate(() => { document.querySelector('#main').style.display = ''; });
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat.canSendSticker).toBe(true);
   expect(await remote.evaluate(() => window.fixtureSent.length)).toBe(sentBeforeLocating);
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(stickerEditor.getByRole('group', { name: 'Discard changes?', exact: true }).getByRole('button', { name: 'Keep editing', exact: true })).toBeFocused();
@@ -590,7 +601,7 @@ try {
   await stickerEditor.getByRole('group', { name: 'Discard changes?', exact: true }).getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(stickerEditor).toHaveCount(0);
   await expect(stickerPanel.getByRole('button', { name: 'Edit search terms', exact: true })).toBeFocused();
-  console.log('PASS location feedback stays inside the sticker panel without a composer; preserves edits and never sends');
+  console.log('PASS a hidden conversation disables Send despite stale identity; location feedback stays inside the panel and preserves edits');
   const stickerCard = stickerPanel.getByRole('group', { name: 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo', exact: true });
   // This live paragraph has no status role; location feedback does.
   const stickerLive = stickerPanel.locator('[aria-live="polite"]');
@@ -751,7 +762,7 @@ try {
   expect(await stickerState()).toBeNull();
   expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(0);
   await sendCard().click();
-  await expect.poll(async () => (await stickerState())?.state).toBe('sent');
+  await expect.poll(stickerState).toMatchObject({ route: 'picker', animated: true, state: 'sent' });
   await expect(stickerLive).toHaveText('Sent to Alex');
   await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Sent');
   await expect.poll(() => remote.evaluate(() => window.fixtureStickerSent.length)).toBe(1);
@@ -764,7 +775,7 @@ try {
   expect(replay.ok).toBe(false);
   expect(await remote.evaluate(() => window.fixtureSent.length)).toBe(textSendsBeforeStickers);
   expect(await remote.evaluate(() => window.fixtureMediaSent)).toBe(0);
-  // Main retains the result; only the UI's two-second flash returns to idle.
+  // Main retains the result; only the UI's 1.5-second flash returns to idle.
   await expect(stickerLive).toHaveText('');
   await expect(stickerCard.locator('.sticker-overlay')).toHaveCount(0);
   expect((await stickerState()).state).toBe('sent');
@@ -864,10 +875,10 @@ try {
   // Hold the lookup to exercise finding deterministically, without live accounts.
   await holdStickerCommand('prepareSticker');
   await sendCard().click();
-  await expect(stickerCard.getByRole('button', { name: 'Finding sticker…', exact: true })).toHaveAttribute('aria-disabled', 'true');
-  await expect(stickerLive).toHaveText('Finding sticker…');
-  await expect(stickerCard.getByRole('button', { name: 'Finding sticker…', exact: true })).toBeFocused();
-  await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Finding…');
+  await expect(stickerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toHaveAttribute('aria-disabled', 'true');
+  await expect(stickerLive).toHaveText('Sending sticker…');
+  await expect(stickerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toBeFocused();
+  await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Sending…');
   await expect(otherCard.getByRole('button', { name: 'Wait for the current sticker', exact: true })).toHaveAttribute('aria-disabled', 'true');
   await expect(otherCard.getByRole('button', { name: 'Add search terms', exact: true })).toBeEnabled();
   const findingSend = await stickerState();
@@ -970,10 +981,13 @@ try {
   await expect(stickerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toHaveAttribute('aria-disabled', 'true');
   await expect(stickerCard.getByRole('button', { name: 'Edit search terms', exact: true })).toHaveAttribute('aria-disabled', 'true');
   await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Sending…');
-  // Both active phases use the lookup announcement; the button distinguishes sending.
-  await expect(stickerLive).toHaveText('Finding sticker…');
+  // Both active phases use the same Sending announcement.
+  await expect(stickerLive).toHaveText('Sending sticker…');
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(0);
   expect((await local.evaluate(() => window.companion.action({ type: 'cancelSticker' }))).ok).toBe(true);
+  expect((await stickerState()).state).toBe('sending');
+  await local.keyboard.press('Escape');
+  await expect(stickerPanel).toBeVisible();
   expect((await stickerState()).state).toBe('sending');
   await releaseStickerCommand();
   await expect.poll(async () => (await stickerState())?.state).toBe('sent');
@@ -1027,6 +1041,8 @@ try {
   await expect.poll(async () => (await stickerState())?.state).toBe('failed');
   await expect(stickerLive).toContainText(/Couldn[’']t confirm the sticker was sent/);
   await expect(stickerPanel.getByText(/^Couldn[’']t confirm the sticker was sent\. Check the chat before sending it again\.$/)).toBeVisible();
+  await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
   await stickerPanel.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(stickerPanel.getByRole('button', { name: 'Dismiss', exact: true })).toHaveCount(0);
   await expect(sendCard()).toBeFocused();
@@ -1038,22 +1054,476 @@ try {
   await remote.evaluate(() => { window.fixtureHideSticker = true; });
   const missingLookupStarted = Date.now();
   await sendCard().click();
-  await expect.poll(async () => (await stickerState())?.state, { timeout: 8000, intervals: [100] }).toBe('missing');
-  expect(Date.now() - missingLookupStarted).toBeLessThan(8000);
-  await expect(stickerLive).toContainText(/Sticker isn[’']t loaded in WhatsApp/);
-  await expect(stickerPanel.getByText(/^This sticker isn[’']t loaded in WhatsApp right now\. Open it in WhatsApp[’']s sticker picker \(its pack or Favorites\), then send it again\.$/)).toBeVisible();
-  await stickerPanel.getByRole('button', { name: 'Dismiss', exact: true }).click();
-  await expect(stickerPanel.getByRole('button', { name: 'Dismiss', exact: true })).toHaveCount(0);
-  await expect(sendCard()).toBeFocused();
-  await expect(stickerLive).toHaveText('');
+  await expect.poll(async () => (await stickerState())?.state, { timeout: 3500, intervals: [50] }).toBe('missing');
+  expect(Date.now() - missingLookupStarted).toBeLessThanOrEqual(3000);
+  expect((await stickerState()).route).toBe('picker');
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(0);
   expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(3);
+  await expect(stickerPanel.getByText('WhatsApp doesn’t have the animated version loaded.', { exact: true })).toBeVisible();
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toBeFocused();
+  await local.keyboard.press('Escape');
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
+  await expect(stickerPanel).toBeVisible();
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(3);
+  await sendCard().click();
+  await expect.poll(async () => (await stickerState())?.state, { timeout: 3500, intervals: [50] }).toBe('missing');
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).not.toHaveAttribute('aria-disabled', 'true');
+  const stillDraftCounters = await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length]);
+  const stillDraftMarkup = await editor.evaluate(element => element.innerHTML);
+  await stickerPanel.getByRole('button', { name: 'Send still', exact: true }).click();
+  await expect.poll(stickerState).toMatchObject({ route: 'maker', animated: true, state: 'failed', reason: 'draft', detail: 'draft-present', sent: 'not-sent' });
+  expect(await editor.evaluate(element => element.innerHTML)).toBe(stillDraftMarkup);
+  expect(await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length])).toEqual(stillDraftCounters);
+  await expect(stickerPanel.locator('.sticker-message .msg p')).toHaveText('Send or clear your draft first, then send the sticker.');
+  await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
+  console.log('PASS Send still with a draft refuses before any native page interaction');
+  await local.keyboard.press('Escape'); await editor.fill('');
+  await sendCard().click();
+  await expect.poll(stickerState, { timeout: 3500 }).toMatchObject({ state: 'missing' });
+  await stickerPanel.getByRole('button', { name: 'Send still', exact: true }).click();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ route: 'maker', animated: true, state: 'sent' });
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(1);
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(4);
+  await expect(editor).toHaveText('');
+  console.log('PASS animated lookup never falls back automatically; explicit Send still uses the maker');
   await remote.evaluate(() => { window.fixtureHideSticker = false; });
   await expect(nativeStickerPicker).toHaveCount(0);
   expect(await remote.evaluate(() => window.fixtureSent.length)).toBe(textSendsBeforeStickers);
   expect(await remote.evaluate(() => window.fixtureMediaSent)).toBe(0);
   await remote.locator('#fixture-media-send').evaluate(button => button.remove());
-  await expect(editor).toHaveText('Keep this unsent sticker draft'); await editor.fill('');
-  console.log('PASS a missing original reports unavailable on the card without sending text, attachments or retries');
+  await holdStickerCommand('sendSticker'); await sendCard().click();
+  await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);
+  const beforePickerUnconfirmed = await remote.evaluate(() => window.fixtureStickerSent.length);
+  await nativeStickerPicker.getByTestId('sticker-item').evaluate(item => {
+    const button = item.closest('[role="button"], button');
+    button.onclick = () => { window.fixtureStickerSent.push({ source: item.querySelector('img').src, peer: '123456@c.us' }); };
+  });
+  await releaseStickerCommand();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ route: 'picker', state: 'failed', sent: 'unknown' });
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(beforePickerUnconfirmed + 1);
+  await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
+  await local.keyboard.press('Escape');
+  console.log('PASS a picker activation without a confirming outgoing sticker reports unknown');
+  // Static indexed bytes use the maker with an empty composer even if no picker item is loaded.
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.on('companion:event', (_event, value) => { if (value.type === 'snapshot') globalThis.stickerSnapshot = value.snapshot; });
+  });
+  await remote.evaluate(() => {
+    window.fixtureHideSticker = true;
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
+    const ctx = canvas.getContext('2d'); ctx.fillStyle = '#9966cc'; ctx.fillRect(0, 0, 64, 64);
+    const img = document.createElement('img'); img.id = 'fixture-static-maker'; img.alt = 'sticker'; img.width = 64; img.src = canvas.toDataURL('image/webp'); document.querySelector('.messages').append(img);
+  });
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(2);
+  const staticMakerId = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id !== firstStickerId).id;
+  const staticMakerCard = stickerPanel.locator(`[data-sticker="${staticMakerId}"]`);
+  const makerSend = () => staticMakerCard.getByRole('button', { name: 'Send to Alex', exact: true });
+  const makerReady = async (button = makerSend()) => {
+    // These scenarios use a settled composer; emptiness selects maker, drafts
+    // select picker. Destination availability alone does not prove readiness.
+    await expect(editor).toBeVisible();
+    await remote.waitForTimeout(550);
+    // Presentation may hold chat.ready during maker teardown. Wait for the
+    // actual connector snapshot used by main's route selection at click time.
+    await expect.poll(() => app.evaluate(() => ({ open: globalThis.stickerSnapshot?.conversationOpen, ready: globalThis.stickerSnapshot?.ready }))).toEqual({ open: true, ready: true });
+    // Main also owns the cancelled editor's remaining mount/cleanup window.
+    // Wait for its send gate, rather than inferring teardown from chat readiness.
+    await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat, { message: 'Maker cleanup releases Send', timeout: 8000 }).toMatchObject({ canSendSticker: true, ready: true });
+    // status() reads main directly; wait for the chosen control's update too.
+    await expect(button).toBeVisible();
+    await expect(button).not.toHaveAttribute('aria-disabled', 'true');
+  };
+  const startMaker = async (button = makerSend()) => {
+    await makerReady(button);
+    const previousNonce = (await stickerState())?.nonce;
+    await button.click();
+    await expect.poll(async () => {
+      const status = await local.evaluate(() => window.companion.status());
+      return { nonce: status.stickerSend?.nonce, state: status.stickerSend?.state, chat: status.chat, message: status.message };
+    }, { message: 'A trusted maker click starts a new send' }).not.toMatchObject({ nonce: previousNonce });
+    return (await stickerState()).nonce;
+  };
+  // Drafts use the original native item and never open the maker.
+  await editor.fill('Keep this unsent sticker draft');
+  const staticDraftMarkup = await editor.evaluate(element => element.innerHTML);
+  const staticDraftCounters = await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length]);
+  const originalPickerSource = await remote.evaluate(() => window.fixtureStickerSource);
+  await remote.evaluate(() => { window.fixtureStickerSource = document.querySelector('#fixture-static-maker').src; window.fixtureHideSticker = false; });
+  const staticPickerNonce = await startMaker();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ nonce: staticPickerNonce, route: 'picker', animated: false, state: 'sent', sent: 'confirmed' });
+  expect(await editor.evaluate(element => element.innerHTML)).toBe(staticDraftMarkup);
+  expect(await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length])).toEqual(staticDraftCounters);
+  await remote.evaluate(source => { window.fixtureStickerSource = source; window.fixtureHideSticker = true; }, originalPickerSource);
+  const staticMissNonce = await startMaker();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ nonce: staticMissNonce, route: 'picker', state: 'failed', reason: 'draft', detail: 'draft-present', sent: 'not-sent' });
+  expect(await editor.evaluate(element => element.innerHTML)).toBe(staticDraftMarkup);
+  await expect(stickerPanel.locator('.sticker-message .msg p')).toHaveText('Send or clear your draft first, then send the sticker.');
+  await expect(stickerLive).toHaveText('Send or clear your draft first, then send the sticker.');
+  await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
+  await local.keyboard.press('Escape'); await editor.fill('');
+  console.log('PASS static with a draft uses the picker; found sends and missing shows a draft row without touching the draft');
+  // A visible chat with no composer is available, but emptiness is uncertain.
+  // Static sends must use the native picker without opening the maker.
+  const composerlessCounters = await remote.evaluate(() => [window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length, window.fixtureSent.length]);
+  const composerlessSendsBefore = await remote.evaluate(() => window.fixtureStickerSent.length);
+  try {
+    await remote.evaluate(() => {
+      window.fixtureStickerSource = document.querySelector('#fixture-static-maker').src;
+      window.fixtureHideSticker = false; window.fixtureComposerPresent(false);
+    });
+    await expect(editor).toHaveCount(0);
+    await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Alex', ready: false, canSendSticker: true });
+    await expect(makerSend()).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(stickerPanel.locator('.hint')).not.toContainText('Open a chat to send');
+    await makerSend().click();
+    await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ id: staticMakerId, route: 'picker', animated: false, state: 'sent', sent: 'confirmed' });
+    expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(composerlessSendsBefore + 1);
+    expect(await remote.evaluate(() => [window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length, window.fixtureSent.length])).toEqual(composerlessCounters);
+    await expect(nativeStickerPicker).toHaveCount(0);
+  } finally {
+    await remote.evaluate(source => {
+      window.fixtureComposerPresent(true); window.fixtureStickerSource = source; window.fixtureHideSticker = true;
+    }, originalPickerSource);
+  }
+  await expect(editor).toBeVisible(); await expect(editor).toHaveText('');
+  await makerReady();
+  console.log('PASS a visible chat with a missing composer stays available and routes static through the picker');
+  const controlsBounds = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[1].getBounds());
+  const shieldStatus = async () => (await local.evaluate(() => window.companion.status())).stickerShield;
+  const originalControlsBounds = await controlsBounds();
+  const assertShieldCleared = async () => {
+    await expect.poll(shieldStatus).toBeNull();
+    await expect(local.locator('.shield')).toHaveCount(0);
+    await expect.poll(controlsBounds).toEqual(originalControlsBounds);
+  };
+  // Sample actual Chromium drawing frames, including the frame before any
+  // resize event is delivered to React. This also catches absent fast shields.
+  const startMakerFrames = async () => {
+    await local.evaluate(() => {
+      window.makerFrames = [];
+      const sample = () => {
+        const panel = document.querySelector('.app-frame'), shield = document.querySelector('.shield');
+        const sends = [...document.querySelectorAll('.sticker .send')];
+        window.makerFrames.push({ width: innerWidth, left: panel.getBoundingClientRect().left, panelWidth: panel.getBoundingClientRect().width,
+          shield: Boolean(shield), noChat: Boolean(document.querySelector('.hint')?.textContent.includes('Open a chat to send')) || sends.some(button => button.getAttribute('aria-label') === 'Open a chat to send'),
+          leaving: shield?.hasAttribute('data-leaving') ?? false,
+          sending: Boolean([...document.querySelectorAll('.sticker-overlay')].some(overlay => overlay.textContent.includes('Sending…'))) || Boolean(document.querySelector('.hint')?.textContent.includes('Sending…')) });
+        window.makerFrameRequest = requestAnimationFrame(sample);
+      };
+      window.makerFrameRequest = requestAnimationFrame(sample);
+    });
+    await remote.evaluate(() => {
+      window.makerHeaderFrames = [];
+      // The remote view can stop receiving animation frames while covered by
+      // the shield. Sample DOM transitions too, so editor coverage cannot vanish.
+      const sample = () => window.makerHeaderFrames.push({ visible: Boolean(document.querySelector('#main header #companion-chat-settings')),
+        editor: Boolean(document.querySelector('#fixture-sticker-editor')) });
+      sample();
+      window.makerHeaderTimer = setInterval(sample, 20);
+      window.makerHeaderObserver = new MutationObserver(sample);
+      window.makerHeaderObserver.observe(document.body, { childList: true, subtree: true });
+    });
+  };
+  const assertMakerFrames = async () => {
+    const frames = await local.evaluate(() => { cancelAnimationFrame(window.makerFrameRequest); return window.makerFrames; });
+    const header = await remote.evaluate(() => { clearInterval(window.makerHeaderTimer); window.makerHeaderObserver.disconnect(); return window.makerHeaderFrames; });
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.some(frame => frame.width > originalControlsBounds.width + 1)).toBe(true);
+    expect(frames.filter(frame => frame.noChat)).toEqual([]);
+    expect(header.length).toBeGreaterThan(0);
+    expect(header.filter(sample => sample.editor).length).toBeGreaterThan(0);
+    expect(header.filter(sample => !sample.visible)).toEqual([]);
+    for (const frame of frames) {
+      const expanded = frame.width > originalControlsBounds.width + 1;
+      expect(frame.left + originalControlsBounds.x).toBe(originalControlsBounds.x);
+      expect(frame.panelWidth).toBe(originalControlsBounds.width);
+      if (expanded) expect(frame.shield).toBe(true);
+      if (frame.leaving) expect(frame.sending).toBe(false);
+    }
+  };
+  const makerCountBefore = await remote.evaluate(() => window.fixtureMakerSent.length);
+  const messagesBeforeMaker = await remote.locator('[data-testid="sticker-container"]').count();
+  const allSendsBeforeMaker = await remote.evaluate(() => window.fixtureStickerSent.length);
+  // Baseline: native keydowns reach WhatsApp's page while no maker send owns input.
+  await remote.evaluate(() => {
+    window.nativeKeydowns = 0;
+    if (!window.nativeKeydownCounter) { window.nativeKeydownCounter = true; window.addEventListener('keydown', event => { if (event.isTrusted) window.nativeKeydowns++; }, true); }
+  });
+  await remote.getByRole('textbox', { name: 'Type a message' }).evaluate(element => element.focus());
+  await app.evaluate(({ BrowserWindow }) => {
+    const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
+    contents.focus(); contents.sendInputEvent({ type: 'keyDown', keyCode: 'Shift' }); contents.sendInputEvent({ type: 'keyUp', keyCode: 'Shift' });
+  });
+  await expect.poll(() => remote.evaluate(() => window.nativeKeydowns), { timeout: 3000 }).toBeGreaterThan(0);
+  await holdStickerCommand('makeSticker');
+  await makerReady();
+  await remote.evaluate(() => { window.fixtureStickerEditorDelay = 1500; window.fixtureStickerSpinnerDelay = 1000; });
+  const railNonce = await startMaker();
+  await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);
+  await expect.poll(stickerState).toMatchObject({ state: 'preparing', route: 'maker', animated: false });
+  const activeShield = await shieldStatus();
+  expect(activeShield.nonce).toBe(railNonce);
+  expect(activeShield.panel).toEqual(originalControlsBounds);
+  expect(activeShield.image).toMatch(/^data:image\/jpeg;base64,/);
+  expect(activeShield.image.length).toBeLessThan(1_400_000);
+  const windowBounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.getBounds());
+  expect(activeShield.bounds).toEqual({ x: originalControlsBounds.x + originalControlsBounds.width, y: 0, width: windowBounds.width - originalControlsBounds.x - originalControlsBounds.width, height: windowBounds.height });
+  await expect.poll(controlsBounds).toEqual({ x: originalControlsBounds.x, y: 0, width: windowBounds.width - originalControlsBounds.x, height: windowBounds.height });
+  await expect(local.locator('.shield')).toBeVisible();
+  await expect(stickerPanel).toHaveCSS('width', `${originalControlsBounds.width}px`);
+  await expect(staticMakerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(0);
+  await expect(staticMakerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toBeFocused();
+  await expect(stickerLive).toHaveText('Sending sticker…');
+  const dispatchNativeKey = () => app.evaluate(({ BrowserWindow }) => {
+    const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
+    contents.focus();
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'X' });
+    // sendInputEvent dispatches raw events; text insertion needs a char event.
+    contents.sendInputEvent({ type: 'char', keyCode: 'x' });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'X' });
+  });
+  // Count trusted keydowns that actually reach WhatsApp's page; main's
+  // before-input-event block stops them before the page sees them.
+  await remote.evaluate(() => {
+    window.nativeKeydowns = 0;
+    if (!window.nativeKeydownCounter) { window.nativeKeydownCounter = true; window.addEventListener('keydown', event => { if (event.isTrusted) window.nativeKeydowns++; }, true); }
+  });
+  await editor.evaluate(element => element.focus());
+  await dispatchNativeKey();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  expect(await remote.evaluate(() => window.nativeKeydowns)).toBe(0);
+  await expect(editor).toHaveText('');
+  // Main moves focus back to the controls on the remote view's focus event.
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.isFocused()), { timeout: 2000 }).toBe(false);
+  // Native views do not pass pointer events through transparent HTML. Assert
+  // the entire rail stays outside the controls bounds, then exercise its click.
+  const railBounds = await remote.locator('nav.rail').boundingBox();
+  expect(railBounds.x + railBounds.width).toBeLessThanOrEqual((await controlsBounds()).x);
+  await remote.evaluate(() => {
+    window.makerRailClicks = 0;
+    document.querySelector('[data-navbar-item][aria-label="Chats"]').addEventListener('click', event => {
+      if (event.isTrusted) window.makerRailClicks++;
+    }, { once: true });
+  });
+  await remote.getByRole('button', { name: 'Chats', exact: true }).click();
+  expect(await remote.evaluate(() => window.makerRailClicks)).toBe(1);
+  // Native navigation closes Companion's panel and revokes a preparing send.
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).panel).toBeNull();
+  await expect.poll(stickerState).toMatchObject({ nonce: railNonce, route: 'maker', state: 'cancelled' });
+  await assertShieldCleared();
+  // Deliver the held command followed by its queued cancellation before
+  // checking cleanup or starting another maker operation.
+  await releaseStickerCommand();
+  await expect(remote.locator('#fixture-attach-menu, #fixture-sticker-editor, #fixture-sticker-discard')).toHaveCount(0);
+  await expect(nativeStickerPicker).toHaveCount(0);
+  expect(await stickerState()).toMatchObject({ nonce: railNonce, state: 'cancelled' });
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(makerCountBefore);
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(allSendsBeforeMaker);
+  await expect(remote.locator('[data-testid="sticker-container"]')).toHaveCount(messagesBeforeMaker);
+  expect(await remote.evaluate(() => window.fixtureSent.length)).toBe(textSendsBeforeStickers);
+  expect(await remote.evaluate(() => window.fixtureMediaSent)).toBe(0);
+  await expect(editor).toHaveText('');
+  await expect.poll(async () => {
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.focus());
+    return app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.isFocused());
+  }).toBe(true);
+  await remote.evaluate(() => { window.nativeKeydowns = 0; });
+  await editor.evaluate(element => element.focus());
+  await dispatchNativeKey();
+  await expect.poll(() => remote.evaluate(() => window.nativeKeydowns), { timeout: 3000 }).toBeGreaterThan(0);
+  await editor.fill('');
+  console.log('PASS maker keyboard input is blocked and remote focus excluded until cancellation, then keyboard input resumes');
+  console.log('PASS WhatsApp navigation rail remains uncovered and clickable during the maker shield');
+
+  // The cancelled ticket cannot drive the editor/spinner/send checks. Reopen
+  // the panel and sample only this fresh send's shield show/hide frames.
+  await openPanel('stickers');
+  await holdStickerCommand('makeSticker');
+  await startMakerFrames(); const makerNonce = await startMaker();
+  expect(makerNonce).not.toBe(railNonce);
+  await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);
+  await expect.poll(stickerState).toMatchObject({ nonce: makerNonce, route: 'maker', state: 'preparing' });
+  await expect(local.locator('.shield')).toBeVisible();
+  await releaseStickerCommand();
+  await expect(remote.locator('#fixture-sticker-editor [data-testid="loading-spinner"]')).toBeVisible();
+  const nativeEditorSend = remote.locator('#fixture-sticker-editor div[role="button"][aria-label="Send 1 selected"]');
+  await expect(nativeEditorSend).toBeVisible();
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(makerCountBefore);
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ id: staticMakerId, nonce: makerNonce, route: 'maker', animated: false, state: 'sent' });
+  expect(await remote.evaluate(() => Boolean(window.fixtureMakerSentDuringLoading))).toBe(false);
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(makerCountBefore + 1);
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(allSendsBeforeMaker + 1);
+  await expect(remote.locator('[data-testid="sticker-container"]')).toHaveCount(messagesBeforeMaker + 1);
+  await assertShieldCleared();
+  await remote.waitForTimeout(850);
+  await assertMakerFrames();
+  await remote.evaluate(() => { window.fixtureStickerEditorDelay = 0; window.fixtureStickerSpinnerDelay = 0; });
+  console.log('PASS maker send preserves chat readiness and header; panel stays fixed on every shield show/hide frame');
+  expect(await remote.evaluate(() => window.fixturePhotoAssignments)).toBe(0);
+  expect(await remote.evaluate(() => ({ assignments: window.fixtureUnrelatedImageAssignments, files: document.querySelector('#fixture-unrelated-image-input').files.length, menuRetained: Boolean(document.querySelector('#fixture-unrelated-menu[hidden]')) }))).toEqual({ assignments: 0, files: 0, menuRetained: true });
+  const storedStatic = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id === staticMakerId).image;
+  expect(await remote.evaluate(async () => {
+    const file = window.fixtureMakerSent.at(-1).file;
+    return 'data:image/webp;base64,' + btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
+  })).toBe(storedStatic);
+  await expect(editor).toHaveText('');
+  await expect(nativeStickerPicker).toHaveCount(0);
+  console.log('PASS static stored WebP uses the New sticker route without a loaded native picker item; decoy never receives files; composer stays empty');
+
+  await makerReady(); await startMakerFrames();
+  const fastNonce = await startMaker();
+  await expect.poll(stickerState).toMatchObject({ nonce: fastNonce, state: 'sent' });
+  await assertShieldCleared(); await remote.waitForTimeout(850); await assertMakerFrames();
+  console.log('PASS a fast maker send never enlarges the controls without a mounted shield');
+
+  // A filtered-out sender uses the same ready destination presentation.
+  await remote.evaluate(() => { window.fixtureStickerEditorDelay = 1500; });
+  await makerReady(); await startMakerFrames(); const filteredNonce = await startMaker();
+  await stickerPanel.getByRole('textbox', { name: 'Search stickers', exact: true }).fill('no matching sticker');
+  await expect(stickerPanel.locator('.hint')).toContainText('Sending…');
+  await expect.poll(stickerState).toMatchObject({ nonce: filteredNonce, state: 'sent' });
+  await expect(stickerPanel.locator('.hint')).toContainText('Sent to Alex');
+  await expect(stickerPanel.locator('.hint')).not.toContainText('Open a chat to send');
+  await assertShieldCleared(); await remote.waitForTimeout(850); await assertMakerFrames();
+  await stickerPanel.getByRole('textbox', { name: 'Search stickers', exact: true }).fill('');
+  await expect(stickerSearch).toHaveValue('');
+  await expect(staticMakerCard).toBeVisible();
+  await remote.evaluate(() => { window.fixtureStickerEditorDelay = 0; });
+  console.log('PASS a filtered-out maker result says Sent to Alex without a no-chat hint');
+
+  await remote.evaluate(() => { window.fixtureStickerTypedAfterSend = 'New text entered meanwhile'; });
+  const appearedNonce = await startMaker();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ nonce: appearedNonce, state: 'failed', reason: 'draft', detail: 'draft-appeared', sent: 'unknown' });
+  await assertShieldCleared();
+  await expect(editor).toHaveText('New text entered meanwhile');
+  await expect(stickerPanel.locator('.sticker-message .msg p')).toHaveText('Couldn’t confirm the sticker was sent. Check the chat before sending again.');
+  await expect(stickerLive).toHaveText('Couldn’t confirm the sticker was sent. Check the chat before sending again.');
+  await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
+  await remote.evaluate(() => { window.fixtureStickerTypedAfterSend = ''; });
+  await local.keyboard.press('Escape'); await editor.fill('');
+  console.log('PASS a draft appearing after maker activation stays untouched and reports unknown without a retry action');
+
+  for (const toggle of ['fixtureNoStickerEditor', 'fixtureStickerEditorWithoutSend', 'fixtureStickerCaption', 'fixtureStickerSpinnerDelay', 'fixtureStickerSendUnconfirmed']) {
+    await makerReady(); await remote.evaluate(toggle => { window[toggle] = toggle === 'fixtureStickerSpinnerDelay' ? -1 : true; window.fixtureStickerDiscardDelay = 150; window.fixtureStickerClearDraftOnDiscard = true; }, toggle);
+    const before = await remote.evaluate(() => window.fixtureMakerSent.length);
+    const discardsBefore = await remote.evaluate(() => window.fixtureMakerDiscards || 0);
+    if (toggle === 'fixtureStickerSendUnconfirmed') await startMakerFrames();
+    const started = Date.now(), nonce = await startMaker();
+    // Preparation is bounded to 5 s plus the snapshot's 1.2 s cap; an
+    // uncertain click keeps its separate 4 s confirmation window.
+    const unconfirmed = toggle === 'fixtureStickerSendUnconfirmed';
+    await expect.poll(stickerState, { message: `Maker result for ${toggle}`, timeout: 8000, intervals: [100] }).toMatchObject({ nonce, state: 'failed', reason: unconfirmed ? 'unconfirmed' : 'editor-unavailable' });
+    expect(Date.now() - started).toBeLessThan(8000);
+    expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(before + (toggle === 'fixtureStickerSendUnconfirmed' ? 1 : 0));
+    await remote.waitForTimeout(300);
+    expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(before + (toggle === 'fixtureStickerSendUnconfirmed' ? 1 : 0));
+    await expect(remote.locator('#fixture-sticker-editor')).toHaveCount(0);
+    await expect(remote.locator('#fixture-sticker-discard')).toHaveCount(0);
+    expect(await remote.evaluate(() => window.fixtureMakerDiscards || 0)).toBe(discardsBefore + (['fixtureStickerEditorWithoutSend', 'fixtureStickerCaption', 'fixtureStickerSpinnerDelay'].includes(toggle) ? 1 : 0));
+    expect(await remote.evaluate(() => window.fixtureMakerCancelDiscards || 0)).toBe(0);
+    await expect(editor).toHaveText('');
+    await assertShieldCleared();
+    if (unconfirmed) await assertMakerFrames();
+    await remote.evaluate(toggle => { window[toggle] = false; window.fixtureStickerDiscardDelay = 0; window.fixtureStickerClearDraftOnDiscard = false; }, toggle);
+    if (toggle === 'fixtureStickerSendUnconfirmed') {
+      await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+      await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
+      await expect(stickerPanel.locator('.sticker-message .msg p').filter({ hasText: /^Couldn[’']t confirm the sticker was sent\. Check the chat before sending it again\.$/ })).toBeVisible();
+      await local.keyboard.press('Escape');
+      await expect(stickerPanel.getByRole('button', { name: 'Dismiss', exact: true })).toHaveCount(0);
+      await expect(stickerPanel).toBeVisible();
+      await expect(makerSend()).toBeFocused();
+    } else {
+      await expect(stickerPanel.locator('.sticker-message .msg p').filter({ hasText: 'WhatsApp didn’t open its sticker editor. Nothing was sent.' }), `Failure row for ${toggle}`).toBeVisible();
+      const tryAgain = stickerPanel.getByRole('button', { name: 'Try again', exact: true });
+      await expect(tryAgain).toBeVisible();
+      await local.keyboard.press('Escape');
+      await expect(tryAgain).toHaveCount(0);
+      await expect(stickerPanel).toBeVisible();
+      if (toggle === 'fixtureNoStickerEditor') {
+        await makerReady(); await remote.evaluate(() => { window.fixtureNoStickerEditor = true; });
+        const nonce = await startMaker();
+        await expect.poll(stickerState, { timeout: 8000, intervals: [100] }).toMatchObject({ nonce, state: 'failed', reason: 'editor-unavailable' });
+        await remote.evaluate(() => { window.fixtureNoStickerEditor = false; });
+        const failedNonce = (await stickerState()).nonce;
+        const retryNonce = await startMaker(tryAgain);
+        await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ id: staticMakerId, nonce: retryNonce, route: 'maker', state: 'sent' });
+        expect((await stickerState()).nonce).not.toBe(failedNonce);
+        expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(before + 1);
+        await assertShieldCleared();
+      }
+    }
+  }
+  console.log('PASS unavailable/unsafe maker editors close; an uncertain click is unconfirmed and is never retried');
+
+  const beforePreparingCancel = await remote.evaluate(() => window.fixtureMakerSent.length);
+  const beforePreparingAssignments = await remote.evaluate(() => window.fixtureMakerAssignments);
+  await makerReady(); await remote.evaluate(() => { window.fixtureStickerEditorDelay = 2000; window.fixtureStickerDiscardDelay = 200; });
+  const preparingNonce = await startMaker(); await expect.poll(stickerState).toMatchObject({ nonce: preparingNonce, state: 'preparing' });
+  await expect(local.locator('.shield')).toBeVisible();
+  await expect.poll(() => remote.evaluate(() => window.fixtureMakerAssignments)).toBe(beforePreparingAssignments + 1);
+  await expect(staticMakerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(0);
+  await local.keyboard.press('Escape');
+  await expect.poll(stickerState).toMatchObject({ nonce: preparingNonce, state: 'cancelled' });
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ canSendSticker: false, stickerSendBlockedReason: 'busy' });
+  await expect(staticMakerCard.getByRole('button', { name: 'Wait for the current sticker', exact: true })).toHaveAttribute('aria-disabled', 'true');
+  await assertShieldCleared();
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(beforePreparingCancel);
+  await remote.waitForTimeout(2200); await expect(remote.locator('#fixture-sticker-editor')).toHaveCount(0);
+  await expect(remote.locator('#fixture-sticker-discard')).toHaveCount(0);
+  await expect(editor).toHaveText('');
+
+  const changedChatNonce = await startMaker(); await expect.poll(stickerState).toMatchObject({ nonce: changedChatNonce, state: 'preparing' });
+  await expect(local.locator('.shield')).toBeVisible();
+  await expect.poll(() => remote.evaluate(() => window.fixtureMakerAssignments)).toBe(beforePreparingAssignments + 2);
+  await remote.evaluate(() => document.querySelector('#group').click());
+  await expect.poll(stickerState).toMatchObject({ nonce: changedChatNonce, state: 'cancelled', reason: 'chat-changed' });
+  await assertShieldCleared();
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(beforePreparingCancel);
+  await remote.waitForTimeout(2200); await expect(remote.locator('#fixture-sticker-editor')).toHaveCount(0);
+  await expect(remote.locator('#fixture-sticker-discard')).toHaveCount(0);
+  expect(await remote.evaluate(() => window.fixtureMakerCancelDiscards || 0)).toBe(0);
+  await remote.evaluate(() => { window.fixtureStickerEditorDelay = 0; window.fixtureStickerDiscardDelay = 0; window.fixtureHideSticker = false; });
+  await remote.getByRole('button', { name: /^Alex/ }).click(); await makerReady(); await editor.fill('');
+  // Revoke an already mounted/loading editor, so chat-change cleanup exercises
+  // its Close -> Discard transition rather than only a late file load.
+  await remote.evaluate(() => { window.fixtureStickerSpinnerDelay = -1; window.fixtureStickerDiscardDelay = 150; window.fixtureStickerClearDraftOnDiscard = true; });
+  const mountedChatNonce = await startMaker();
+  await expect(remote.locator('#fixture-sticker-editor [data-testid="loading-spinner"]')).toBeVisible();
+  const mountedDiscardsBefore = await remote.evaluate(() => window.fixtureMakerDiscards || 0);
+  await remote.evaluate(() => document.querySelector('#group').click());
+  await expect.poll(stickerState).toMatchObject({ nonce: mountedChatNonce, state: 'cancelled', reason: 'chat-changed' });
+  await expect(remote.locator('#fixture-sticker-editor, #fixture-sticker-discard')).toHaveCount(0);
+  expect(await remote.evaluate(() => window.fixtureMakerDiscards || 0)).toBe(mountedDiscardsBefore + 1);
+  expect(await remote.evaluate(() => window.fixtureMakerCancelDiscards || 0)).toBe(0);
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(beforePreparingCancel);
+  await expect(editor).toHaveText('');
+  await assertShieldCleared();
+  await remote.evaluate(() => { window.fixtureStickerSpinnerDelay = 0; window.fixtureStickerDiscardDelay = 0; window.fixtureStickerClearDraftOnDiscard = false; });
+  await remote.getByRole('button', { name: /^Alex/ }).click(); await makerReady(); await editor.fill('');
+  await holdStickerCommand('makeSticker'); const cappedNonce = await startMaker();
+  await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);
+  await expect(local.locator('.shield')).toBeVisible();
+  await expect.poll(shieldStatus, { timeout: 11_000, intervals: [100] }).toBeNull();
+  expect(await stickerState()).toMatchObject({ nonce: cappedNonce, state: 'preparing' });
+  await assertShieldCleared();
+  await local.keyboard.press('Escape');
+  await expect.poll(stickerState).toMatchObject({ nonce: cappedNonce, state: 'cancelled' });
+  await releaseStickerCommand();
+  expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(beforePreparingCancel);
+  console.log('PASS the main-process shield cap restores the native controls bounds while preparation remains cancellable');
+  // Remove only this disposable index entry and its fixture images so the later
+  // restart/delta checks still exercise the original single saved sticker.
+  await remote.locator('#fixture-static-maker').evaluate(img => img.remove()).catch(() => {});
+  expect((await local.evaluate(id => window.companion.action({ type: 'forgetSticker', id }), staticMakerId)).ok).toBe(true);
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
+  console.log('PASS maker preparing can be cancelled, including a late editor mount, and chat changes revoke it');
+  await expect(editor).toHaveText(''); await editor.fill('');
+  console.log('PASS maker results, explicit retry, Escape dismissal, and shield cleanup match the direct-send UI');
   await local.screenshot({ path: '.local/screenshots/stickers.png' });
   await remote.screenshot({ path: '.local/screenshots/whatsapp-view.png' });
   const capture = await app.evaluate(async ({ desktopCapturer }) => (await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1280, height: 1024 } }))[0].thumbnail.toPNG().toString('base64'));

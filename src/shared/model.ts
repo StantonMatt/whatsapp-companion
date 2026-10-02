@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MAX_STICKER_DATA_URL_LENGTH } from './sticker-limits';
-import type { StickerSend } from './sticker-transfer';
+import type { StickerSend, StickerSendBlockedReason } from './sticker-transfer';
 
 export const providerSchema = z.enum(['openai', 'anthropic']);
 export type Provider = z.infer<typeof providerSchema>;
@@ -57,15 +57,18 @@ export type Message = z.infer<typeof messageSchema>;
 export const snapshotSchema = z.object({
   chatId: chatIdSchema.nullable(), name: z.string().max(150), kind: z.enum(['direct', 'group', 'unknown']),
   messages: z.array(messageSchema).max(30), draft: z.string().max(8000),
+  // A visible, stable conversation can be open even when its composer is missing.
+  conversationOpen: z.boolean(),
   composing: z.boolean(), focused: z.boolean(), caretAtEnd: z.boolean(), ready: z.boolean(), atBottom: z.boolean(),
   revision: z.string().max(100),
+  stickerPreparation: z.string().max(100).optional(),
   activity: z.number().int().nonnegative(),
   editRevision: z.number().int().nonnegative(),
   draftIssue: z.enum(['too-long', 'unsupported']).nullable(),
 }).strict();
 // settingsId is assigned only in the main process; the remote schema rejects it.
 export type Snapshot = z.infer<typeof snapshotSchema> & { settingsId?: string | null };
-export const emptySnapshot: Snapshot = { chatId: null, name: '', kind: 'direct', messages: [], draft: '', composing: false, focused: false, caretAtEnd: false, ready: false, atBottom: false, revision: '', activity: 0, editRevision: 0, draftIssue: null };
+export const emptySnapshot: Snapshot = { chatId: null, name: '', kind: 'direct', messages: [], draft: '', conversationOpen: false, composing: false, focused: false, caretAtEnd: false, ready: false, atBottom: false, revision: '', activity: 0, editRevision: 0, draftIssue: null };
 export const profileSchema = z.object({
   description: z.string().max(2000), samples: z.number().int().min(0), updatedAt: z.number(),
   source: z.enum(['observed', 'selected', 'edited'])
@@ -103,13 +106,17 @@ export function initialState(): State {
     provider: 'openai', models: { openai: 'gpt-6-luna', anthropic: 'claude-sonnet-5-5' }, reasoning: { openai: {}, anthropic: {} },
     conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [] };
 }
+export type ViewBounds = { x: number; y: number; width: number; height: number };
+export type StickerShield = { nonce: string; image: string; bounds: ViewBounds; panel: ViewBounds };
+
 export type Status = {
   sequence: number;
   runtimePaused: boolean;
-  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { loadedSentSamples?: number; destinationToken?: string };
+  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { canSendSticker: boolean; stickerSendBlockedReason?: StickerSendBlockedReason; loadedSentSamples?: number; destinationToken?: string };
   panel?: Panel; theme?: 'dark' | 'light';
   stickerLocation?: { id: string; state: 'looking' | 'found' | 'missing' | 'unavailable' } | null;
   stickerSend?: StickerSend | null;
+  stickerShield?: StickerShield | null;
   keys: Record<Provider, boolean>; secureStorage: boolean; fixture: boolean;
   message: string; pending: { text: string; due: number } | null;
 };
@@ -131,11 +138,11 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('sticker'), id: z.string().regex(/^[a-f0-9]{64}$/), searchTerms: searchTermsSchema }).strict(),
   z.object({ type: z.literal('forgetSticker'), id: z.string().max(64) }).strict(),
   z.object({ type: z.literal('locateSticker'), id: z.string().max(64), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/) }).strict(),
-  z.object({ type: z.literal('sendSticker'), id: z.string().regex(/^[a-f0-9]{64}$/), nonce: z.string().uuid(), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/) }).strict(),
+  z.object({ type: z.literal('sendSticker'), id: z.string().regex(/^[a-f0-9]{64}$/), nonce: z.string().uuid(), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/), still: z.literal(true).optional() }).strict(),
   z.object({ type: z.literal('cancelSticker') }).strict(),
   z.object({ type: z.literal('panel'), panel: panelSchema }).strict(),
   z.object({ type: z.literal('reload') }).strict(),
   z.object({ type: z.literal('cancelAuto') }).strict(),
 ]);
 export type Action = z.infer<typeof actionSchema>;
-export interface DesktopAPI { status(): Promise<Status>; models(provider: Provider): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }
+export interface DesktopAPI { shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }

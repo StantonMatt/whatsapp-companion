@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { actionSchema, snapshotSchema, stickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status } from '../shared/model';
+import { actionSchema, snapshotSchema, stickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds } from '../shared/model';
 import { Store } from './store';
 import { Conversations } from './conversations';
 import { Vault, promptKey, configuredBackend } from './vault';
@@ -11,7 +11,10 @@ import { Assistant } from './assistant';
 import { setPreferences, resetPreferences, resetStylePreferences } from '../core/settings';
 import { learnStyle, styleSamples, minimumStyleSamples } from '../core/style';
 import { statusUpdate } from '../core/status';
-import { StickerTransfer } from '../core/sticker-transfer';
+import { StickerTransfer, stickerRoute } from '../core/sticker-transfer';
+import { StickerReadiness } from '../core/sticker-readiness';
+import { STICKER_PICKER_LOOKUP_MS, STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS, stickerMakerDetails } from '../shared/sticker-transfer';
+import { storedSticker } from './sticker-bytes';
 import { StickerInbox } from './sticker-inbox';
 import { ProviderCheck } from './provider-check';
 import { ModelCatalog } from './models';
@@ -47,7 +50,24 @@ async function start() {
   const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href : 'https://web.whatsapp.com/';
   const conversations = new Conversations(store);
   const stickerTransfer = new StickerTransfer();
+  const stickerReadiness = new StickerReadiness();
+  let presentedSnapshot: ReturnType<StickerReadiness['present']> | undefined;
+  let stickerReadinessTimer: ReturnType<typeof setTimeout> | undefined;
+  let shieldDrawn: { nonce: string; resolve: (drawn: boolean) => void } | undefined;
+  let makerInputOwner: string | undefined;
+  let makerInputTarget: { chatId: string | null; name: string } | undefined;
+  let makerInputTimer: ReturnType<typeof setTimeout> | undefined;
+  let makerInputDisclosed = false, makerInputPreparationSeen = false, makerInputCleaning = false;
+  let makerInputCleanupDeadline = 0;
   let stickerSendTimer: ReturnType<typeof setTimeout> | undefined;
+  let stickerShield: Status['stickerShield'] = null;
+  let shieldPanel: ViewBounds | null = null;
+  let shieldExpanded = false, shieldReducedMotion = false;
+  let shieldTarget: { chatId: string | null; name: string; settingsId?: string | null } | null = null;
+  let shieldGeneration = 0;
+  let shieldCapTimer: ReturnType<typeof setTimeout> | undefined;
+  let shieldRestoreTimer: ReturnType<typeof setTimeout> | undefined;
+  let shieldRestoreNonce: string | undefined;
   let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
   let stickerLocation: Status['stickerLocation'] = null;
   let locateRequest: { nonce: string; destinationToken: string; timer: ReturnType<typeof setTimeout> } | undefined;
@@ -62,6 +82,7 @@ async function start() {
   remote.webContents.setUserAgent(`Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`);
   win.contentView.addChildView(remote);
   win.contentView.addChildView(controls);
+  controls.setBackgroundColor('#00000000');
   controls.setVisible(false);
   const pickerDiagnostics = new PickerDiagnostics({
     directory: app.getPath('userData'), appVersion: app.getVersion(),
@@ -72,7 +93,7 @@ async function start() {
   let pendingChrome = false;
   const syncChrome = () => {
     if (remote.webContents.isDestroyed()) return;
-    const bounds = controls.getBounds(), zoom = remote.webContents.getZoomFactor();
+    const bounds = shieldPanel ?? controls.getBounds(), zoom = remote.webContents.getZoomFactor();
     remote.webContents.send('companion:command', { type: 'chrome', panel, pending: pendingChrome,
       panelBounds: panel ? { left: bounds.x / zoom, right: (bounds.x + bounds.width) / zoom } : null });
   };
@@ -82,13 +103,14 @@ async function start() {
     remote.setBounds({ x: 0, y: 0, width, height });
     const rail = Math.min(100, Math.max(0, chrome.rail));
     const panelWidth = Math.min(width - rail, Math.max(380, panel === 'chat' ? 430 : chrome.listWidth));
-    controls.setBounds({ x: panel === 'chat' ? width - panelWidth : rail, y: 0, width: panelWidth, height });
-    controls.setVisible(panel !== null);
+    const controlsX = shieldPanel?.x ?? (panel === 'chat' ? width - panelWidth : rail);
+    controls.setBounds(shieldExpanded ? { x: controlsX, y: 0, width: width - controlsX, height } : { x: controlsX, y: 0, width: panelWidth, height });
+    controls.setVisible(panel !== null || shieldPanel !== null);
     syncChrome();
   };
   // KDE can emit window resize/maximize before committing the content area's new size.
   // Follow the actual parent view bounds, including maximize, restore and fullscreen.
-  win.contentView.on('bounds-changed', layout); layout();
+  layout();
   // The native child view uses device-independent bounds matching the unzoomed settings panel.
   controls.webContents.setZoomMode('disabled');
   controls.webContents.on('did-finish-load', () => controls.webContents.setZoomMode('disabled'));
@@ -96,10 +118,81 @@ async function start() {
   controls.webContents.on('before-input-event', (event, input) => {
     if ((input.control || input.meta) && ['+', '=', '-', '0'].includes(input.key)) event.preventDefault();
   });
+  const stopMakerInput = () => {
+    clearTimeout(makerInputTimer); makerInputTimer = undefined;
+    makerInputOwner = undefined; makerInputTarget = undefined;
+    makerInputDisclosed = false; makerInputPreparationSeen = false; makerInputCleaning = false;
+    makerInputCleanupDeadline = 0;
+  };
+  const finishMakerInput = () => {
+    const owned = Boolean(makerInputOwner);
+    stopMakerInput();
+    // Panel close deferred remote focus while cleanup still owned the editor.
+    // Return native focus once that ownership ends, including the timeout path.
+    if (owned && !panel && !win.isDestroyed() && !remote.webContents.isDestroyed()) remote.webContents.focus();
+  };
+  const settleMakerInput = () => {
+    if (!makerInputOwner || makerInputCleaning) return;
+    // Without a disclosure grant the connector cannot assign a file or mount
+    // an editor. Release now: a held makeSticker command may never acknowledge
+    // cancellation, and a key blocked here cannot be recovered by a later timer.
+    if (!makerInputDisclosed) { finishMakerInput(); return; }
+    makerInputCleaning = true;
+    clearTimeout(makerInputTimer);
+    // Cancellation suppresses the connector's result. Preparation snapshots
+    // normally acknowledge teardown; a lost snapshot cannot hold Send forever.
+    // Keep only the remaining mount/Close budget measured from disclosure.
+    makerInputTimer = setTimeout(() => { finishMakerInput(); publish(); }, Math.max(0, makerInputCleanupDeadline - Date.now()));
+  };
+  const startMakerInput = (nonce: string) => {
+    stopMakerInput();
+    makerInputOwner = nonce;
+    makerInputTarget = { chatId: assistant.snapshot.chatId, name: assistant.snapshot.name };
+    if (remote.webContents.isFocused()) controls.webContents.focus();
+    // Bound ownership even if a held command never reaches the connector.
+    makerInputTimer = setTimeout(() => {
+      stickerTransfer.timeout(nonce); finishMakerInput(); stopStickerLookup(); publish();
+    }, 60_000);
+  };
+  remote.webContents.on('before-input-event', event => {
+    if (!makerInputOwner) return;
+    event.preventDefault();
+    // The focus event is not reliable for programmatic focus; reclaim it on any blocked input.
+    if (!controls.webContents.isDestroyed()) controls.webContents.focus();
+  });
+  remote.webContents.on('focus', () => { if (makerInputOwner && !controls.webContents.isDestroyed()) controls.webContents.focus(); });
   let sequence = 0, lastState: Status['state'] | undefined;
-  const status = (): Status => ({ sequence, panel, stickerLocation, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: assistant.snapshot.ready, loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  // Presentation can hold composer readiness during maker teardown. Send
+  // availability and route selection use the raw conversation/composer state.
+  const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
+  const status = (): Status => ({ sequence, panel, stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  let lastMakerDiagnostic: Status['stickerSend'];
   const publish = () => {
+    if (makerInputOwner) {
+      const send = stickerTransfer.send;
+      if (send?.nonce !== makerInputOwner || send.detail === 'draft-appeared') finishMakerInput();
+      else if (!['preparing', 'sending'].includes(send.state)) settleMakerInput();
+    }
     if (win.isDestroyed() || controls.webContents.isDestroyed()) return;
+    // Results/cancellation end ownership even if the remote never publishes
+    // another snapshot. Expire presentation independently of remote changes.
+    const snapshot = assistant.snapshot;
+    presentedSnapshot = stickerReadiness.present(snapshot, stickerTransfer.ownsMaker(snapshot) ? snapshot.stickerPreparation : undefined);
+    clearTimeout(stickerReadinessTimer); stickerReadinessTimer = undefined;
+    if (stickerReadiness.settlingDeadline > Date.now()) {
+      stickerReadinessTimer = setTimeout(publish, stickerReadiness.settlingDeadline - Date.now());
+    }
+    if (stickerShield && (stickerTransfer.send?.nonce !== stickerShield.nonce ||
+      !['preparing', 'sending'].includes(stickerTransfer.send.state) || panel !== 'stickers' ||
+      shieldTarget?.chatId !== assistant.snapshot.chatId || shieldTarget?.name !== assistant.snapshot.name ||
+      (assistant.snapshot.stickerPreparation !== stickerShield.nonce &&
+        (!(presentedSnapshot ?? assistant.snapshot).ready || shieldTarget?.settingsId !== assistant.snapshot.settingsId)))) clearStickerShield();
+    const makerResult = stickerTransfer.send;
+    if (makerResult?.route === 'maker' && makerResult.detail && ['failed', 'cancelled'].includes(makerResult.state) && makerResult !== lastMakerDiagnostic) {
+      // Only allowlisted structural codes; no chat identity or sticker data.
+      console.warn('Sticker maker result', { state: makerResult.state, detail: makerResult.detail });
+      lastMakerDiagnostic = makerResult;
+    }
     sequence++;
     if (panel === 'chat' && panelChat !== assistant.snapshot.settingsId) { panel = null; panelChat = null; layout(); }
     const next = status();
@@ -107,12 +200,106 @@ async function start() {
     controls.webContents.send('companion:status', statusUpdate(next, lastState));
     lastState = next.state;
   };
-  const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => remote.webContents.focus() }, publish, fixture);
-  const stopStickerLookup = () => { clearTimeout(stickerSendTimer); if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'cancelSticker' }); };
-  const cancelSticker = () => { if (stickerTransfer.cancel()) stopStickerLookup(); };
+  const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => { if (!makerInputOwner) remote.webContents.focus(); } }, publish, fixture);
+  const stopStickerLookup = () => { settleMakerInput(); clearTimeout(stickerSendTimer); if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'cancelSticker' }); };
+  const restoreShieldBounds = () => {
+    clearTimeout(shieldRestoreTimer); shieldRestoreTimer = undefined; shieldRestoreNonce = undefined;
+    shieldPanel = null; shieldExpanded = false; layout();
+  };
+  // Let the renderer finish its exit transition before shrinking. A bound also
+  // restores input when the renderer cannot acknowledge the fade.
+  const clearStickerShield = (immediate = false) => {
+    shieldGeneration++;
+    shieldDrawn?.resolve(false); shieldDrawn = undefined;
+    clearTimeout(shieldCapTimer); shieldCapTimer = undefined;
+    const nonce = stickerShield?.nonce;
+    stickerShield = null; shieldTarget = null;
+    if (!shieldPanel) return;
+    if (immediate || shieldReducedMotion) {
+      restoreShieldBounds();
+    } else if (!shieldRestoreTimer) {
+      shieldRestoreNonce = nonce;
+      shieldRestoreTimer = setTimeout(restoreShieldBounds, 750);
+    }
+  };
+  const showStickerShield = async (nonce: string) => {
+    const generation = ++shieldGeneration;
+    const panelBounds = shieldPanel ?? controls.getBounds();
+    const { width, height } = win.contentView.getBounds();
+    const x = panelBounds.x + panelBounds.width;
+    const bounds = { x, y: 0, width: width - x, height };
+    if (bounds.width <= 0 || height <= 0) return;
+    let captureTimer: ReturnType<typeof setTimeout> | undefined;
+    // A failed/hung capture must never prevent the user's send.
+    try {
+      const snapshot = await Promise.race([
+        remote.webContents.capturePage(bounds),
+        new Promise<null>(resolve => { captureTimer = setTimeout(() => resolve(null), 1200); })
+      ]);
+      if (!snapshot || snapshot.isEmpty() || generation !== shieldGeneration || panel !== 'stickers' ||
+        stickerTransfer.send?.nonce !== nonce || stickerTransfer.send.state !== 'preparing' || win.isDestroyed()) return;
+      const scale = Math.min(1, 1600 / bounds.width, 1000 / bounds.height);
+      const image = snapshot.resize({ width: Math.max(1, Math.round(bounds.width * scale)), height: Math.max(1, Math.round(height * scale)) }).toJPEG(65);
+      if (image.length > 1024 * 1024) return;
+      clearTimeout(shieldRestoreTimer); shieldRestoreTimer = undefined; shieldRestoreNonce = undefined;
+      shieldPanel = panelBounds;
+      shieldTarget = { chatId: assistant.snapshot.chatId, name: assistant.snapshot.name, settingsId: assistant.snapshot.settingsId };
+      stickerShield = { nonce, image: `data:image/jpeg;base64,${image.toString('base64')}`, bounds, panel: panelBounds };
+      shieldCapTimer = setTimeout(() => {
+        // This is a visual cap, independent of the post-click result budget.
+        clearStickerShield(); publish();
+      }, 10_000);
+      let drawTimer: ReturnType<typeof setTimeout> | undefined;
+      const drawn = new Promise<boolean>(resolve => {
+        shieldDrawn = { nonce, resolve };
+        drawTimer = setTimeout(() => resolve(false), 1200);
+      });
+      publish();
+      const acknowledged = await drawn;
+      clearTimeout(drawTimer);
+      if (shieldDrawn?.nonce === nonce) shieldDrawn = undefined;
+      if (!acknowledged || generation !== shieldGeneration || stickerShield?.nonce !== nonce) {
+        if (stickerShield?.nonce === nonce) { clearStickerShield(true); publish(); }
+        return;
+      }
+      shieldExpanded = true; layout();
+    } catch {
+      if (stickerShield?.nonce === nonce) { clearStickerShield(); publish(); }
+      // Sending remains available without a snapshot.
+    }
+    finally { clearTimeout(captureTimer); }
+  };
+  const cancelSticker = () => {
+    if (stickerTransfer.cancel()) { stopStickerLookup(); clearStickerShield(); }
+  };
+  const watchStickerMakerResult = (nonce: string) => {
+    clearTimeout(stickerSendTimer);
+    stickerSendTimer = setTimeout(() => { stickerTransfer.result(nonce, true, false, 'unconfirmed', 'confirm-timeout'); finishMakerInput(); stopStickerLookup(); publish(); }, STICKER_MAKER_WATCHDOG_MS);
+  };
+  const authorizeSticker = (nonce: string, snapshot: typeof assistant.snapshot) => {
+    const allowed = stickerTransfer.authorize(nonce, snapshot);
+    // Start the outcome budget at the grant, even if navigation or a renderer
+    // failure prevents the clicked notification from reaching main.
+    if (allowed) {
+      if (stickerTransfer.send?.route === 'maker') { clearTimeout(makerInputTimer); makerInputTimer = undefined; watchStickerMakerResult(nonce); }
+      publish();
+    }
+    return allowed;
+  };
+  win.contentView.on('bounds-changed', () => { cancelSticker(); clearStickerShield(); publish(); layout(); });
+  // Recognize visible loaded history independently of composer readiness;
+  // never infer a destination from names or presentation smoothing.
+  const identifyStickerDestination = (snapshot: typeof assistant.snapshot) => conversations.identify(snapshot);
   const observeStickerDestination = (snapshot: typeof assistant.snapshot) => {
     const revoked = stickerTransfer.observe(snapshot);
     if (revoked) stopStickerLookup();
+    if (makerInputOwner) {
+      if (!snapshot.conversationOpen || makerInputTarget?.chatId !== snapshot.chatId || makerInputTarget?.name !== snapshot.name || snapshot.draft !== '' || snapshot.draftIssue || snapshot.composing || stickerTransfer.send?.detail === 'draft-appeared') finishMakerInput();
+      else if (snapshot.stickerPreparation === makerInputOwner) makerInputPreparationSeen = true;
+      // The connector drops its preparation token only after cleanup. Do not
+      // mistake a pre-assignment snapshot for a teardown acknowledgement.
+      else if (makerInputCleaning && makerInputPreparationSeen) finishMakerInput();
+    }
     if (locateRequest && locateRequest.destinationToken !== stickerTransfer.destinationToken(snapshot)) {
       clearTimeout(locateRequest.timer); locateRequest = undefined;
       if (stickerLocation) stickerLocation = { id: stickerLocation.id, state: 'unavailable' };
@@ -120,7 +307,7 @@ async function start() {
     return revoked;
   };
   const openPanel = (next: Panel) => {
-    cancelSticker();
+    cancelSticker(); clearStickerShield();
     if (next === 'chat' && (!assistant.snapshot.ready || !assistant.snapshot.settingsId)) {
       assistant.message = 'Chat settings need recognizable messages. Wait for this conversation to load.';
       remote.webContents.send('companion:command', { type: 'notice', text: assistant.message }); publish(); return;
@@ -129,7 +316,7 @@ async function start() {
     clearTimeout(locateRequest?.timer); locateRequest = undefined; stickerLocation = null;
     if (panel) assistant.activity();
     layout(); publish();
-    if (panel) controls.webContents.focus(); else remote.webContents.focus();
+    if (panel) controls.webContents.focus(); else if (!makerInputOwner && stickerTransfer.send?.state !== 'sending') remote.webContents.focus();
   };
   const requireScope = (scope: string) => {
     if (scope !== 'global' && scope !== 'general' && (scope !== assistant.snapshot.settingsId || !assistant.snapshot.ready)) throw new Error('This conversation changed. Reopen its settings.');
@@ -139,7 +326,7 @@ async function start() {
     assistant.message = 'Provider configuration changed. Use Test connection to check account access.';
   };
   controls.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
-    if (mainFrame && !inPlace) { cancelSticker(); panel = null; panelChat = null; layout(); assistant.activity(); }
+    if (mainFrame && !inPlace) { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); assistant.activity(); }
   });
   const stickerInbox = new StickerInbox(store, publish, () => { assistant.message = 'Sticker indexing could not be saved. Check disk space, then reload WhatsApp to retry.'; publish(); });
   const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === controls.webContents && event.senderFrame === controls.webContents.mainFrame && event.senderFrame.url === uiURL;
@@ -151,8 +338,35 @@ async function start() {
   });
   ipcMain.handle('companion:authorize-sticker', (event, raw: unknown) => {
     if (!isRemote(event)) return false;
+    if (typeof raw === 'string') {
+      const nonce = z.string().uuid().safeParse(raw);
+      return nonce.success && authorizeSticker(nonce.data, assistant.snapshot);
+    }
+    const request = z.object({ nonce: z.string().uuid(), phase: z.enum(['disclose', 'send']), snapshot: snapshotSchema }).strict().safeParse(raw);
+    if (!request.success) return false;
+    // A command held across cancellation can request permission late. Its
+    // snapshot must not affect ownership or the destination of a newer send.
+    if (stickerTransfer.send?.nonce !== request.data.nonce || !['preparing', 'sending'].includes(stickerTransfer.send.state)) return false;
+    const snapshot = { ...request.data.snapshot, settingsId: identifyStickerDestination(request.data.snapshot) };
+    if (observeStickerDestination(snapshot)) { publish(); return false; }
+    const allowed = request.data.phase === 'disclose' ? stickerTransfer.disclose(request.data.nonce, snapshot) : authorizeSticker(request.data.nonce, snapshot);
+    if (allowed && request.data.phase === 'disclose' && makerInputOwner === request.data.nonce) {
+      makerInputDisclosed = true;
+      makerInputCleanupDeadline = Date.now() + STICKER_MAKER_CLEANUP_MS;
+    }
+    return allowed;
+  });
+  ipcMain.handle('companion:shield-ready', (event, raw: unknown) => {
+    if (!isLocal(event)) return;
+    const drawn = z.object({ nonce: z.string().uuid(), reducedMotion: z.boolean() }).strict().safeParse(raw);
+    if (drawn.success && shieldDrawn?.nonce === drawn.data.nonce && stickerShield?.nonce === drawn.data.nonce) {
+      shieldReducedMotion = drawn.data.reducedMotion; shieldDrawn.resolve(true);
+    }
+  });
+  ipcMain.handle('companion:shield-faded', (event, raw: unknown) => {
+    if (!isLocal(event)) return;
     const nonce = z.string().uuid().safeParse(raw);
-    return nonce.success && stickerTransfer.authorize(nonce.data, assistant.snapshot);
+    if (nonce.success && nonce.data === shieldRestoreNonce && !stickerShield) restoreShieldBounds();
   });
   ipcMain.handle('companion:status', event => { if (!isLocal(event)) throw new Error('Denied'); return status(); });
   ipcMain.handle('companion:models', (event, raw: unknown) => {
@@ -212,11 +426,19 @@ async function start() {
         case 'cancelSticker': cancelSticker(); break;
         case 'sendSticker': {
           if (panel !== 'stickers' || !store.state.stickers.some(s => s.id === action.id)) throw new Error('Open the sticker library and choose an indexed sticker.');
-          const ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot);
+          if (stickerSendBlockedReason() === 'busy') throw new Error('Wait for the current sticker.');
+          const sticker = store.state.stickers.find(s => s.id === action.id)!;
+          const stored = storedSticker(sticker.image, sticker.id);
+          const route = stickerRoute(assistant.snapshot, stored.animated, action.still);
+          const ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot, Date.now(), route, stored.animated);
+          if (stickerTransfer.send?.state === 'failed') break;
           assistant.activity();
           clearTimeout(stickerSendTimer);
-          stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { stopStickerLookup(); publish(); } }, 60_000);
-          remote.webContents.send('companion:command', { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target }); break;
+          stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { finishMakerInput(); stopStickerLookup(); publish(); } }, route === 'picker' ? STICKER_PICKER_LOOKUP_MS : 60_000);
+          if (route === 'maker') await showStickerShield(ticket.nonce);
+          if (stickerTransfer.send?.nonce !== ticket.nonce || !['finding', 'preparing'].includes(stickerTransfer.send.state)) break;
+          if (route === 'maker') startMakerInput(ticket.nonce);
+          remote.webContents.send('companion:command', route === 'maker' ? { type: 'makeSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route, image: stored.image } : { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route }); break;
         }
         case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
         case 'forgetSticker': stickerInbox.discard(action.id); store.update(s => { s.stickers = s.stickers.filter(x => x.id !== action.id); }); break;
@@ -232,11 +454,16 @@ async function start() {
           remote.webContents.send('companion:command', { type: 'locateSticker', id: action.id, nonce }); break;
         }
         case 'panel': openPanel(action.panel); break;
-        case 'reload': assistant.reconfigure(); await remote.webContents.loadURL(remoteURL); break;
+        case 'reload': cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); await remote.webContents.loadURL(remoteURL); break;
         case 'cancelAuto': assistant.activity(); break;
       }
       publish(); return { ok: true };
-    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'Operation failed. Your previous data is preserved.' }; }
+    } catch (error) {
+      if (action.type === 'sendSticker' && makerInputOwner === action.nonce) {
+        finishMakerInput(); stickerTransfer.result(action.nonce, false, false, 'editor-unavailable', 'maker-error'); publish();
+      }
+      return { ok: false, error: error instanceof Error ? error.message : 'Operation failed. Your previous data is preserved.' };
+    }
   });
   ipcMain.on('companion:event', (event, raw: unknown) => {
     if (!isRemote(event)) return;
@@ -251,15 +478,35 @@ async function start() {
             const ticket = stickerTransfer.prepared(v.data.nonce, v.data.found, assistant.snapshot);
             if (ticket) {
               clearTimeout(stickerSendTimer);
-              stickerSendTimer = setTimeout(() => { stickerTransfer.result(ticket.nonce, false); stopStickerLookup(); publish(); }, 6000);
+              // A lost picker result cannot prove whether activation happened.
+              stickerSendTimer = setTimeout(() => { stickerTransfer.result(ticket.nonce, true, false, 'unconfirmed'); stopStickerLookup(); publish(); }, 6000);
               remote.webContents.send('companion:command', { type: 'sendSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, expiresAt: Date.now() + 5000 });
             } else if (stickerTransfer.send?.nonce === v.data.nonce && stickerTransfer.send.state !== 'sending') stopStickerLookup();
             publish();
           } break;
         }
+        case 'stickerCancelled': {
+          const v = z.object({ type: z.literal('stickerCancelled'), nonce: z.string().uuid(), reason: z.literal('chat-changed'), detail: z.enum(stickerMakerDetails).optional() }).strict().safeParse(raw);
+          if (v.success && stickerTransfer.send?.nonce === v.data.nonce) {
+            if (makerInputOwner === v.data.nonce) finishMakerInput();
+            if (stickerTransfer.cancel(v.data.reason, v.data.detail)) stopStickerLookup();
+            publish();
+          }
+          break;
+        }
+        case 'stickerClicked': {
+          const v = z.object({ type: z.literal('stickerClicked'), nonce: z.string().uuid() }).strict().safeParse(raw);
+          if (v.success) {
+            stickerTransfer.clicked(v.data.nonce);
+            if (stickerTransfer.send?.nonce === v.data.nonce && stickerTransfer.send.state === 'sending') {
+              watchStickerMakerResult(v.data.nonce);
+              publish();
+            }
+          } break;
+        }
         case 'stickerSent': {
-          const v = z.object({ type: z.literal('stickerSent'), nonce: z.string().uuid(), clicked: z.boolean() }).strict().safeParse(raw);
-          if (v.success) { if (stickerTransfer.send?.nonce === v.data.nonce && stickerTransfer.send.state === 'sending') clearTimeout(stickerSendTimer); stickerTransfer.result(v.data.nonce, v.data.clicked); publish(); } break;
+          const v = z.object({ type: z.literal('stickerSent'), nonce: z.string().uuid(), clicked: z.boolean(), confirmed: z.boolean().optional(), reason: z.enum(['editor-unavailable', 'unconfirmed', 'draft']).optional(), detail: z.enum(stickerMakerDetails).optional() }).strict().safeParse(raw);
+          if (v.success) { if (makerInputOwner === v.data.nonce) finishMakerInput(); if (stickerTransfer.send?.nonce === v.data.nonce && ['sending', 'preparing'].includes(stickerTransfer.send.state)) clearTimeout(stickerSendTimer); stickerTransfer.result(v.data.nonce, v.data.clicked, v.data.confirmed, v.data.reason, v.data.detail); publish(); } break;
         }
         case 'stickerLocated': {
           const v = z.object({ type: z.literal('stickerLocated'), nonce: z.string().uuid(), found: z.boolean() }).strict().safeParse(raw);
@@ -272,13 +519,15 @@ async function start() {
           const s = snapshotSchema.safeParse(envelope.data.snapshot);
           if (s.success) {
             let settingsId: string | null;
-            try { settingsId = conversations.identify(s.data); }
+            try { settingsId = identifyStickerDestination(s.data); }
             catch (error) {
               const unavailable = { ...s.data, settingsId: null, ready: false };
               observeStickerDestination(unavailable);
+              presentedSnapshot = unavailable;
               assistant.receive(unavailable); throw error;
             }
             const snapshot = { ...s.data, settingsId };
+            presentedSnapshot = stickerReadiness.present(snapshot, stickerTransfer.ownsMaker(snapshot) ? snapshot.stickerPreparation : undefined);
             const revoked = observeStickerDestination(snapshot);
             assistant.receive(snapshot);
             if (revoked) publish();
@@ -332,12 +581,15 @@ async function start() {
   });
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
-  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); assistant.reconfigure(); } });
-  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
+  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); } });
+  controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); });
+  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
-  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
+  win.on('close', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
+  app.on('before-quit', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
+  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
   await win.loadURL('about:blank');
   await controls.webContents.loadURL(uiURL);

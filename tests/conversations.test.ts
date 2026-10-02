@@ -12,7 +12,7 @@ import type { Vault } from '../src/main/vault';
 const dirs: string[] = [];
 afterEach(() => { dirs.forEach(dir => rmSync(dir, { recursive: true, force: true })); dirs.length = 0; });
 const setup = () => { const dir = mkdtempSync(join(tmpdir(), 'companion-conversations-')); dirs.push(dir); const store = new Store(dir); return { dir, store, registry: new Conversations(store) }; };
-const snapshot = (ids: string[], name = 'Same display name'): Snapshot => ({ ...emptySnapshot, kind: 'unknown', ready: true, name, messages: ids.map(id => ({ id, text: 'PRIVATE MESSAGE CONTENT', outgoing: true })) });
+const snapshot = (ids: string[], name = 'Same display name'): Snapshot => ({ ...emptySnapshot, kind: 'unknown', conversationOpen: true, ready: true, name, messages: ids.map(id => ({ id, text: 'PRIVATE MESSAGE CONTENT', outgoing: true })) });
 test('recognition persists across restart and rename, without names or message content', () => {
   const { store, registry, dir } = setup();
   const id = registry.identify(snapshot(['OPAQUE111', 'OPAQUE222']))!;
@@ -40,7 +40,14 @@ test('mixed anchors fail closed without merging or updating existing identities'
   const before = structuredClone(store.state.conversations);
   expect(registry.identify(snapshot(['CHAT_A_001', 'CHAT_B_001', 'UNRELATED']))).toBeNull();
   expect(store.state.conversations).toEqual(before);
-  expect(registry.identify({ ...snapshot(['CHAT_A_001']), ready: false })).toBeNull();
+  expect(registry.identify({ ...snapshot(['CHAT_A_001']), conversationOpen: false })).toBeNull();
+});
+test('visible conversations retain recognition without a ready composer, but hidden history cannot identify them', () => {
+  const { registry } = setup();
+  const visible = snapshot(['CHAT_A_001']);
+  const id = registry.identify(visible);
+  expect(registry.identify({ ...visible, ready: false })).toBe(id);
+  expect(registry.identify({ ...visible, conversationOpen: false, ready: false })).toBeNull();
 });
 test('only new anchors write to disk, anchors are bounded, and capacity does not evict private settings', () => {
   const { registry, store } = setup();

@@ -4,6 +4,7 @@ import type { DesktopAPI, Status, StatusUpdate, Action } from '../shared/model';
 import { StatusCache } from '../core/status';
 import { Settings } from './settings';
 import { Stickers } from './stickers';
+import { useShield } from './shield';
 import './style.css';
 
 declare global { interface Window { companion: DesktopAPI } }
@@ -46,13 +47,17 @@ function App() {
     };
     document.addEventListener('keydown', escape); return () => document.removeEventListener('keydown', escape);
   }, []);
+  const shield = useShield(status);
   return <>
-    <div data-testid="assistant-status" className={panel && panel !== 'stickers' ? 'connection-status' : 'sr-only'} role="status">{status?.message ?? 'Starting…'}</div>
-    {error && panel && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
-    {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'AI settings'}>
-      {status.pending && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
-      {panel === 'stickers' ? <><div className="panel-title"><button data-preserve-auto="" aria-label="Close panel" onClick={close}>←</button><h1>Stickers</h1></div><div className="panel-body"><Stickers status={status} act={act}/></div></> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close}/>}
-    </aside>}
+    <div className="app-frame" data-enlarged={shield.frame ? '' : undefined} style={shield.frame}>
+      <div data-testid="assistant-status" className={panel && panel !== 'stickers' ? 'connection-status' : 'sr-only'} role="status">{status?.message ?? 'Starting…'}</div>
+      {error && panel && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+      {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'AI settings'}>
+        {status.pending && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
+        {panel === 'stickers' ? <><div className="panel-title"><button data-preserve-auto="" aria-label="Close panel" onClick={close}>←</button><h1>Stickers</h1></div><div className="panel-body"><Stickers status={status} act={act}/></div></> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close}/>}
+      </aside>}
+    </div>
+    {shield.layer}
   </>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

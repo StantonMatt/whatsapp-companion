@@ -16,7 +16,8 @@ function setup(authorize: (nonce: string) => Promise<boolean> = async () => true
   const image = document.querySelector('img')!;
   Object.defineProperty(image, 'naturalWidth', { value: 100, configurable: true }); Object.defineProperty(image, 'complete', { value: true, configurable: true }); image.scrollIntoView = vi.fn();
   const button = image.closest<HTMLElement>('[role=button]')!, click = vi.fn(); button.addEventListener('click', click);
-  const snapshot = { ...emptySnapshot, ...target, ready: true };
+  button.addEventListener('click', () => { const row = document.createElement('div'); row.dataset.id = 'true_123@c.us_new'; row.innerHTML = '<div data-testid="sticker-container"></div>'; document.querySelector('#main')!.append(row); });
+  const snapshot = { ...emptySnapshot, ...target, conversationOpen: true, ready: true, atBottom: true };
   const events: RemoteEvent[] = [];
   const connector = new StickerTransferConnector(document, () => snapshot, new Map([[source, id]]), e => events.push(e), authorize);
   return { image, button, snapshot, events, click, connector };
@@ -28,7 +29,7 @@ test('lookup finds the original without clicking; the click-authorized command a
     expect(events).toContainEqual({ type: 'stickerPrepared', nonce: ticket.nonce, found: true }); expect(click).not.toHaveBeenCalled();
     await connector.send(ticket, Date.now() + 5000); await connector.send(ticket, Date.now() + 5000);
     expect(click).toHaveBeenCalledTimes(1);
-    expect(events.slice(-2)).toEqual([{ type: 'stickerSent', nonce: ticket.nonce, clicked: true }, { type: 'stickerSent', nonce: ticket.nonce, clicked: false }]);
+    expect(events.slice(-2)).toEqual([{ type: 'stickerSent', nonce: ticket.nonce, clicked: true, confirmed: true }, { type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false }]);
     expect(document.querySelector('[contenteditable]')?.textContent).toBe('keep my draft');
   } finally { connector.stop(); }
 });
@@ -59,7 +60,7 @@ test.each(['main-cancel', 'remote-cancel', 'chat', 'expiry', 'channel-error'])('
     if (reason === 'channel-error') reject(new Error('IPC unavailable')); else approve(reason !== 'main-cancel');
     await sending;
     expect(click).not.toHaveBeenCalled();
-    expect(events.at(-1)).toEqual({ type: 'stickerSent', nonce: ticket.nonce, clicked: false });
+    expect(events.at(-1)).toEqual({ type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false });
   } finally { connector.stop(); }
 });
 
@@ -85,7 +86,7 @@ test('expired send commands cannot activate even the correctly prepared original
   try {
     const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(100); await task;
     await connector.send(ticket, Date.now() - 1);
-    expect(click).not.toHaveBeenCalled(); expect(events.at(-1)).toEqual({ type: 'stickerSent', nonce: ticket.nonce, clicked: false });
+    expect(click).not.toHaveBeenCalled(); expect(events.at(-1)).toEqual({ type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false });
   } finally { connector.stop(); }
 });
 
@@ -132,7 +133,7 @@ test.each(['broken', 'error', 'unsupported'])('a %s image does not prevent scrol
       image.dispatchEvent(new Event('error'));
     }
     await vi.advanceTimersByTimeAsync(10_200); await task;
-    expect(examined).toEqual([210, 210]); expect(position).toBe(210);
+    expect(examined).toEqual([0, 210]); expect(position).toBe(210);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
@@ -141,7 +142,7 @@ test('a relevant image loading at the end prevents early missing until it become
   const { connector, image, events } = setup();
   Object.defineProperty(image, 'complete', { value: false, configurable: true });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(8000);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(1500);
     expect(events).toEqual([]);
     Object.defineProperty(image, 'complete', { value: true, configurable: true });
     await vi.advanceTimersByTimeAsync(100); await task;
@@ -167,8 +168,8 @@ test('a short initial sticker batch may grow before the full favorites grid is r
   } finally { connector.stop(); }
 });
 
-function categoryTabs(onSelect: (category: string) => void = () => {}) {
-  return ['panel-starred', 'panel-recent'].map(category => {
+function categoryTabs(onSelect: (category: string) => void = () => {}, categories = ['panel-starred', 'panel-recent']) {
+  return categories.map(category => {
     const tab = document.createElement('button'); tab.dataset.testid = category;
     tab.checkVisibility = () => true; tab.getBoundingClientRect = document.querySelector('img')?.getBoundingClientRect ?? (() => ({ width: 100 } as DOMRect));
     tab.addEventListener('click', () => onSelect(category));
@@ -177,20 +178,106 @@ function categoryTabs(onSelect: (category: string) => void = () => {}) {
   });
 }
 
+test('Favorites, Recent and the initially selected pack are searched in that order, with immediate ready-image checks', async () => {
+  const { connector, image, button, events, click } = setup();
+  const content = button.parentElement!;
+  button.remove();
+  const started = Date.now(), selected: { category: string; elapsed: number }[] = [];
+  const tabs = categoryTabs(category => {
+    selected.push({ category, elapsed: Date.now() - started });
+    if (category === 'panel-pack') content.append(button);
+  }, ['panel-starred', 'panel-recent', 'panel-pack']);
+  tabs[2].setAttribute('aria-selected', 'true');
+  let elapsed = 0;
+  try {
+    const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
+    await vi.advanceTimersByTimeAsync(1700); await task;
+    expect(selected).toEqual([
+      { category: 'panel-starred', elapsed: 0 },
+      { category: 'panel-recent', elapsed: 800 },
+      { category: 'panel-pack', elapsed: 1600 }
+    ]);
+    expect(elapsed).toBe(1600);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+    expect(image.scrollIntoView).toHaveBeenCalledOnce(); expect(click).not.toHaveBeenCalled();
+  } finally { connector.stop(); }
+});
+
+test('already-mounted ready Favorites are checked immediately even while the category reports loading', async () => {
+  const { connector, image, events, click } = setup(); unrelatedOriginal(connector, image);
+  categoryTabs(category => {
+    if (category === 'panel-starred') {
+      image.src = source;
+      document.querySelector('[data-testid="expressions-panel"]')!.setAttribute('aria-busy', 'true');
+    }
+  });
+  const started = Date.now();
+  try {
+    await connector.prepare(ticket);
+    expect(Date.now() - started).toBe(0);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+    expect(click).not.toHaveBeenCalled();
+  } finally { connector.stop(); }
+});
+
+test('every category keeps loading but the total six-second cap reports missing and closes the owned picker', async () => {
+  const { connector, panel, button, events, click } = ownedPicker();
+  document.body.append(panel); button.remove();
+  const started = Date.now(), selected: { category: string; elapsed: number }[] = [];
+  const tabs = categoryTabs(category => selected.push({ category, elapsed: Date.now() - started }), ['panel-starred', 'panel-recent', 'panel-pack']);
+  tabs[2].setAttribute('aria-selected', 'true');
+  panel.setAttribute('aria-busy', 'true'); panel.remove();
+  let elapsed = 0;
+  try {
+    const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
+    await vi.advanceTimersByTimeAsync(5900);
+    expect(events).toEqual([]); expect(panel.isConnected).toBe(true);
+    expect(selected).toEqual([
+      { category: 'panel-starred', elapsed: 0 },
+      { category: 'panel-recent', elapsed: 1500 },
+      { category: 'panel-pack', elapsed: 3000 }
+    ]);
+    await vi.advanceTimersByTimeAsync(100); await task;
+    expect(elapsed).toBeLessThanOrEqual(6000);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
+    expect(panel.isConnected).toBe(false); expect(click).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(selected).toHaveLength(3); expect(events).toHaveLength(1);
+  } finally { connector.stop(); }
+});
+
+test('a picker opening at the total deadline cannot activate the remaining category tabs', async () => {
+  const { connector, panel, events, click } = ownedPicker(5800);
+  document.body.append(panel);
+  const selected: string[] = [];
+  categoryTabs(category => selected.push(category));
+  const stickerTab = document.createElement('button'); stickerTab.dataset.testid = 'expressions-btn-sticker'; panel.append(stickerTab);
+  panel.remove();
+  const started = Date.now();
+  let elapsed = 0;
+  try {
+    const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
+    await vi.advanceTimersByTimeAsync(6000); await task;
+    expect(elapsed).toBeLessThanOrEqual(6000);
+    expect(selected).toEqual([]); expect(click).not.toHaveBeenCalled();
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
+    expect(panel.isConnected).toBe(false);
+  } finally { connector.stop(); }
+});
+
 test('all empty categories report missing after their short settle windows instead of the deadline', async () => {
   const { connector, button, events, click } = setup();
-  const selected: string[] = []; categoryTabs(category => selected.push(category)); button.remove();
+  const selected: string[] = []; categoryTabs(category => selected.push(category)).forEach(tab => tab.setAttribute('aria-selected', 'true')); button.remove();
   try {
     const task = connector.prepare(ticket);
-    await vi.advanceTimersByTimeAsync(7000);
-    expect(selected).toEqual(['panel-starred', 'panel-recent']); expect(events).toEqual([]);
-    await vi.advanceTimersByTimeAsync(100); await task;
+    await vi.advanceTimersByTimeAsync(3000); await task;
+    expect(selected).toEqual(['panel-starred', 'panel-recent']);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
     expect(click).not.toHaveBeenCalled();
   } finally { connector.stop(); }
 });
 
-test('the hidden-sticker desktop fixture reports missing within eight seconds', async () => {
+test('the hidden-sticker desktop fixture reports missing within three seconds', async () => {
   const { connector, events } = setup();
   const fixture = readFileSync('tests/fixtures/whatsapp.html', 'utf8');
   document.body.innerHTML = fixture;
@@ -215,12 +302,10 @@ test('the hidden-sticker desktop fixture reports missing within eight seconds', 
   });
   try {
     const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
-    await vi.advanceTimersByTimeAsync(7000);
-    expect(events).toEqual([]);
-    await vi.advanceTimersByTimeAsync(100); await task;
-    expect(activated).toEqual([2100, 4600]);
-    expect(elapsed).toBe(7100);
-    expect(elapsed).toBeLessThan(8000);
+    await vi.advanceTimersByTimeAsync(3400); await task;
+    expect(activated).toEqual([0, 800]);
+    expect(elapsed).toBe(1600);
+    expect(elapsed).toBeLessThanOrEqual(3000);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
@@ -238,12 +323,12 @@ test('every scrolling category reaches its end and settles before an early missi
   categoryTabs(() => { examined.push(position); position = 0; });
   try {
     const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(10_200); await task;
-    expect(examined).toEqual([210, 210]); expect(position).toBe(210);
+    expect(examined).toEqual([0, 210]); expect(position).toBe(210);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
 
-test('Favorites can expand after switching from an already exhausted pack', async () => {
+test('Favorites can expand during its quiet window after switching from the open pack', async () => {
   const { connector, image, button, events } = setup();
   const viewport = document.createElement('div'); viewport.style.overflowY = 'auto';
   viewport.getBoundingClientRect = () => ({ top: 0, bottom: 150 } as DOMRect);
@@ -256,9 +341,27 @@ test('Favorites can expand after switching from an already exhausted pack', asyn
   const selected: string[] = [];
   categoryTabs(category => { selected.push(category); if (category === 'panel-starred') setTimeout(() => { expanded = true; }, 1500); });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(3500);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(500);
     expect(selected).toEqual(['panel-starred']); expect(events).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1000); await task;
+    await vi.advanceTimersByTimeAsync(1600); await task;
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+  } finally { connector.stop(); }
+});
+
+test('switching to Favorites cannot reuse an empty list before delayed rows mount', async () => {
+  const { connector, button, events } = setup();
+  const content = button.parentElement!; button.remove();
+  categoryTabs(category => {
+    if (category === 'panel-starred') {
+      content.setAttribute('aria-busy', 'true');
+      setTimeout(() => { content.removeAttribute('aria-busy'); content.append(button); }, 1400);
+    }
+  });
+  try {
+    const task = connector.prepare(ticket);
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
   } finally { connector.stop(); }
 });
@@ -273,13 +376,13 @@ test.each([false, true])('pending image loads prevent early missing and scrollin
   Object.defineProperty(image, 'complete', { get: () => loaded, configurable: true });
   Object.defineProperty(viewport, 'scrollTop', { get: () => position, set: value => { position = Math.min(210, value); } });
   image.src = 'data:image/webp;base64,b3RoZXI='; connector['verified'].set(image.src, 'b'.repeat(64));
-  setTimeout(() => { loaded = true; if (found) image.src = source; }, 8000);
+  setTimeout(() => { loaded = true; if (found) image.src = source; }, 600);
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(7900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(500);
     expect(events).toEqual([]); expect(position).toBe(0);
     await vi.advanceTimersByTimeAsync(300);
     if (!found) expect(events).toEqual([]);
-    await vi.advanceTimersByTimeAsync(3000); await task;
+    await vi.advanceTimersByTimeAsync(5300); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found }]);
   } finally { connector.stop(); }
 });
@@ -289,28 +392,28 @@ test('an image starting to load at the end restarts the settle window once ready
   image.src = 'data:image/webp;base64,b3RoZXI='; connector['verified'].set(image.src, 'b'.repeat(64));
   let loaded = true;
   Object.defineProperty(image, 'complete', { get: () => loaded });
-  setTimeout(() => { loaded = false; }, 1500);
-  setTimeout(() => { loaded = true; }, 8000);
+  setTimeout(() => { loaded = false; }, 400);
+  setTimeout(() => { loaded = true; }, 700);
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(9900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(1400);
     expect(events).toEqual([]);
-    await vi.advanceTimersByTimeAsync(200); await task;
+    await vi.advanceTimersByTimeAsync(4700); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
 
-test('images that never finish loading remain bounded by the one-minute deadline', async () => {
+test('images that never finish loading remain bounded by the six-second deadline', async () => {
   const { connector, image, events } = setup();
   Object.defineProperty(image, 'complete', { value: false });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(59_900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
 
-test.each([false, true])('the one-minute deadline still bounds an endlessly growing picker (at end=%s)', async atEnd => {
+test.each([false, true])('the six-second deadline still bounds an endlessly growing picker (at end=%s)', async atEnd => {
   const { connector, image, button, events } = setup();
   image.src = 'data:image/webp;base64,b3RoZXI='; connector['verified'].set(image.src, 'b'.repeat(64));
   const viewport = document.createElement('div'); viewport.style.overflowY = 'auto';
@@ -321,7 +424,7 @@ test.each([false, true])('the one-minute deadline still bounds an endlessly grow
   if (atEnd) Object.defineProperty(viewport, 'scrollTop', { get: () => height - 150, set: () => {} });
   const growth = setInterval(() => { height += 150; }, 250);
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(59_900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
@@ -398,11 +501,11 @@ test.each([false, true])('a picker mounting after two seconds is tracked even wh
   } finally { connector.stop(); }
 });
 test('a shared opening uses the latest lookup deadline and emits only the current result', async () => {
-  const { connector, panel, toggle, events } = ownedPicker(61_000);
+  const { connector, panel, toggle, events } = ownedPicker(7000);
   try {
     const older = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(2000);
     const newer = connector.prepare({ ...ticket, nonce: 'newer' });
-    await vi.advanceTimersByTimeAsync(59_100); await Promise.all([older, newer]);
+    await vi.advanceTimersByTimeAsync(5100); await Promise.all([older, newer]);
     expect(panel.isConnected).toBe(true); expect(toggle).toHaveBeenCalledTimes(1);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: 'newer', found: true }]);
   } finally { connector.stop(); }
@@ -412,7 +515,7 @@ test('a picker that never mounts stops waiting at the lookup deadline', async ()
   const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Emojis, GIFs, Stickers"]')!;
   trigger.click = vi.fn();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(60_100); await task;
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(6100); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
@@ -424,7 +527,7 @@ test('lookup alone cannot activate a sticker when main denies the click ticket',
     expect(authorize).not.toHaveBeenCalled(); expect(click).not.toHaveBeenCalled();
     await connector.send(ticket, Date.now() + 5000);
     expect(authorize).toHaveBeenCalledExactlyOnceWith(ticket.nonce);
-    expect(click).not.toHaveBeenCalled(); expect(events.at(-1)).toMatchObject({ type: 'stickerSent', clicked: false });
+    expect(click).not.toHaveBeenCalled(); expect(events.at(-1)).toMatchObject({ type: 'stickerSent', clicked: false, confirmed: false });
   } finally { connector.stop(); }
 });
 test('duplicate dispatch while authorization is pending does not click or publish a competing result', async () => {
@@ -438,7 +541,7 @@ test('duplicate dispatch while authorization is pending does not click or publis
     expect(authorize).toHaveBeenCalledTimes(1); expect(events).toHaveLength(1);
     approve(true); await first;
     expect(click).toHaveBeenCalledTimes(1);
-    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }, { type: 'stickerSent', nonce: ticket.nonce, clicked: true }]);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }, { type: 'stickerClicked', nonce: ticket.nonce }, { type: 'stickerSent', nonce: ticket.nonce, clicked: true, confirmed: true }]);
   } finally { connector.stop(); }
 });
 test.each(['send', 'missing'])('a user-opened picker remains open after %s', async outcome => {
@@ -471,45 +574,47 @@ function unrelatedOriginal(connector: StickerTransferConnector, image: HTMLImage
   connector['verified'].set(image.src, 'b'.repeat(64));
 }
 
-test.each(['cap', 'stalled'])('a %s pack yields to Favorites instead of consuming the minute', async mode => {
+test.each(['cap', 'stalled'])('Favorites is searched before a %s open pack', async mode => {
   const { connector, image, button, events, click } = setup(); unrelatedOriginal(connector, image);
   const { advances } = lookupGrid(button, 6000, () => {}, mode === 'stalled');
   const selected: string[] = [];
   categoryTabs(category => { selected.push(category); image.src = source; });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(18_000); await task;
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(100); await task;
     expect(selected).toEqual(['panel-starred']);
-    expect(advances).toHaveBeenCalledTimes(mode === 'cap' ? 40 : 1);
+    expect(advances).not.toHaveBeenCalled();
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
     expect(click).not.toHaveBeenCalled();
   } finally { connector.stop(); }
 });
 
-test('Recent is searched after a capped pack and exhausted Favorites', async () => {
+test('Recent is searched after exhausted Favorites without scanning the initial pack first', async () => {
   const { connector, image, button, events } = setup(); unrelatedOriginal(connector, image);
   const { viewport, advances } = lookupGrid(button, 6000);
   const selected: string[] = [];
   categoryTabs(category => { selected.push(category); viewport.remove(); document.querySelector('[data-testid="expressions-panel"]')!.append(button); if (category === 'panel-recent') image.src = source; });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(20_000); await task;
-    expect(advances).toHaveBeenCalledTimes(40); expect(selected).toEqual(['panel-starred', 'panel-recent']);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(1600); await task;
+    expect(advances).not.toHaveBeenCalled(); expect(selected).toEqual(['panel-starred', 'panel-recent']);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
   } finally { connector.stop(); }
 });
 
-test.each(['pending image', 'empty virtual row'])('a permanent %s cannot prevent later categories from being searched', async state => {
+test.each(['pending image', 'empty virtual row'])('a permanent %s in Favorites cannot prevent Recent from being searched', async state => {
   const { connector, image, button, events } = setup(); unrelatedOriginal(connector, image);
   const { advances, viewport } = lookupGrid(button, 6000);
   if (state === 'pending image') Object.defineProperty(image, 'complete', { value: false, configurable: true });
   else button.remove();
   const selected: string[] = [];
   categoryTabs(category => {
-    selected.push(category); viewport.append(button); image.src = source;
+    selected.push(category);
+    if (category !== 'panel-recent') return;
+    viewport.append(button); image.src = source;
     Object.defineProperty(image, 'complete', { value: true, configurable: true });
   });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(20_600); await task;
-    expect(advances).toHaveBeenCalled(); expect(selected).toEqual(['panel-starred']);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(4100); await task;
+    expect(advances).toHaveBeenCalled(); expect(selected).toEqual(['panel-starred', 'panel-recent']);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
   } finally { connector.stop(); }
 });
@@ -554,7 +659,7 @@ test('currently mounted ready originals are matched before resetting a user-scro
   } finally { connector.stop(); }
 });
 
-test.each(['busy panel', 'busy region', 'progressbar', 'spinner icon', 'loading indicator', 'skeleton', 'absent container'])('Favorites mounting after three seconds with %s is not mistaken for empty', async loadingState => {
+test.each(['busy panel', 'busy region', 'progressbar', 'spinner icon', 'loading indicator', 'skeleton', 'absent container'])('Favorites mounting within the loading grace with %s is not mistaken for empty', async loadingState => {
   const { connector, image, button, events } = setup(); unrelatedOriginal(connector, image);
   const panel = document.querySelector<HTMLElement>('[data-testid="expressions-panel"]')!;
   const content = panel.querySelector<HTMLElement>('[role="list"]')!;
@@ -572,11 +677,11 @@ test.each(['busy panel', 'busy region', 'progressbar', 'spinner icon', 'loading 
       if (loadingState === 'skeleton') loading.dataset.testid = 'sticker-skeleton';
       if (loadingState === 'absent container') content.remove();
       else panel.append(loading);
-      setTimeout(() => { loading.remove(); panel.removeAttribute('aria-busy'); image.src = source; panel.append(content); content.append(button); }, 3000);
+      setTimeout(() => { loading.remove(); panel.removeAttribute('aria-busy'); image.src = source; panel.append(content); content.append(button); }, 1400);
     }
   });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5200); await task;
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(1500); await task;
     expect(selected).toEqual(['panel-starred']);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
   } finally { connector.stop(); }
@@ -587,7 +692,7 @@ test('a category whose content never mounts cannot prove an early miss', async (
   button.remove(); document.querySelector('[role="list"]')!.remove();
   categoryTabs();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(59_900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
@@ -612,9 +717,9 @@ test('replacing the empty content container restarts its settle window', async (
     const replacement = content.cloneNode() as HTMLElement;
     replacement.checkVisibility = content.checkVisibility; replacement.getBoundingClientRect = content.getBoundingClientRect;
     content.replaceWith(replacement);
-  }, 1500);
+  }, 600);
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(3400);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(1300);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(100); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
@@ -628,10 +733,13 @@ test.each(['cap', 'stalled', 'pending'])('a %s category never proves an early mi
   const { viewport } = lookupGrid(button, 6000, () => {}, mode === 'stalled');
   if (mode === 'pending') Object.defineProperty(image, 'complete', { value: false, configurable: true });
   const selected: string[] = [];
-  categoryTabs(category => { selected.push(category); viewport.remove(); panel.append(button); Object.defineProperty(image, 'complete', { value: true, configurable: true }); });
+  categoryTabs(category => {
+    selected.push(category);
+    if (category === 'panel-recent') { viewport.remove(); panel.append(button); Object.defineProperty(image, 'complete', { value: true, configurable: true }); }
+  });
   panel.remove();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(59_900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
     expect(selected).toEqual(['panel-starred', 'panel-recent']); expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
@@ -641,7 +749,7 @@ test.each(['cap', 'stalled', 'pending'])('a %s category never proves an early mi
 
 
 test('a slow picker opening still reserves a search slice for Favorites and Recent', async () => {
-  const { connector, panel, image, button, events } = ownedPicker(45_000); unrelatedOriginal(connector, image);
+  const { connector, panel, image, button, events } = ownedPicker(4500); unrelatedOriginal(connector, image);
   document.body.append(panel); const { viewport } = lookupGrid(button, 6000);
   const selected: string[] = [];
   categoryTabs(category => {
@@ -650,21 +758,21 @@ test('a slow picker opening still reserves a search slice for Favorites and Rece
   });
   panel.remove();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(53_000); await task;
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900); await task;
     expect(selected).toEqual(['panel-starred', 'panel-recent']);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
   } finally { connector.stop(); }
 });
 
 
-test('an explicitly loading empty category stays open beyond the initial mount grace', async () => {
+test('a late ready original remains discoverable within the total budget after the mount grace', async () => {
   const { connector, image, button, events } = setup();
   const panel = document.querySelector('[data-testid="expressions-panel"]')!;
   button.remove(); const loading = document.createElement('div'); loading.setAttribute('aria-busy', 'true');
   loading.checkVisibility = () => true; loading.getBoundingClientRect = () => ({ width: 100 } as DOMRect); panel.append(loading);
-  setTimeout(() => { loading.remove(); panel.append(button); }, 7000);
+  setTimeout(() => { loading.remove(); panel.append(button); }, 5000);
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(6500);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(4900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(600); await task;
     expect(image.scrollIntoView).toHaveBeenCalled();
@@ -685,4 +793,153 @@ test.each(['mount grace', 'pending row', 'incomplete remainder'])('cancelling du
     connector.cancel(); await task;
     expect(panel.isConnected).toBe(false); expect(events).toEqual([]); expect(click).not.toHaveBeenCalled();
   } finally { connector.stop(); }
+});
+
+
+test.each(['no-selected-control', 'ambiguous-selected-controls'] as const)('ready originals in the visible pack are checked before switching categories with %s', async selection => {
+  const { connector, image, events, click } = setup();
+  const selected = vi.fn();
+  const tabs = categoryTabs(category => { selected(category); image.remove(); }, ['panel-starred', 'panel-recent', 'panel-pack', 'another-pack']);
+  if (selection === 'ambiguous-selected-controls') for (const tab of tabs.slice(2)) tab.setAttribute('aria-selected', 'true');
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(100); await task;
+    expect(selected).not.toHaveBeenCalled(); expect(click).not.toHaveBeenCalled();
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+    await connector.send(ticket, Date.now() + 5000); expect(click).toHaveBeenCalledOnce();
+  } finally { connector.stop(); }
+});
+
+test.each(['no-selected-control', 'ambiguous-selected-controls'] as const)('initial pack pending original becomes ready before leaving %s', async controls => {
+  const { connector, image, events } = setup();
+  Object.defineProperty(image, 'complete', { value: false, configurable: true });
+  const switches: string[] = [];
+  categoryTabs(category => { switches.push(category); image.src = 'data:image/webp;base64,bWlzc2luZw=='; });
+  if (controls === 'ambiguous-selected-controls') {
+    const panel = document.querySelector('[data-testid="expressions-panel"]')!;
+    panel.insertAdjacentHTML('beforeend', '<button role="tab" aria-selected="true">Pack one</button><button role="tab" aria-selected="true">Pack two</button>');
+    for (const tab of panel.querySelectorAll<HTMLElement>('[role="tab"]')) { tab.checkVisibility = () => true; tab.getBoundingClientRect = () => ({ width: 100 } as DOMRect); }
+  }
+  setTimeout(() => Object.defineProperty(image, 'complete', { value: true, configurable: true }), 600);
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(700); await task;
+    expect(events.at(-1)).toMatchObject({ type: 'stickerPrepared', found: true }); expect(switches).toEqual([]);
+  } finally { connector.stop(); }
+});
+
+test.each(['new', 'old-alias-remount', 'incoming', 'quoted', 'chat-change'] as const)('picker confirmation reports %s explicitly after native activation', async result => {
+  const { connector, button, events, snapshot, click } = setup();
+  const old = document.createElement('div'); old.dataset.id = 'true_123@c.us_old'; old.dataset.testid = 'conv-msg-OLD';
+  old.innerHTML = '<span aria-label="You:"></span><div data-testid="sticker-container"></div>'; document.querySelector('#main')!.append(old);
+  button.addEventListener('click', () => {
+    document.querySelector('[data-id="true_123@c.us_new"]')?.remove();
+    if (result === 'chat-change') { snapshot.chatId = '456@c.us'; return; }
+    setTimeout(() => {
+      const row = document.createElement('div');
+      row.dataset.id = result === 'incoming' ? 'false_123@c.us_new' : 'true_123@c.us_new';
+      row.innerHTML = '<div data-testid="sticker-container"></div>';
+      if (result === 'quoted') row.innerHTML = '<div data-testid="quoted-message">' + row.innerHTML + '</div>';
+      if (result === 'old-alias-remount') { delete row.dataset.id; row.dataset.testid = 'conv-msg-OLD'; row.innerHTML = old.innerHTML; old.remove(); }
+      document.querySelector('#main')!.append(row);
+    }, 500);
+  });
+  try {
+    const preparation = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(100); await preparation;
+    const sending = connector.send(ticket, Date.now() + 5000); await vi.advanceTimersByTimeAsync(4200); await sending;
+    expect(click).toHaveBeenCalledOnce(); expect(events).toContainEqual({ type: 'stickerClicked', nonce: ticket.nonce });
+    expect(events.at(-1)).toMatchObject({ type: 'stickerSent', clicked: true, confirmed: result === 'new', ...(result !== 'new' ? { reason: 'unconfirmed', detail: 'confirm-timeout' } : {}) });
+    expect(document.querySelector('[contenteditable]')!.textContent).toBe('keep my draft');
+  } finally { connector.stop(); }
+});
+
+
+test('picker opening cannot forget the aliases of a virtualized old message', async () => {
+  const { connector, button, events } = setup();
+  const old = document.createElement('div'); old.dataset.id = 'true_123@c.us_old'; old.dataset.testid = 'conv-msg-OLD';
+  old.innerHTML = '<span aria-label="You:"></span><div data-testid="sticker-container"></div>'; document.querySelector('#main')!.append(old);
+  button.addEventListener('click', () => {
+    document.querySelector('[data-id="true_123@c.us_new"]')?.remove();
+    delete old.dataset.id; document.querySelector('#main')!.append(old);
+  });
+  try {
+    const preparation = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(100); await preparation;
+    old.remove();
+    const sending = connector.send(ticket, Date.now() + 5000); await vi.advanceTimersByTimeAsync(4200); await sending;
+    expect(events.at(-1)).toMatchObject({ clicked: true, confirmed: false, reason: 'unconfirmed' });
+  } finally { connector.stop(); }
+});
+
+test.each(['history-above', 'append', 'away-from-bottom', 'smooth-scroll', 'grouped', 'grouped-no-id', 'grouped-prepend'] as const)('picker confirmation requires the last outgoing sticker to follow the baseline: %s', async placement => {
+  const s = setup();
+  const main = document.querySelector('#main')!;
+  const baseline = document.createElement('div'); baseline.dataset.id = 'false_123@c.us_baseline'; main.append(baseline);
+  if (placement.startsWith('grouped')) {
+    baseline.dataset.id = 'grouped-stic-existing'; baseline.dataset.testid = 'conv-msg-GROUP';
+    baseline.innerHTML = '<span aria-label="You:"></span><div data-testid="grouped-sticker-item"><div data-testid="sticker-container"></div></div>';
+  }
+  // Override the fixture's immediate append to simulate mounting a history row.
+  s.button.addEventListener('click', () => {
+    const row = document.querySelector('[data-id="true_123@c.us_new"]')!;
+    row.remove();
+    setTimeout(() => {
+      if (placement === 'history-above') main.insertBefore(row, baseline);
+      else if (placement.startsWith('grouped')) {
+        row.setAttribute('data-testid', 'grouped-sticker-item');
+        if (placement === 'grouped-no-id') row.removeAttribute('data-id');
+        placement === 'grouped-prepend' ? baseline.prepend(row) : baseline.append(row);
+      } else main.append(row);
+      if (placement === 'away-from-bottom' || placement === 'smooth-scroll') {
+        const viewport = document.createElement('div'); viewport.style.overflowY = 'auto'; main.append(viewport); viewport.append(baseline, row);
+        Object.defineProperties(viewport, { scrollHeight: { value: 1000 }, clientHeight: { value: 200 }, scrollTop: { value: placement === 'smooth-scroll' ? 705 : 0 } });
+        s.snapshot.atBottom = false;
+      }
+    }, 400);
+  });
+  try {
+    await s.connector.prepare(ticket);
+    const task = s.connector.send(ticket, Date.now() + 5000); await vi.advanceTimersByTimeAsync(4200); await task;
+    expect(s.events.at(-1)).toMatchObject({ clicked: true, confirmed: !['history-above', 'grouped-prepend'].includes(placement) });
+  } finally { s.connector.stop(); }
+});
+
+test.each(['new-row', 'promoted-single', 'existing-group'] as const)('picker confirms the desktop fixture shape: %s', async shape => {
+  const s = setup();
+  const messages = document.createElement('div'); messages.className = 'messages'; document.querySelector('#main')!.append(messages);
+  const fixture = readFileSync('tests/fixtures/whatsapp.html', 'utf8');
+  const script = fixture.slice(fixture.indexOf('function appendSticker('), fixture.indexOf('// Single-frame animated WebP'));
+  const append = window.eval(`(() => { let peer = '123@c.us', sequence = 0; ${script}; return appendSticker; })()`) as (source: string) => void;
+  if (shape !== 'new-row') append(source);
+  if (shape === 'existing-group') append(source);
+  const previousRow = messages.lastElementChild;
+  s.button.addEventListener('click', () => {
+    document.querySelector('[data-id="true_123@c.us_new"]')!.remove();
+    append(source);
+  });
+  try {
+    await s.connector.prepare(ticket);
+    await s.connector.send(ticket, Date.now() + 5000);
+    expect(s.events.at(-1)).toMatchObject({ clicked: true, confirmed: true });
+    expect(messages.querySelectorAll('[role="row"]')).toHaveLength(1);
+    expect(messages.querySelectorAll('[data-testid="grouped-sticker-item"]')).toHaveLength(shape === 'new-row' ? 0 : shape === 'promoted-single' ? 2 : 3);
+    if (previousRow) expect(messages.lastElementChild).toBe(previousRow);
+  } finally { s.connector.stop(); }
+});
+
+test.each(['sticker', 'text'] as const)('only the last outgoing sticker can confirm, even with later outgoing %s', async laterContent => {
+  const s = setup();
+  const main = document.querySelector('#main')!;
+  const old = document.createElement('div'); old.dataset.id = 'true_123@c.us_old';
+  old.innerHTML = '<div data-testid="sticker-container"></div>'; main.append(old);
+  s.button.addEventListener('click', () => {
+    if (laterContent === 'text') {
+      const text = document.createElement('div'); text.dataset.id = 'true_123@c.us_later-text'; text.textContent = 'later text'; main.append(text);
+    } else {
+      // A previously known sticker remounts after the candidate.
+      main.append(old);
+    }
+  });
+  try {
+    await s.connector.prepare(ticket);
+    const task = s.connector.send(ticket, Date.now() + 5000); await vi.advanceTimersByTimeAsync(4200); await task;
+    expect(s.events.at(-1)).toMatchObject({ clicked: true, confirmed: laterContent === 'text' });
+  } finally { s.connector.stop(); }
 });

@@ -8,7 +8,7 @@ import type { Store } from './store';
 export class Conversations {
   constructor(private store: Store) {}
   identify(snapshot: Snapshot): string | null {
-    if (!snapshot.ready) return null;
+    if (!snapshot.conversationOpen) return null;
     if (snapshot.chatId) return snapshot.chatId;
     const anchors = [...new Set(snapshot.messages.map(m => m.id).filter(id => /^[A-Za-z0-9_-]{6,150}$/.test(id)))].map(id => createHash('sha256').update(id).digest('hex'));
     if (!anchors.length) return null;

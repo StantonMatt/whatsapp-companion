@@ -1,5 +1,10 @@
 import type { Snapshot } from '../shared/model';
-import { sameStickerChat, type StickerSend, type StickerTicket } from '../shared/sticker-transfer';
+import { STICKER_PICKER_LOOKUP_MS, sameStickerChat, sameStickerPreparation, type StickerSend, type StickerTicket, type StickerRoute, type StickerReason, type StickerMakerDetail, type StickerSendOutcome, type StickerSendBlockedReason } from '../shared/sticker-transfer';
+
+export const canSendSticker = (snapshot: Snapshot) => Boolean(snapshot.conversationOpen && snapshot.name && (snapshot.settingsId ?? snapshot.chatId));
+export const composerProvablyEmpty = (snapshot: Snapshot) => snapshot.conversationOpen && snapshot.ready && !snapshot.composing && !snapshot.draftIssue && snapshot.draft === '';
+export const stickerRoute = (snapshot: Snapshot, animated: boolean, still?: true): StickerRoute =>
+  (animated && !still) || (!still && !composerProvablyEmpty(snapshot)) ? 'picker' : 'maker';
 
 // Only a validated action from the trusted local Send button creates permission.
 // Lookup consumes that click's ticket; it cannot create permission of its own.
@@ -7,11 +12,17 @@ export class StickerTransfer {
   send: StickerSend | null = null;
   private ticket?: StickerTicket & { scope: string; destinationToken: string; expires: number };
   private authorized = false;
+  private disclosed = false;
   private usedNonces = new Set<string>();
   private destinationIdentity?: string;
   private destinationRevision = 0;
+  blockedReason(snapshot: Snapshot, cleaning = false): StickerSendBlockedReason | undefined {
+    if (cleaning || this.send?.state === 'finding' || this.send?.state === 'preparing' || this.send?.state === 'sending') return 'busy';
+    if (!canSendSticker(snapshot)) return 'no-chat';
+  }
   destinationToken(snapshot: Snapshot): string {
-    const identity = JSON.stringify([snapshot.chatId, snapshot.settingsId ?? snapshot.chatId, snapshot.name, snapshot.revision, snapshot.ready, snapshot.composing]);
+    if (this.send?.state === 'preparing' && this.disclosed && this.ticket && sameStickerPreparation(this.ticket, snapshot) && this.ticket.scope === (snapshot.settingsId ?? snapshot.chatId)) return this.ticket.destinationToken;
+    const identity = JSON.stringify([snapshot.chatId, snapshot.settingsId ?? snapshot.chatId, snapshot.name, snapshot.revision, snapshot.conversationOpen, snapshot.ready, snapshot.composing]);
     if (identity !== this.destinationIdentity) {
       this.destinationIdentity = identity;
       this.destinationRevision++;
@@ -21,20 +32,22 @@ export class StickerTransfer {
   requireDestination(token: string, snapshot: Snapshot) {
     if (token !== this.destinationToken(snapshot)) throw new Error('This conversation changed. Choose the sticker action again.');
   }
-  begin(id: string, nonce: string, destinationToken: string, snapshot: Snapshot, now = Date.now()): StickerTicket {
+  begin(id: string, nonce: string, destinationToken: string, snapshot: Snapshot, now = Date.now(), route: StickerRoute = 'picker', animated = true): StickerTicket {
     this.requireDestination(destinationToken, snapshot);
-    if (this.send?.state === 'finding' || this.send?.state === 'sending') throw new Error('Wait for the current sticker.');
+    if (this.blockedReason(snapshot) === 'busy') throw new Error('Wait for the current sticker.');
     if (this.usedNonces.has(nonce)) throw new Error('This sticker send has already been used.');
     const scope = snapshot.settingsId ?? snapshot.chatId;
-    if (!snapshot.ready || snapshot.composing || !scope) throw new Error('Open a conversation before sending a sticker.');
+    if (!scope || !canSendSticker(snapshot)) throw new Error('Open a conversation before sending a sticker.');
     this.usedNonces.add(nonce);
-    this.authorized = false;
-    this.ticket = { id, nonce, scope, destinationToken, expires: now + 60_000, target: { name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision } };
-    this.send = { id, nonce, name: snapshot.name, state: 'finding' };
-    return this.ticket;
+    this.authorized = false; this.disclosed = false;
+    this.ticket = { id, nonce, scope, destinationToken, expires: now + (route === 'picker' ? STICKER_PICKER_LOOKUP_MS : 60_000), route, target: { name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision } };
+    this.send = { id, nonce, name: snapshot.name, route, animated, state: route === 'maker' ? 'preparing' : 'finding' };
+    const ticket = this.ticket;
+    if (route === 'maker' && !composerProvablyEmpty(snapshot)) this.finish('failed', 'draft', 'draft-present', 'not-sent');
+    return ticket;
   }
   private sameTarget(snapshot: Snapshot) {
-    return this.ticket && this.ticket.destinationToken === this.destinationToken(snapshot) && sameStickerChat(this.ticket.target, snapshot) && this.ticket.scope === (snapshot.settingsId ?? snapshot.chatId);
+    return this.ticket && this.ticket.destinationToken === this.destinationToken(snapshot) && (sameStickerChat(this.ticket.target, snapshot) || (this.disclosed && this.send?.state === 'preparing' && sameStickerPreparation(this.ticket, snapshot))) && this.ticket.scope === (snapshot.settingsId ?? snapshot.chatId);
   }
   private current(snapshot: Snapshot, now: number) {
     return this.ticket && now < this.ticket.expires && this.sameTarget(snapshot);
@@ -42,38 +55,75 @@ export class StickerTransfer {
   prepared(nonce: string, found: boolean, snapshot: Snapshot, now = Date.now()): StickerTicket | undefined {
     if (this.send?.nonce !== nonce || this.send.state !== 'finding') return;
     if (this.observe(snapshot, now)) return;
-    if (!found) { this.finish('missing'); return; }
+    if (!found) { this.pickerMiss(); return; }
     this.send = { ...this.send, state: 'sending' };
     this.ticket!.expires = now + 5000;
     return this.ticket;
   }
-  authorize(nonce: string, snapshot: Snapshot, now = Date.now()): boolean {
-    if (this.authorized || this.send?.nonce !== nonce || this.send.state !== 'sending' || !this.current(snapshot, now)) return false;
-    this.authorized = true; return true;
+  ownsPreparation(snapshot: Snapshot) {
+    return Boolean(this.ticket && this.disclosed && this.send?.state === 'preparing' && sameStickerPreparation(this.ticket, snapshot));
   }
-  result(nonce: string, clicked: boolean) {
-    if (this.send?.nonce !== nonce || this.send.state !== 'sending') return;
-    this.finish(clicked && this.authorized ? 'sent' : 'failed');
+  ownsMaker(snapshot: Snapshot) {
+    return Boolean(this.ticket && this.disclosed && this.send?.route === 'maker' &&
+      (this.send.state === 'preparing' || this.send.state === 'sending') && sameStickerPreparation(this.ticket, snapshot));
+  }
+  disclose(nonce: string, snapshot: Snapshot, now = Date.now()): boolean {
+    if (this.disclosed || this.send?.nonce !== nonce || this.send.state !== 'preparing' || !this.current(snapshot, now)) return false;
+    if (!composerProvablyEmpty(snapshot)) { this.finish('failed', 'draft', 'draft-appeared', 'not-sent'); return false; }
+    this.disclosed = true; return true;
+  }
+  clicked(nonce: string) {
+    if (this.send?.nonce === nonce && this.send.state === 'preparing' && this.authorized) this.send = { ...this.send, state: 'sending' };
+  }
+  authorize(nonce: string, snapshot: Snapshot, now = Date.now()): boolean {
+    if (this.authorized || this.send?.nonce !== nonce || (this.send.state !== 'sending' && this.send.state !== 'preparing') || !this.current(snapshot, now)) return false;
+    if (this.send.route === 'maker' && (snapshot.draft !== '' || snapshot.draftIssue || snapshot.composing)) {
+      this.finish('failed', 'draft', 'draft-appeared', 'not-sent'); return false;
+    }
+    if (this.send.state === 'preparing' && (!this.disclosed || !sameStickerPreparation(this.ticket!, snapshot))) return false;
+    // The remote can activate Send as soon as this grant leaves main. Its
+    // clicked notification may arrive after a cancellation or never arrive.
+    this.authorized = true;
+    this.send = { ...this.send, state: 'sending' };
+    return true;
+  }
+  result(nonce: string, clicked: boolean, confirmed?: boolean, reason?: StickerReason, detail?: StickerMakerDetail) {
+    if (this.send?.nonce !== nonce) return;
+    const outcome: StickerSendOutcome = !clicked ? 'not-sent' : reason === 'draft' && detail === 'draft-appeared' ? 'unknown' : confirmed === true ? 'confirmed' : 'unknown';
+    if (this.send.state !== 'sending' && this.send.state !== 'preparing') return;
+    const sent = outcome === 'confirmed' && this.authorized && reason !== 'draft';
+    this.finish(sent ? 'sent' : 'failed', sent ? undefined : reason ?? (this.send.route === 'maker' ? clicked ? 'unconfirmed' : 'editor-unavailable' : 'unconfirmed'), sent ? undefined : detail, outcome);
   }
   timeout(nonce: string) {
-    if (this.send?.nonce !== nonce || this.send.state !== 'finding') return false;
-    this.finish('missing'); return true;
+    if (this.send?.nonce !== nonce || (this.send.state !== 'finding' && this.send.state !== 'preparing')) return false;
+    if (this.send.route === 'picker') this.pickerMiss();
+    else this.finish('failed', 'editor-unavailable', 'preparation-timeout', 'not-sent');
+    return true;
+  }
+  private pickerMiss() {
+    if (this.send?.animated === false) this.finish('failed', 'draft', 'draft-present', 'not-sent');
+    else this.finish('missing');
   }
   observe(snapshot: Snapshot, now = Date.now()) {
     this.destinationToken(snapshot);
-    if (this.send?.state !== 'finding') return false;
+    if (this.send?.state !== 'finding' && this.send?.state !== 'preparing') return false;
+    if (this.send.route === 'maker' && this.ticket && this.ticket.target.chatId === snapshot.chatId && this.ticket.target.name === snapshot.name &&
+      this.ticket.scope === (snapshot.settingsId ?? snapshot.chatId) && (snapshot.draft !== '' || snapshot.draftIssue || snapshot.composing)) {
+      this.finish('failed', 'draft', 'draft-appeared', 'not-sent'); return true;
+    }
     if (!this.sameTarget(snapshot)) return this.cancel('chat-changed');
     if (!this.current(snapshot, now)) return this.timeout(this.send.nonce);
     return false;
   }
-  cancel(reason?: 'chat-changed') {
-    if (this.send?.state !== 'finding') return false;
-    this.send = { ...this.send, state: 'cancelled', ...(reason ? { reason } : {}) };
+  cancel(reason?: 'chat-changed', detail?: StickerMakerDetail) {
+    if (this.send?.state !== 'finding' && this.send?.state !== 'preparing') return false;
+    const diagnostic = detail ?? (this.send.route === 'maker' ? reason ?? 'cancelled' : undefined);
+    this.send = { ...this.send, state: 'cancelled', ...(reason ? { reason } : {}), ...(diagnostic ? { detail: diagnostic } : {}) };
     this.ticket = undefined; this.authorized = false;
     return true;
   }
-  private finish(state: 'sent' | 'failed' | 'missing') {
-    this.send = { ...this.send!, state };
+  private finish(state: 'sent' | 'failed' | 'missing', reason?: StickerReason, detail?: StickerMakerDetail, sent?: StickerSendOutcome) {
+    this.send = { ...this.send!, state, ...(sent ? { sent } : {}), ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) };
     this.ticket = undefined; this.authorized = false;
   }
 }

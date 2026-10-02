@@ -6,15 +6,26 @@
 <script>
 let peer='123456@c.us', sequence=0; window.fixtureSent=[];
 function add(text,outgoing=false){const div=document.createElement('div');div.className='message'+(outgoing?' out':'');div.dataset.id=(outgoing?'true_':'false_')+peer+'_'+(++sequence);const span=document.createElement('span');span.className='selectable-text copyable-text';span.textContent=text;div.append(span);document.querySelector('.messages').append(div);div.scrollIntoView();}
-function send(){const editor=document.querySelector('[role=textbox]');if(editor.innerText.trim()){window.fixtureSent.push(editor.innerText);add(editor.innerText,true);editor.innerText='';updateSend();}}
-function updateSend(){const editor=document.querySelector('[role=textbox]'), existing=document.querySelector('.send');if(editor.innerText.trim()&&!existing){const button=document.createElement('button');button.className='send';button.setAttribute('aria-label','Send');button.innerHTML='<span data-icon="send">➤</span>';button.onclick=send;document.querySelector('footer').append(button);}else if(!editor.innerText.trim()){existing?.remove();}}
+function send(){const editor=document.querySelector('[role=textbox]');if(editor?.innerText.trim()){window.fixtureSent.push(editor.innerText);add(editor.innerText,true);editor.innerText='';updateSend();}}
+function updateSend(){const editor=document.querySelector('[role=textbox]'), existing=document.querySelector('.send');if(!editor){existing?.remove();return;}if(editor.innerText.trim()&&!existing){const button=document.createElement('button');button.className='send';button.setAttribute('aria-label','Send');button.innerHTML='<span data-icon="send">➤</span>';button.onclick=send;document.querySelector('footer').append(button);}else if(!editor.innerText.trim()){existing?.remove();}}
+// Remove only the composer, keeping the visible chat and native picker controls.
+let detachedComposer;
+window.fixtureComposerPresent=present=>{
+ if(!present&&!detachedComposer){const element=document.querySelector('#main footer [role="textbox"]');detachedComposer={element,parent:element.parentNode,next:element.nextSibling};element.remove();}
+ else if(present&&detachedComposer){const {element,parent,next}=detachedComposer;parent.insertBefore(element,next?.isConnected?next:null);detachedComposer=undefined;updateSend();}
+};
+// Live WhatsApp keeps Lexical paragraph/placeholder markup in an empty editor.
+window.fixtureEmptyComposer=kind=>{
+ const variants={paragraph:'<p class="selectable-text copyable-text"><br></p>',lexical:'<p class="selectable-text copyable-text" dir="auto"><span data-lexical-text="true">\u200b</span><br></p>',bom:'<p class="selectable-text copyable-text"><span data-lexical-text="true">\ufeff</span><br></p>',placeholder:'<span data-lexical-placeholder="true" contenteditable="false" aria-hidden="true">Type a message</span><p class="selectable-text copyable-text"><br></p>'};
+ const editor=document.querySelector('#main footer [role="textbox"]');editor.dataset.testid='conversation-compose-box-input';editor.dataset.lexicalEditor='true';editor.innerHTML=variants[kind]??variants.paragraph;editor.dispatchEvent(new Event('input',{bubbles:true}));
+};
 document.addEventListener('input',e=>{if(e.target.matches('[role=textbox]'))setTimeout(updateSend,100);});
 document.addEventListener('keydown',e=>{if(e.target.matches('[role=textbox]')&&e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send();}});
 document.querySelector('#incoming').onclick=()=>add('See you soon! '+(++sequence));
-function chat(group){document.querySelector('#friend').setAttribute('aria-selected',String(!group));document.querySelector('#group').setAttribute('aria-selected',String(group));peer=group?'999999@g.us':'123456@c.us';const name=group?'Weekend plans':'Alex';document.querySelector('header span').title=name;document.querySelector('header span').textContent=name;document.querySelector('.messages').replaceChildren();document.querySelector('[role=textbox]').textContent='';add(group?'Who is coming on Saturday?':'See you this evening?');}
+function chat(group){document.querySelector('#friend').setAttribute('aria-selected',String(!group));document.querySelector('#group').setAttribute('aria-selected',String(group));peer=group?'999999@g.us':'123456@c.us';const name=group?'Weekend plans':'Alex';document.querySelector('header span').title=name;document.querySelector('header span').textContent=name;document.querySelector('.messages').replaceChildren();const composer=document.querySelector('[role=textbox]');if(composer)composer.textContent='';add(group?'Who is coming on Saturday?':'See you this evening?');}
 document.querySelector('#friend').onclick=()=>chat(false);document.querySelector('#group').onclick=()=>chat(true);
 document.querySelector('#replace').onclick=()=>{const old=document.querySelector('[role=textbox]');old.replaceWith(old.cloneNode());};
-document.querySelector('#sticker').onclick=()=>{const canvas=document.createElement('canvas');canvas.width=160;canvas.height=160;const ctx=canvas.getContext('2d');ctx.fillStyle='#ffcf66';ctx.beginPath();ctx.arc(80,80,68,0,Math.PI*2);ctx.fill();ctx.font='80px system-ui';ctx.fillStyle='#705324';ctx.fillText('☺',35,107);const img=document.createElement('img');img.alt='sticker';img.src=canvas.toDataURL('image/webp');img.width=100;window.fixtureStickerSource=img.src;document.querySelector('.messages').append(img);};
+document.querySelector('#sticker').onclick=()=>{const canvas=document.createElement('canvas');canvas.width=160;canvas.height=160;const ctx=canvas.getContext('2d');ctx.fillStyle='#ffcf66';ctx.beginPath();ctx.arc(80,80,68,0,Math.PI*2);ctx.fill();ctx.font='80px system-ui';ctx.fillStyle='#705324';ctx.fillText('☺',35,107);const img=document.createElement('img');img.alt='sticker';img.src=window.fixtureAnimatedSticker?animatedFixture(canvas.toDataURL('image/webp')):canvas.toDataURL('image/webp');img.width=100;window.fixtureStickerSource=img.src;document.querySelector('.messages').append(img);};
 
 window.fixtureStickerSent=[];
 const pickerTrigger=document.createElement('button');pickerTrigger.setAttribute('aria-label','Emojis, GIFs, Stickers');pickerTrigger.textContent='☺';
@@ -33,9 +44,93 @@ pickerTrigger.onclick=()=>{
     const send=document.createElement('button');send.setAttribute('aria-label','Send sticker');
     const item=document.createElement('span');item.dataset.testid='sticker-item';
     const img=document.createElement('img');img.alt='sticker PRIVATE-PICKER-ALT';img.src=window.fixtureStickerSource;img.width=100;item.append(img);send.append(item);
-    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});};content.append(send);
+    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});appendSticker(img.src);};content.append(send);
   }
   wrapper.append(picker);portal.append(wrapper);document.body.append(portal);
   requestAnimationFrame(()=>{wrapper.style.transition='transform .2s';wrapper.style.transform='scale(1)';});
 };document.querySelector('footer').prepend(pickerTrigger);
+// Native sticker-maker fixture: no network, and no text-composer send involved.
+window.fixtureMakerSent=[];window.fixtureMakerAssignments=0;window.fixturePhotoAssignments=0;window.fixtureMakerOpens=0;window.fixtureUnrelatedImageAssignments=0;
+window.fixtureMentionDraft=()=>{const composer=document.querySelector('#main footer [role="textbox"]');composer.innerHTML='Hi <span contenteditable="false" data-mention="true">@Alex</span>';composer.dispatchEvent(new Event('input',{bubbles:true}));};
+const fixtureMakerLocales={
+ en:{attach:'Attach',sticker:'New sticker',send:'Send 1 selected',close:'Close',cancel:'Cancel',discard:'Discard'},
+ es:{attach:'Adjuntar',sticker:'Nuevo sticker',send:'Enviar 1 seleccionado',close:'Cerrar',cancel:'Cancelar',discard:'Descartar'},
+ pt:{attach:'Anexar',sticker:'Nova figurinha',send:'Enviar 1 selecionado',close:'Fechar',cancel:'Cancelar',discard:'Descartar'}
+};
+let fixtureMakerLabels=fixtureMakerLocales.en;
+const attach=document.createElement('button');attach.setAttribute('aria-label','Attach');attach.innerHTML='<span data-icon="ic-attach-file">+</span>';document.querySelector('footer').prepend(attach);
+window.fixtureSetStickerLocale=locale=>{fixtureMakerLabels=fixtureMakerLocales[locale]||fixtureMakerLocales.en;attach.setAttribute('aria-label',fixtureMakerLabels.attach);};
+if(window.fixtureStickerLocale)window.fixtureSetStickerLocale(window.fixtureStickerLocale);
+const photoInput=document.createElement('input');photoInput.type='file';photoInput.accept='image/*,video/*';photoInput.hidden=true;photoInput.id='fixture-photos-input';photoInput.onchange=()=>{window.fixturePhotoAssignments++;};document.body.append(photoInput);
+const stickerInput=document.createElement('input');stickerInput.type='file';stickerInput.accept='image/*';stickerInput.hidden=true;stickerInput.id='fixture-maker-input';document.body.append(stickerInput);
+const unrelatedImageInput=document.createElement('input');unrelatedImageInput.type='file';unrelatedImageInput.accept='image/*';unrelatedImageInput.hidden=true;unrelatedImageInput.id='fixture-unrelated-image-input';unrelatedImageInput.onchange=()=>{window.fixtureUnrelatedImageAssignments++;};document.body.append(unrelatedImageInput);
+const unrelatedMenu=document.createElement('div');unrelatedMenu.id='fixture-unrelated-menu';unrelatedMenu.setAttribute('role','menu');unrelatedMenu.hidden=true;document.body.append(unrelatedMenu);
+attach.onclick=()=>{
+ window.fixtureAttachClicks=(window.fixtureAttachClicks||0)+1;
+ const existing=document.querySelector('#fixture-attach-menu');if(existing){existing.remove();return;}
+ const menu=document.createElement('div');menu.id='fixture-attach-menu';menu.setAttribute('role','menu');menu.style.cssText='position:fixed;bottom:95px;left:450px;background:#242626;z-index:20;padding:12px';
+ for(const label of ['Document','Photos & videos','Camera','Audio','Contact','Poll','New sticker']){
+  const item=document.createElement('button');item.setAttribute('role','menuitem');item.setAttribute('aria-label',label==='New sticker'?fixtureMakerLabels.sticker:label);item.textContent=label==='New sticker'?fixtureMakerLabels.sticker:label;
+  item.onclick=()=>{if(label==='New sticker'){window.fixtureMakerOpens++;stickerInput.click();menu.remove();}else if(label==='Photos & videos')photoInput.click();};menu.append(item);
+ }document.body.append(menu);
+};
+stickerInput.onchange=()=>{
+ const file=stickerInput.files[0];if(!file)return;window.fixtureMakerAssignments++;if(window.fixtureNoStickerEditor)return;
+ const open=()=>{
+  const layer=document.createElement('div');layer.id='fixture-sticker-editor';layer.style.cssText='position:fixed;inset:64px 0 0 320px;background:#202c33;z-index:30;padding:16px;display:flex;flex-direction:column';
+  const content=document.createElement('div');content.style.cssText='flex:1';
+  const toolbar=document.createElement('div');toolbar.className='fixture-editor-toolbar';toolbar.style.cssText='display:flex;gap:48px;height:56px;align-items:flex-start';
+  const close=document.createElement('button');close.setAttribute('aria-label',fixtureMakerLabels.close);close.textContent='×';close.style.cssText='width:32px;height:32px';
+  const crop=document.createElement('div');crop.dataset.testid='crop-rotate-button';crop.innerHTML='<button role="button" aria-label="Crop and rotate">Crop</button>';toolbar.append(close,crop);
+  const composer=document.querySelector('#main footer [role="textbox"]'), next=composer.nextSibling, footer=composer.parentNode;
+  const thumbnail=document.createElement('img');thumbnail.src=URL.createObjectURL(file);thumbnail.width=thumbnail.height=40;
+  // Keep the empty composer connected while the native editor owns the view.
+  const restore=()=>{if(!document.querySelector('#main footer [role="textbox"]'))footer.insertBefore(composer,next?.isConnected?next:null);URL.revokeObjectURL?.(thumbnail.src);layer.remove();};
+  close.onclick=()=>{
+   if(document.querySelector('#fixture-sticker-discard'))return;window.fixtureMakerCloses=(window.fixtureMakerCloses||0)+1;
+   const show=()=>{if(!layer.isConnected)return;const dialog=document.createElement('div');dialog.id='fixture-sticker-discard';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label',fixtureMakerLabels.discard+'?');dialog.style.cssText='position:fixed;inset:200px 100px auto 400px;background:#111b21;z-index:31;padding:24px';
+    dialog.innerHTML='<h2>'+fixtureMakerLabels.discard+'?</h2><button>'+fixtureMakerLabels.cancel+'</button><button>'+fixtureMakerLabels.discard+'</button>';
+    dialog.children[1].onclick=()=>{window.fixtureMakerCancelDiscards=(window.fixtureMakerCancelDiscards||0)+1;dialog.remove();};
+    dialog.children[2].onclick=()=>{window.fixtureMakerDiscards=(window.fixtureMakerDiscards||0)+1;dialog.remove();if(window.fixtureStickerClearDraftOnDiscard)composer.replaceChildren();restore();};document.body.append(dialog);
+   };if(window.fixtureStickerDiscardDelay)setTimeout(show,window.fixtureStickerDiscardDelay);else show();
+  };
+  const canvasContainer=document.createElement('div');canvasContainer.dataset.testid='media-editor-canvas';const canvas=document.createElement('canvas');canvas.width=canvas.height=160;canvasContainer.append(canvas);content.append(toolbar,canvasContainer);layer.append(content);
+  const bottom=document.createElement('div');bottom.style.cssText='display:flex;justify-content:space-between;align-items:center';bottom.innerHTML='<div role="button" aria-label="Remove attachment"><span data-icon="x-alt">×</span></div>';bottom.prepend(thumbnail);layer.append(bottom);
+  if(window.fixtureStickerCaption){const caption=document.createElement('textarea');caption.value=composer.textContent;layer.append(caption);}
+  if(!window.fixtureStickerEditorWithoutSend){
+   const send=document.createElement('div');send.setAttribute('role','button');send.setAttribute('aria-label',window.fixtureStickerSendLabel||fixtureMakerLabels.send);send.textContent=window.fixtureStickerSendLabel||fixtureMakerLabels.send;send.style.cssText='width:60px;height:60px';
+   send.onclick=()=>{if(layer.querySelector('[data-testid="loading-spinner"]'))window.fixtureMakerSentDuringLoading=true;window.fixtureStickerSent.push({source:window.fixtureStickerSource,peer});window.fixtureMakerSent.push({file,peer,name:file.name,type:file.type,size:file.size});composer.replaceChildren();restore();if(window.fixtureStickerTypedAfterSend){composer.textContent=window.fixtureStickerTypedAfterSend;composer.dispatchEvent(new Event('input',{bubbles:true}));}if(!window.fixtureStickerSendUnconfirmed)appendSticker(URL.createObjectURL(file));};bottom.append(send);
+  }document.body.append(layer);
+  // Mount the editor shell during assignment; delay image readiness, not the
+  // instance itself. Cancellation can then clean the editor it actually owns.
+  const loadingDelay=window.fixtureStickerSpinnerDelay||window.fixtureStickerEditorDelay;
+  if(loadingDelay){const spinner=document.createElement('div');spinner.dataset.testid='loading-spinner';spinner.textContent='Loading';layer.append(spinner);if(loadingDelay>0)setTimeout(()=>spinner.remove(),loadingDelay);}
+ };
+ open();
+};
+function appendSticker(source){
+ const messages=document.querySelector('.messages'),id='true_'+peer+'_sticker'+(++sequence);
+ const container=document.createElement('div');container.dataset.testid='sticker-container';const img=document.createElement('img');img.src=source;img.width=100;container.append(img);
+ const last=messages.lastElementChild?.querySelector('[data-testid^="conv-msg-"]');
+ // Consecutive native stickers append inside the existing row. Preserve the
+ // old sticker node when promoting a single sticker into a grouped message.
+ if(last?.querySelector('[data-testid="sticker-container"]')){
+  if(!last.querySelector('[data-testid="grouped-sticker-item"]')){const old=document.createElement('div');old.dataset.testid='grouped-sticker-item';old.dataset.id=last.dataset.id;old.append(last.querySelector('[data-testid="sticker-container"]'));last.append(old);last.dataset.id='grouped-stic-'+peer+'-'+sequence;}
+  const item=document.createElement('div');item.dataset.testid='grouped-sticker-item';item.dataset.id=id;item.append(container);last.append(item);
+ }else{
+  const outer=document.createElement('div');outer.setAttribute('role','row');const row=document.createElement('div');row.className='message out';row.dataset.id=id;row.dataset.testid='conv-msg-sticker'+sequence;
+  const you=document.createElement('span');you.setAttribute('aria-label','You:');row.append(you,container);outer.append(row);messages.append(outer);
+ }
+ container.scrollIntoView?.({block:'end',behavior:'smooth'});
+}
+// Single-frame animated WebP for picker scenarios; ANIM detection must come
+// from stored bytes, not a fixture-only renderer/UI flag.
+function animatedFixture(data){
+ const raw=Uint8Array.from(atob(data.split(',')[1]),c=>c.charCodeAt(0));const pieces=[];for(let i=12;i<raw.length;){const n=new DataView(raw.buffer).getUint32(i+4,true),end=i+8+n+(n&1),name=String.fromCharCode(...raw.slice(i,i+4));if(['VP8 ','VP8L','ALPH'].includes(name))pieces.push(raw.slice(i,end));i=end;}const frame=new Uint8Array(pieces.reduce((n,p)=>n+p.length,0));let pos=0;for(const p of pieces){frame.set(p,pos);pos+=p.length;}
+ const chunk=(name,payload)=>{const out=new Uint8Array(8+payload.length+(payload.length&1));out.set([...name].map(c=>c.charCodeAt(0)));new DataView(out.buffer).setUint32(4,payload.length,true);out.set(payload,8);return out;};
+ const x=new Uint8Array(10);x[0]=18;x[4]=159;x[7]=159;
+ const f=new Uint8Array(16+frame.length);f[6]=159;f[9]=159;f[12]=100;f.set(frame,16);
+ const chunks=[chunk('VP8X',x),chunk('ANIM',new Uint8Array(6)),chunk('ANMF',f)];const bytes=new Uint8Array(12+chunks.reduce((n,c)=>n+c.length,0));bytes.set([..."RIFF"].map(c=>c.charCodeAt(0)));new DataView(bytes.buffer).setUint32(4,bytes.length-8,true);bytes.set([..."WEBP"].map(c=>c.charCodeAt(0)),8);let offset=12;for(const c of chunks){bytes.set(c,offset);offset+=c.length;}return 'data:image/webp;base64,'+btoa(String.fromCharCode(...bytes));
+}
+
 </script></html>

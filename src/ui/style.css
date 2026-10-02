@@ -2,11 +2,11 @@
   font-family: "Segoe UI", "Noto Sans", system-ui, sans-serif;
   color: var(--text); background: var(--bg); font-synthesis: none; font-size: 14px; line-height: 1.45; color-scheme: dark;
   --bg: #161717; --surface: #242626; --hover: #ffffff09; --menu: #242626; --menu-hover: #343737;
-  --text: #fafafa; --muted: #999e9e; --line: #303333; --green: #21c063; --selected: #103b2b;
+  --text: #fafafa; --muted: #999e9e; --line: #303333; --green: #21c063; --selected: #103b2b; --chat-bg: #0b141a;
 }
 :root[data-theme=light] {
   color-scheme: light; --bg: #fff; --surface: #f0f2f5; --hover: #00000006; --menu: #fff; --menu-hover: #f0f2f5;
-  --text: #111b21; --muted: #667781; --line: #e9edef; --green: #008069; --selected: #d9fdd3;
+  --text: #111b21; --muted: #667781; --line: #e9edef; --green: #008069; --selected: #d9fdd3; --chat-bg: #efeae2;
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
@@ -86,13 +86,15 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .sticker[data-attached] { background: var(--selected); }
 .sticker-art { position: relative; aspect-ratio: 1; }
 .sticker-art img { display: block; width: 100%; height: 100%; object-fit: contain; transition: opacity .15s; }
-.sticker-art[data-busy] img { opacity: .08; filter: blur(2px); }
+.sticker-art[data-busy] img { opacity: .18; filter: blur(1.5px); }
 .sticker-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; font-size: 11px; font-weight: 500; text-align: center; }
 .sticker-overlay.muted { color: var(--muted); }
 .spinner { width: 24px; height: 24px; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--green); animation: spin .8s linear infinite; }
 @keyframes spin { to { rotate: 1turn; } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
-.done { width: 28px; height: 28px; border-radius: 50%; background: var(--green); color: var(--bg); display: grid; place-items: center; }
+.done { width: 28px; height: 28px; border-radius: 50%; background: var(--green); color: var(--bg); display: grid; place-items: center; animation: pop .16s ease-out; }
+@keyframes pop { from { scale: .6; } }
+@media (prefers-reduced-motion: reduce) { .done { animation: none; } }
 .done svg { width: 18px; height: 18px; }
 .sticker-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .sticker-actions button { position: relative; min-width: 0; min-height: 32px; height: 32px; padding: 0; border-radius: 16px; background: var(--bg); color: var(--muted); display: grid; place-items: center; }
@@ -122,7 +124,12 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .discard button { font-size: 12px; }
 .sticker-message { display: flex; align-items: flex-start; gap: 10px; padding: 10px 6px 10px 14px; }
 .sticker-message.inline { padding: 0; margin: 0 0 10px; }
-.sticker-message p { margin: 6px 0; font-size: 12px; line-height: 1.6; flex: 1; overflow-wrap: anywhere; }
+.sticker-message .msg { flex: 1; min-width: 0; }
+.sticker-message p { margin: 6px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sticker-message p:has(+ button) { margin-bottom: 10px; }
+.sticker-message .msg button { font-size: 12px; min-height: 36px; padding: 8px 16px; }
+.sticker-message .msg button[aria-disabled=true] { opacity: .45; cursor: default; filter: none; }
+.sticker-message .msg button:not(.primary) { color: var(--green); }
 .sticker-message .mark { flex-shrink: 0; margin-top: 6px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--bg); color: var(--muted); }
 .sticker-location { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .error-banner { position: fixed; right: 12px; top: 76px; left: 12px; z-index: 3; border: 1px solid #995344; background: #492d28; padding: 14px; color: #ffddcf; font-size: 13px; line-height: 1.5; border-radius: 9px; box-shadow: 0 3px 14px #0002; }
@@ -145,3 +152,19 @@ button.primary { background: var(--green); color: var(--bg); }
 .style-details summary { cursor: pointer; font-size: 13px; }
 .style-details summary:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
 .style-details[open] summary { margin-bottom: 16px; }
+
+/* The controls view expands from the panel's original left edge over the chat,
+   leaving the native rail clickable. Keep the panel at that edge throughout. */
+.app-frame { position: fixed; left: 0; top: 0; width: min(100vw, var(--panel-width, 100vw)); height: 100%; contain: layout; }
+:root:has(.app-frame[data-enlarged]) { background: transparent; }
+.shield { position: fixed; z-index: 4; overflow: hidden; background: var(--chat-bg); container-type: size; animation: fade-in .12s ease-out; }
+.shield[data-leaving] { animation: fade-out .15s ease-in forwards; }
+.shield > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: blur(6px); scale: 1.03; }
+.shield::after { content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--chat-bg) 35%, transparent); }
+.shield > div { position: absolute; inset: 0; z-index: 1; display: grid; place-content: center; justify-items: center; gap: 18px; }
+.shield > div > img { width: min(160px, 50cqmin); aspect-ratio: 1; object-fit: contain; }
+.shield .spinner { width: 22px; height: 22px; border-color: color-mix(in srgb, var(--muted) 35%, transparent); border-top-color: var(--green); }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .shield, .shield[data-leaving] { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .shield[data-leaving] { opacity: 0; } }
