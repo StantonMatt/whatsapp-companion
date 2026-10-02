@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { test, expect, vi, afterEach } from 'vitest';
-import { DomConnector, peerFromMessageId, caretAtEnd, readDraft } from '../src/connector/dom';
+import { DomConnector, peerFromMessageId, caretAtEnd, readDraft, accountSafetyReason } from '../src/connector/dom';
 import { stickerImageState } from '../src/connector/sticker-image-state';
 import { snapshotSchema } from '../src/shared/model';
 import { StickerTransfer, canSendSticker, stickerRoute } from '../src/core/sticker-transfer';
@@ -720,4 +720,87 @@ test.each([
   expect(composerProvablyEmpty(editor, false)).toBe(false);
   expect(snapshot.draft !== '' || snapshot.draftIssue !== null).toBe(true);
   expect(stickerRoute(snapshot, false)).toBe('picker');
+});
+
+test.each([
+  'Temporarily banned', 'Your account is restricted', 'We detected unusual activity',
+  'Banned from using WhatsApp', 'Tu cuenta suspendida', 'Tu cuenta está restringida',
+  'Sua conta banida', 'Sua conta restrita',
+  'Your account was suspended.', 'Your account has been banned.',
+  'Your account is temporarily blocked.', 'YOUR ACCOUNT IS RESTRICTED.',
+  'Tu cuenta está suspendida.', 'Tu cuenta fue baneada.',
+  'Tu cuenta ha sido suspendida.', 'Tu cuenta ha sido restringida.',
+  'Tu cuenta ha sido bloqueada.', 'TU CUENTA ESTÁ RESTRINGIDA.',
+  'Sua conta está restrita.', 'Sua conta foi banida.',
+  'Sua conta está suspensa.', 'Sua conta foi temporariamente bloqueada.',
+  'SUA CONTA ESTÁ RESTRITA.'
+])('visible account notices report only a structural reason (%s)', async text => {
+  vi.useFakeTimers(); fixture();
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event));
+  connector.start();
+  try {
+    const dialog = document.createElement('div'); dialog.setAttribute('role', 'dialog');
+    dialog.innerHTML = `<span>${text}</span><span>PRIVATE-ACCOUNT-DETAILS</span>`;
+    dialog.getBoundingClientRect = () => ({ width: 200, height: 80 } as DOMRect);
+    document.body.append(dialog); await vi.advanceTimersByTimeAsync(350);
+    const safety = events.filter(e => e.type === 'accountSafety');
+    expect(safety).toEqual([{ type: 'accountSafety', reason: null }, { type: 'accountSafety', reason: 'account-warning' }]);
+    expect(JSON.stringify(safety)).not.toContain('PRIVATE-ACCOUNT-DETAILS');
+    dialog.remove(); await vi.advanceTimersByTimeAsync(350);
+    expect(events.at(-1)?.type === 'accountSafety' ? events.at(-1) : events.filter(e => e.type === 'accountSafety').at(-1)).toEqual({ type: 'accountSafety', reason: null });
+  } finally { connector.stop(); }
+});
+
+test.each([
+  'Your account has been banned.', 'Tu cuenta ha sido suspendida.', 'Sua conta foi temporariamente bloqueada.'
+])('account warning sentences require visible account UI, not chat text (%s)', text => {
+  fixture();
+  const message = document.querySelector('[data-id]')!;
+  message.innerHTML = `<span class="selectable-text copyable-text">${text}</span><div role="alert">${text}</div>`;
+  const chatAlert = message.querySelector<HTMLElement>('[role="alert"]')!;
+  chatAlert.getBoundingClientRect = () => ({ width: 200, height: 80 } as DOMRect);
+  expect(accountSafetyReason(document)).toBeNull();
+  const banner = document.createElement('div'); banner.setAttribute('role', 'banner');
+  banner.getBoundingClientRect = chatAlert.getBoundingClientRect;
+  document.body.append(banner); banner.append(message);
+  expect(accountSafetyReason(document)).toBeNull();
+  const notice = document.createElement('span'); notice.textContent = text; banner.append(notice);
+  expect(accountSafetyReason(document)).toBe('account-warning');
+  notice.style.display = 'none';
+  expect(accountSafetyReason(document)).toBeNull();
+  notice.style.display = ''; banner.style.visibility = 'hidden';
+  expect(accountSafetyReason(document)).toBeNull();
+});
+
+test.each(['qrcode', 'link-device', 'logged-out'])('visible %s screen emits a logout signal without QR data', async testid => {
+  vi.useFakeTimers(); fixture(); const events: RemoteEvent[] = [];
+  const connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    const screen = document.createElement('div'); screen.dataset.testid = testid;
+    screen.dataset.ref = 'PRIVATE-QR-DATA'; screen.append(document.createElement('canvas'));
+    screen.getBoundingClientRect = () => ({ width: 200, height: 200 } as DOMRect);
+    document.body.append(screen); await vi.advanceTimersByTimeAsync(350);
+    expect(events.filter(e => e.type === 'accountSafety')).toEqual([{ type: 'accountSafety', reason: null }, { type: 'accountSafety', reason: 'logged-out' }]);
+    screen.style.display = 'none'; await vi.advanceTimersByTimeAsync(350);
+    expect(events.filter(e => e.type === 'accountSafety').at(-1)).toEqual({ type: 'accountSafety', reason: null });
+  } finally { connector.stop(); }
+});
+
+test('chat text, composer text, hidden notices and ordinary dialogs do not report account warnings', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = 'temporarily banned';
+  document.querySelector('[data-id]')!.innerHTML = '<div role="alert">Account is restricted</div>';
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event));
+  const dialog = document.createElement('div'); dialog.setAttribute('role', 'dialog');
+  dialog.innerHTML = '<span style="display:none">banned from using WhatsApp</span><span>Log out?</span>';
+  dialog.getBoundingClientRect = () => ({ width: 200, height: 80 } as DOMRect); document.body.append(dialog);
+  const qr = document.createElement('div'); qr.dataset.testid = 'qrcode'; qr.style.display = 'none';
+  qr.getBoundingClientRect = dialog.getBoundingClientRect; document.body.append(qr);
+  connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(700);
+    expect(events.filter(e => e.type === 'accountSafety')).toEqual([{ type: 'accountSafety', reason: null }]);
+    dialog.innerHTML = 'temporarily banned'; dialog.style.visibility = 'hidden';
+    await vi.advanceTimersByTimeAsync(350);
+    expect(events.filter(e => e.type === 'accountSafety')).toHaveLength(1);
+  } finally { connector.stop(); }
 });

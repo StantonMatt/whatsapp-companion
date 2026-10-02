@@ -22,6 +22,13 @@ export const preferencesSchema = z.object({
   shareContext: z.boolean()
 }).strict();
 export type Preferences = z.infer<typeof preferencesSchema>;
+export const directStickerDisabledReasonSchema = z.enum(['logged-out', 'account-warning', 'send-error', 'whatsapp-changed']);
+export type DirectStickerDisabledReason = z.infer<typeof directStickerDisabledReasonSchema>;
+// Safety metadata is main-owned and global only, never a preference patch.
+const globalPreferencesSchema = preferencesSchema.extend({
+  directStickerDisabledReason: directStickerDisabledReasonSchema.optional(),
+  directStickerDisabledAt: z.number().int().nonnegative().safe().optional()
+});
 // Defaults migrate complete global preferences; sparse patches/overrides must
 // leave omitted fields alone (Zod's partial() preserves field defaults).
 const preferencesPatchSchema = preferencesSchema.extend({ directStickerSend: z.boolean() }).partial();
@@ -93,7 +100,7 @@ export const stickerSchema = z.union([
 ]);
 export type Sticker = z.infer<typeof stickerSchema>;
 export const stateSchema = z.object({
-  version: z.literal(1), global: preferencesSchema,
+  version: z.literal(1), global: globalPreferencesSchema,
   direct: preferencesPatchSchema, group: preferencesPatchSchema,
   chats: z.record(z.string(), preferencesPatchSchema),
   provider: providerSchema, models: z.object({ openai: modelIdSchema, anthropic: modelIdSchema }),

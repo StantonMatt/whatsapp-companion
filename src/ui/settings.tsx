@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission } from '../shared/model';
+import { defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission, type DirectStickerDisabledReason } from '../shared/model';
 import { resolveSettings } from '../core/settings';
 import { minimumStyleSamples, styleSamples } from '../core/style';
 import { reasoningLevels, savedEffort } from '../core/model-policy';
@@ -17,27 +17,32 @@ export function Settings({ status, act, close }: { status: Status; act: Act; clo
       {!tab ? <>
         <div className="scope-summary"><span className="scope-icon" aria-hidden="true">✦</span><div><strong>{chat ? status.chat.name : 'All conversations'}</strong><small>{chat ? (Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings for this chat' : 'Uses global settings') : 'Default AI settings'}</small></div></div>
         <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><span aria-hidden="true">›</span></button>)}</nav>
-        {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} act={act}/>}
+        {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} reason={status.state.global.directStickerDisabledReason} sequence={status.sequence} act={act}/>}
         {chat && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
       </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}
       {!tab && !chat && <div className="footer-actions"><button className="quiet" onClick={() => void act({ type: 'reload' })}>Reload WhatsApp</button></div>}
     </div>
   </>;
 }
-function DirectStickerSetting({ checked, act }: { checked: boolean; act: Act }) {
-  const [pending, setPending] = useState<{ value: boolean; accepted: boolean } | null>(null);
+function DirectStickerSetting({ checked, reason, sequence, act }: { checked: boolean; reason?: DirectStickerDisabledReason; sequence: number; act: Act }) {
+  const [pending, setPending] = useState<{ value: boolean; accepted: boolean; sequence: number } | null>(null);
   useEffect(() => {
-    if (pending?.accepted && pending.value === checked) setPending(null);
-  }, [checked, pending]);
+    if (pending?.accepted && (pending.value === checked || (!checked && reason && sequence > pending.sequence))) setPending(null);
+  }, [checked, reason, sequence, pending]);
   const change = async (directStickerSend: boolean) => {
     // React restores a controlled checkbox at the end of the click. Reflect
     // the request immediately while main persists and publishes the setting.
-    setPending({ value: directStickerSend, accepted: false });
+    setPending({ value: directStickerSend, accepted: false, sequence });
     const accepted = await act({ type: 'preferences', scope: 'global', patch: { directStickerSend } });
-    setPending(accepted ? { value: directStickerSend, accepted: true } : null);
+    setPending(accepted ? { value: directStickerSend, accepted: true, sequence } : null);
   };
-  return <Toggle label="Send stickers directly (experimental)" checked={pending?.value ?? checked}
-    disabled={pending !== null} onChange={value => void change(value)}/>;
+  const reasons: Record<DirectStickerDisabledReason, string> = {
+    'logged-out': 'WhatsApp logged out.', 'account-warning': 'WhatsApp showed an account warning.',
+    'send-error': 'a direct send failed.', 'whatsapp-changed': 'WhatsApp changed.'
+  };
+  return <><Toggle label="Send stickers directly (experimental)" checked={pending?.value ?? checked}
+    disabled={pending !== null} onChange={value => void change(value)}/>
+    {!(pending?.value ?? checked) && reason && <p className="hint">Turned off automatically: {reasons[reason]}</p>}</>;
 }
 function ReplySettings({ status, act, scope }: { status: Status; act: Act; scope: Scope }) {
   const state = status.state;

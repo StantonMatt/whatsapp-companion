@@ -4,11 +4,11 @@ import { readFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StickerTransfer, stickerRoute } from '../src/core/sticker-transfer';
-import { setPreferences, resolveSettings } from '../src/core/settings';
+import { setPreferences, resolveSettings, stopDirectStickerSending } from '../src/core/settings';
 import { emptySnapshot, initialState, actionSchema, stateSchema, type Snapshot, type Status } from '../src/shared/model';
 import { StatusCache, statusUpdate } from '../src/core/status';
 import { Store } from '../src/main/store';
-import { DIRECT_SHAPE, directArgumentsSchema, directDestinationSchema, directResolveSchema, directSendSchema, matchesDirectDestination, type DirectDestination } from '../src/shared/direct-sticker';
+import { DIRECT_SHAPE, directArgumentsSchema, directDestinationSchema, directFailureSchema, directResolveSchema, directSendSchema, matchesDirectDestination, type DirectDestination } from '../src/shared/direct-sticker';
 import { DirectStickerSender } from '../src/main/direct-sticker-sender';
 import { StickerSendDiagnostics } from '../src/main/sticker-send-diagnostics';
 import { STICKER_PICKER_LOOKUP_MS } from '../src/shared/sticker-transfer';
@@ -27,10 +27,11 @@ function setup() {
   const ticket = t.begin(id, nonce, t.destinationToken(current), current, Date.now(), 'direct', true);
   const execute = vi.fn<(script: string) => Promise<unknown>>();
   const resolved = { nonce, fingerprint, status: 'resolved', destination };
-  const sent = { nonce, fingerprint, status: 'finished', code: 'none', outcome: 'confirmed', uploaded: true, attempted: true, ack: 1, type: 'sticker', to: destination.wid };
+  const sent = { nonce, fingerprint, status: 'finished', phase: 'send-invoked', code: 'none', outcome: 'confirmed', uploaded: true, attempted: true, ack: 1, type: 'sticker', to: destination.wid };
   execute.mockResolvedValueOnce(resolved).mockResolvedValueOnce(sent);
-  const sender = new DirectStickerSender({ transfer: t, snapshot: () => current, enabled: () => enabled, execute, publish: vi.fn(), diagnostics: new StickerSendDiagnostics(directory) });
-  return { t, ticket, execute, sender, resolved, sent, change: (next: Partial<Snapshot>) => { current = { ...current, ...next }; t.observe(current); }, disable: () => { enabled = false; } };
+  const disable = vi.fn(() => { enabled = false; });
+  const sender = new DirectStickerSender({ transfer: t, snapshot: () => current, enabled: () => enabled, disable, execute, publish: vi.fn(), diagnostics: new StickerSendDiagnostics(directory) });
+  return { t, ticket, execute, sender, stop: disable, resolved, sent, change: (next: Partial<Snapshot>) => { current = { ...current, ...next }; t.observe(current); }, disable: () => { enabled = false; } };
 }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 
@@ -139,7 +140,7 @@ test('main passes absolute page deadlines that expire before its execution timeo
 });
 test.each(['timeout', 'in-flight'] as const)('a page-side %s result never triggers fallback or another execution', async code => {
   const s = setup();
-  s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, code, outcome: 'unknown', uploaded: false, attempted: false, ack: null, type: null, to: null });
+  s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, code, outcome: 'unknown', phase: 'pre-upload', uploaded: false, attempted: false, ack: null, type: null, to: null });
   expect(await s.sender.run(s.ticket, image, 'picker')).toBeUndefined();
   expect(s.execute).toHaveBeenCalledTimes(2);
   expect(s.t.send).toMatchObject({ route: 'direct', state: 'failed', sent: 'unknown' });
@@ -161,7 +162,7 @@ test.each(['resolve', 'send'] as const)('module-shape detail reaches the diagnos
   const unavailable = { nonce, fingerprint: null, status: 'unavailable', code: 'module-shape', detail };
   s.execute.mockReset();
   if (phase === 'resolve') s.execute.mockResolvedValueOnce(unavailable);
-  else s.execute.mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, ...unavailable, outcome: 'not-sent', uploaded: false, attempted: false, ack: null, type: null, to: null });
+  else s.execute.mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, ...unavailable, outcome: 'not-sent', phase: 'pre-upload', uploaded: false, attempted: false, ack: null, type: null, to: null });
   expect(await s.sender.run(s.ticket, image, 'picker')).toMatchObject({ route: 'picker' });
   const records = readFileSync(join(directory, 'diagnostics', 'sticker-sends.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   expect(records.at(-1)).toMatchObject({ route: 'direct', phase, outcome: 'fallback', code: 'module-shape', detail });
@@ -189,9 +190,11 @@ test('direct fallback leaves IPC time for a cold-picker result at the lookup cap
 });
 test('send-phase shape loss can fall back only before upload/send; uploaded failures never fall back', async () => {
   for (const uploaded of [false, true]) {
-    const s = setup(); s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, status: uploaded ? 'finished' : 'unavailable', outcome: 'not-sent', code: 'module-shape', detail: 'Collections.Chat.get missing', uploaded, attempted: false, ack: null, type: null, to: null });
+    const s = setup(); s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, status: uploaded ? 'finished' : 'unavailable', outcome: 'not-sent', code: 'module-shape', detail: 'Collections.Chat.get missing', phase: uploaded ? 'uploaded' : 'pre-upload', uploaded, attempted: false, ack: null, type: null, to: null });
     const fallback = await s.sender.run(s.ticket, image, 'picker');
     expect(Boolean(fallback)).toBe(!uploaded);
+    if (uploaded) expect(s.stop).toHaveBeenCalledExactlyOnceWith('whatsapp-changed');
+    else expect(s.stop).not.toHaveBeenCalled();
     expect(s.t.send).toMatchObject(uploaded ? { route: 'direct', state: 'failed', sent: 'not-sent' } : { route: 'picker', state: 'finding' });
     rmSync(directory, { recursive: true, force: true });
   }
@@ -242,7 +245,190 @@ test('owner-only direct diagnostics contain structural fields and no identifiers
 
 test('a validated version/shape change before upload falls back with its new fingerprint', async () => {
   const s = setup(), nextFingerprint = `${DIRECT_SHAPE}|2.3000.1030000001`;
-  s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, fingerprint: nextFingerprint, status: 'unavailable', outcome: 'not-sent', code: 'module-shape', detail: 'fingerprint changed', uploaded: false, attempted: false, ack: null, type: null, to: null });
+  s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, fingerprint: nextFingerprint, status: 'unavailable', outcome: 'not-sent', code: 'module-shape', detail: 'fingerprint changed', phase: 'pre-upload', uploaded: false, attempted: false, ack: null, type: null, to: null });
   expect(await s.sender.run(s.ticket, image, 'picker')).toMatchObject({ route: 'picker', nonce });
   expect(readFileSync(join(directory, 'diagnostics', 'sticker-sends.log'), 'utf8')).toContain(nextFingerprint);
+});
+
+test('ten page send invocations fit in a rolling minute; the eleventh falls back and the window slides', async () => {
+  vi.useFakeTimers(); const s = setup(), start = Date.now();
+  const run = async (i: number, route: 'picker' | 'maker' = 'picker') => {
+    const nextNonce = `550e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+    const ticket = i === 0 ? s.ticket : s.t.begin(id, nextNonce, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+    s.execute.mockReset().mockResolvedValueOnce({ ...s.resolved, nonce: ticket.nonce }).mockResolvedValueOnce({ ...s.sent, nonce: ticket.nonce });
+    const fallback = await s.sender.run(ticket, image, route);
+    return { fallback, calls: s.execute.mock.calls.length };
+  };
+  for (let i = 0; i < 10; i++) {
+    vi.setSystemTime(start + i * 1000);
+    expect(await run(i)).toEqual({ fallback: undefined, calls: 2 });
+    expect(s.t.send).toMatchObject({ route: 'direct', sent: 'confirmed' });
+  }
+  vi.setSystemTime(start + 59_999);
+  expect((await run(10)).fallback).toMatchObject({ route: 'picker' });
+  expect(s.execute).not.toHaveBeenCalled(); s.t.cancel();
+  const records = readFileSync(join(directory, 'diagnostics', 'sticker-sends.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(records.at(-1)).toMatchObject({ route: 'direct', outcome: 'fallback', code: 'rate-limit' });
+  vi.setSystemTime(start + 60_000); expect(await run(11)).toEqual({ fallback: undefined, calls: 2 });
+  expect((await run(12, 'maker')).fallback).toMatchObject({ route: 'maker' }); s.t.cancel();
+  vi.setSystemTime(start + 61_000); expect(await run(13)).toEqual({ fallback: undefined, calls: 2 });
+  expect(s.stop).not.toHaveBeenCalled();
+});
+
+test('resolution does not consume the cap, but unavailable page-send invocations do', async () => {
+  const s = setup();
+  for (let i = 0; i < 11; i++) {
+    const n = i === 0 ? nonce : `550e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+    const ticket = i === 0 ? s.ticket : s.t.begin(id, n, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+    s.execute.mockReset().mockResolvedValueOnce({ ...s.resolved, nonce: n }).mockResolvedValueOnce({ ...s.sent, nonce: n, status: 'unavailable', code: 'modules-missing', outcome: 'not-sent', phase: 'pre-upload', uploaded: false, attempted: false, ack: null, type: null, to: null });
+    expect(await s.sender.run(ticket, image, 'picker')).toMatchObject({ route: 'picker' });
+    expect(s.execute).toHaveBeenCalledTimes(i < 10 ? 2 : 0); s.t.cancel();
+  }
+});
+
+test.each(['upload-failed', 'send-failed', 'page-error', 'unconfirmed', 'timeout', 'invalid-result'] as const)('post-invocation %s stops direct sending', async code => {
+  const s = setup();
+  s.execute.mockReset().mockResolvedValueOnce(s.resolved);
+  if (code === 'invalid-result') s.execute.mockResolvedValueOnce({ privateError: 'never logged' });
+  else s.execute.mockResolvedValueOnce({ ...s.sent, code, outcome: code === 'upload-failed' ? 'not-sent' : 'unknown', phase: code === 'upload-failed' ? 'uploaded' : 'send-invoked', attempted: code !== 'upload-failed', ack: null, type: null, to: null });
+  await s.sender.run(s.ticket, image, 'picker');
+  expect(s.stop).toHaveBeenCalledExactlyOnceWith('send-error');
+  expect(s.t.send?.route).toBe('direct');
+});
+
+test.each(['resolve', 'send'] as const)('module-shape failure in %s falls back before success, and stops after success', async phase => {
+  const s = setup();
+  const unavailable = { nonce, fingerprint: null, status: 'unavailable', code: 'module-shape', detail: 'Collections.Chat.get missing' };
+  const fail = (n: string) => {
+    s.execute.mockReset();
+    if (phase === 'send') s.execute.mockResolvedValueOnce({ ...s.resolved, nonce: n });
+    s.execute.mockResolvedValueOnce(phase === 'resolve' ? { ...unavailable, nonce: n } : { ...s.sent, ...unavailable, nonce: n, outcome: 'not-sent', phase: 'pre-upload', uploaded: false, attempted: false, ack: null, type: null, to: null });
+  };
+  fail(nonce); expect(await s.sender.run(s.ticket, image, 'picker')).toMatchObject({ route: 'picker' });
+  expect(s.stop).not.toHaveBeenCalled(); s.t.cancel();
+  const next = '550e8400-e29b-41d4-a716-446655440001';
+  const ticket = s.t.begin(id, next, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+  s.execute.mockReset().mockResolvedValueOnce({ ...s.resolved, nonce: next }).mockResolvedValueOnce({ ...s.sent, nonce: next });
+  await s.sender.run(ticket, image, 'picker');
+  const last = '550e8400-e29b-41d4-a716-446655440002';
+  const finalTicket = s.t.begin(id, last, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+  fail(last); expect(await s.sender.run(finalTicket, image, 'picker')).toBeUndefined();
+  expect(s.stop).toHaveBeenCalledExactlyOnceWith('whatsapp-changed');
+});
+
+test('resolve errors preserve direct sending, but a chat change during upload disables it', async () => {
+  const s = setup(); s.execute.mockReset().mockRejectedValueOnce(new Error('resolve failed'));
+  await s.sender.run(s.ticket, image, 'picker'); expect(s.stop).not.toHaveBeenCalled();
+  const n = '550e8400-e29b-41d4-a716-446655440001';
+  const ticket = s.t.begin(id, n, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+  s.execute.mockReset().mockResolvedValueOnce({ ...s.resolved, nonce: n }).mockResolvedValueOnce({ ...s.sent, nonce: n, code: 'chat-changed', outcome: 'not-sent', phase: 'uploaded', attempted: false, ack: null, type: null, to: null });
+  await s.sender.run(ticket, image, 'picker'); expect(s.stop).toHaveBeenCalledExactlyOnceWith('send-error');
+});
+
+test.each(['logged-out', 'account-warning', 'send-error', 'whatsapp-changed'] as const)('automatic %s stop persists, preserves the first reason, and clears only on re-enable', reason => {
+  directory = mkdtempSync(join(tmpdir(), 'direct-safety-test-'));
+  let store = new Store(directory);
+  store.update(s => stopDirectStickerSending(s, reason, 100));
+  expect(store.state.global.directStickerDisabledReason).toBeUndefined();
+  store.update(s => setPreferences(s, 'global', { directStickerSend: true }));
+  store.update(s => stopDirectStickerSending(s, reason, 200));
+  store = new Store(directory);
+  expect(store.state.global).toMatchObject({ directStickerSend: false, directStickerDisabledReason: reason, directStickerDisabledAt: 200 });
+  store.update(s => stopDirectStickerSending(s, 'send-error', 300));
+  store.update(s => setPreferences(s, 'global', { tone: 'friendly', directStickerSend: false }));
+  expect(store.state.global.directStickerDisabledReason).toBe(reason);
+  expect(store.state.global.directStickerDisabledAt).toBe(200);
+  store.update(s => setPreferences(s, 'global', { directStickerSend: true }));
+  store = new Store(directory);
+  expect(store.state.global.directStickerSend).toBe(true);
+  expect(store.state.global.directStickerDisabledReason).toBeUndefined();
+  expect(store.state.global.directStickerDisabledAt).toBeUndefined();
+});
+
+test('safety metadata is optional, validated, strictly global and cannot be set through UI actions', () => {
+  const state = initialState(); expect(stateSchema.safeParse(state).success).toBe(true);
+  for (const patch of [{ directStickerDisabledReason: 'private text' }, { directStickerDisabledAt: -1 }, { directStickerDisabledAt: 1.5 }, { directStickerDisabledAt: Infinity }, { directStickerDisabledAt: 'today' }, { extra: true }]) {
+    expect(stateSchema.safeParse({ ...state, global: { ...state.global, ...patch } }).success).toBe(false);
+  }
+  for (const patch of [{ directStickerDisabledReason: 'logged-out' }, { directStickerDisabledAt: 100 }]) {
+    expect(actionSchema.safeParse({ type: 'preferences', scope: 'global', patch }).success).toBe(false);
+    expect(stateSchema.safeParse({ ...state, chats: { '123@c.us': patch } }).success).toBe(false);
+  }
+});
+
+test('module-shape failures after upload stop as WhatsApp changed regardless of prior success', async () => {
+  const s = setup();
+  s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce({ ...s.sent, code: 'module-shape', detail: 'Collections.Chat.get missing', outcome: 'unknown', ack: null, type: null, to: null });
+  await s.sender.run(s.ticket, image, 'picker');
+  expect(s.stop).toHaveBeenCalledExactlyOnceWith('whatsapp-changed');
+  rmSync(directory, { recursive: true, force: true });
+  const next = setup(); await next.sender.run(next.ticket, image, 'picker');
+  const n = '550e8400-e29b-41d4-a716-446655440001';
+  const ticket = next.t.begin(id, n, next.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+  next.execute.mockReset().mockResolvedValueOnce({ ...next.resolved, nonce: n }).mockResolvedValueOnce({ ...next.sent, nonce: n, code: 'module-shape', detail: 'WAWebGetEphemeralFieldsMsgActionsUtils.getEphemeralFields result invalid', outcome: 'not-sent', phase: 'uploaded', attempted: false, ack: null, type: null, to: null });
+  await next.sender.run(ticket, image, 'picker');
+  expect(next.stop).toHaveBeenCalledExactlyOnceWith('whatsapp-changed');
+});
+
+const failureCases = directFailureSchema.options.filter(code => code !== 'none').flatMap(code =>
+  (['pre-upload', 'uploaded', 'send-invoked'] as const).flatMap(phase =>
+    [false, true].map(succeeded => ({ code, phase, succeeded }))));
+test.each(failureCases)('$code at $phase (prior success: $succeeded) obeys the network safety stop', async ({ code, phase, succeeded }) => {
+  const s = setup();
+  let ticket = s.ticket;
+  if (succeeded) {
+    await s.sender.run(ticket, image, 'picker');
+    const n = '550e8400-e29b-41d4-a716-446655440001';
+    ticket = s.t.begin(id, n, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+  }
+  const unavailable = phase === 'pre-upload' && ['modules-missing', 'module-shape', 'version-missing', 'chat-unavailable'].includes(code);
+  const outcome = phase === 'send-invoked' || code === 'timeout' || code === 'in-flight' ? 'unknown' : 'not-sent';
+  const result = { ...s.sent, nonce: ticket.nonce, code, phase, status: unavailable ? 'unavailable' : 'finished',
+    outcome, uploaded: phase !== 'pre-upload', attempted: phase === 'send-invoked', ack: null, type: null, to: null,
+    detail: code === 'module-shape' ? 'WAWebGetEphemeralFieldsMsgActionsUtils.getEphemeralFields result invalid' : null };
+  expect(directSendSchema.safeParse(result).success).toBe(true);
+  s.execute.mockReset().mockResolvedValueOnce({ ...s.resolved, nonce: ticket.nonce }).mockResolvedValueOnce(result);
+  const fallback = await s.sender.run(ticket, image, 'picker');
+  if (phase !== 'pre-upload') {
+    expect(fallback).toBeUndefined();
+    expect(s.t.send).toMatchObject({ route: 'direct', state: 'failed', sent: outcome });
+    expect(s.stop).toHaveBeenCalledExactlyOnceWith(code.endsWith('-shape') ? 'whatsapp-changed' : 'send-error');
+    // Even a new user click cannot start another upload while stopped.
+    const n = '550e8400-e29b-41d4-a716-446655440002';
+    const next = s.t.begin(id, n, s.t.destinationToken(snapshot), snapshot, Date.now(), 'direct');
+    s.execute.mockClear();
+    expect(await s.sender.run(next, image, 'picker')).toBeUndefined();
+    expect(s.execute).not.toHaveBeenCalled();
+  } else if (code === 'module-shape' && succeeded) {
+    expect(fallback).toBeUndefined();
+    expect(s.stop).toHaveBeenCalledExactlyOnceWith('whatsapp-changed');
+  } else if (unavailable) {
+    expect(fallback).toMatchObject({ route: 'picker', nonce: ticket.nonce });
+    expect(s.stop).not.toHaveBeenCalled();
+  } else {
+    expect(fallback).toBeUndefined();
+    if (['module-shape', 'chat-changed', 'disabled', 'destination-mismatch', 'chat-unavailable'].includes(code)) expect(s.stop).not.toHaveBeenCalled();
+    else expect(s.stop).toHaveBeenCalledExactlyOnceWith('send-error');
+  }
+});
+
+test.each(['pre-upload', 'uploaded', 'send-invoked'] as const)('send results require consistent flags for phase %s', phase => {
+  const s = setup();
+  for (const uploaded of [false, true]) for (const attempted of [false, true]) {
+    const result = { ...s.sent, phase, code: 'page-error', outcome: attempted ? 'unknown' : 'not-sent', uploaded, attempted, ack: null, type: null, to: null };
+    expect(directSendSchema.safeParse(result).success).toBe(uploaded === (phase !== 'pre-upload') && attempted === (phase === 'send-invoked'));
+  }
+});
+
+test.each([
+  { phase: undefined }, { phase: 'unknown' },
+  { phase: 'pre-upload' },
+  { phase: 'uploaded', attempted: false, status: 'unavailable', code: 'module-shape', detail: 'Collections.Chat.get missing', outcome: 'not-sent' },
+  { phase: 'send-invoked', status: 'unavailable', code: 'module-shape', detail: 'Collections.Chat.get missing', outcome: 'unknown' }
+])('invalid phase evidence cannot permit fallback: %j', async change => {
+  const s = setup(), result = { ...s.sent, ...change };
+  expect(directSendSchema.safeParse(result).success).toBe(false);
+  s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce(result);
+  expect(await s.sender.run(s.ticket, image, 'picker')).toBeUndefined();
+  expect(s.stop).toHaveBeenCalledExactlyOnceWith('send-error');
 });

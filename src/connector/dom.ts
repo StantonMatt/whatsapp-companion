@@ -13,7 +13,7 @@ import { Navigation } from './navigation';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
 import type { Snapshot, Message } from '../shared/model';
 import { snapshotKey, suggestionKey } from '../core/suggestions';
-import type { RemoteCommand, RemoteEvent } from '../shared/connector';
+import type { RemoteCommand, RemoteEvent, AccountSafetyReason } from '../shared/connector';
 
 const textSelector = '.selectable-text.copyable-text, [data-testid="msg-text"], [data-testid="selectable-text"]';
 function visible(element: Element | null): boolean {
@@ -25,6 +25,32 @@ function visible(element: Element | null): boolean {
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.contentVisibility === 'hidden') return false;
   }
   return true;
+}
+// Only inspect account UI containers, never message bodies, QR contents or
+// exception text. The only data crossing IPC is an allowlisted reason.
+export function accountSafetyReason(doc: Document): AccountSafetyReason {
+  const warnings = '[role="dialog"], [role="alertdialog"], [role="alert"], [role="banner"], [data-testid="popup-contents"], [data-testid="banner"], [data-testid="account-warning"], [data-testid="account-restriction"]';
+  const phrases = /\b(?:temporarily banned|unusual activity|banned from using whatsapp|account (?:(?:is|was|has been)(?: temporarily)? )?(?:restricted|banned|suspended|blocked)|cuenta (?:(?:esta|fue|ha sido|se ha)(?: temporalmente)? )?(?:restringida|suspendida|bloqueada|baneada)|conta (?:(?:esta|foi)(?: temporariamente)? )?(?:restrita|banida|suspensa|bloqueada))\b/i;
+  const noticeText = (node: Node): string => {
+    if (node.nodeType === 3) return node.textContent ?? '';
+    if (!(node instanceof Element)) return '';
+    if (node.matches('[data-id], [data-testid="msg-container"], [role="textbox"], script, style, [hidden], [aria-hidden="true"]')) return '';
+    const css = getComputedStyle(node);
+    if (css.display === 'none' || css.visibility === 'hidden' || css.visibility === 'collapse' || css.contentVisibility === 'hidden') return '';
+    return [...node.childNodes].map(noticeText).join(' ');
+  };
+  for (const node of doc.querySelectorAll(warnings)) {
+    if (node.closest('[data-id], [data-testid="msg-container"], [role="textbox"]') || !visible(node)) continue;
+    const text = noticeText(node).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
+    if (phrases.test(text)) return 'account-warning';
+  }
+  const login = '[data-testid="qrcode"], [data-testid="qr-code"], [data-testid="login-qr-code"], [data-testid="link-device"], [data-testid="logged-out"], .landing-wrapper, [data-ref]';
+  for (const node of doc.querySelectorAll(login)) {
+    if (node.closest('[data-id]') || !visible(node)) continue;
+    if (node.hasAttribute('data-ref') && !node.querySelector('canvas, img')) continue;
+    return 'logged-out';
+  }
+  return null;
 }
 function senderLabel(node: HTMLElement): string | undefined {
   const author = ownElements(node, '[data-testid="author"]')[0];
@@ -107,6 +133,7 @@ export class DomConnector {
   private composerStableSince = 0;
   private lastKey = '';
   private lastContentKey = '';
+  private lastAccountSafety: AccountSafetyReason | undefined;
   private popupMode: 'refine' | 'notice' | 'pending' = 'notice';
   private suggestion?: Extract<RemoteCommand, { type: 'suggestion' }>;
   private replacement?: { command: Extract<RemoteCommand, { type: 'suggestion' }>; editor: HTMLElement; originalRange?: Range };
@@ -355,6 +382,11 @@ export class DomConnector {
   }
   private stickerReadiness = new StickerReadiness();
   private refresh() {
+    const reason = accountSafetyReason(this.doc);
+    if (reason !== this.lastAccountSafety) {
+      this.lastAccountSafety = reason;
+      this.emit({ type: 'accountSafety', reason });
+    }
     this.stickerPickerLayout?.refresh();
     const snapshot = this.read(), key = snapshotKey(snapshot);
     this.navigation?.refresh(this.stickerReadiness.present(snapshot, snapshot.stickerPreparation).ready);

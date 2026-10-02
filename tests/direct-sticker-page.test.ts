@@ -69,7 +69,7 @@ test.each(['upload', 'key', 'ephemeral', 'send', 'registration', 'observation'])
   await vi.advanceTimersByTimeAsync(duration - 1);
   expect(disconnect).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
-  expect(await pending).toMatchObject({ status: 'finished', outcome: 'unknown', code: 'timeout', uploaded: true, attempted });
+  expect(await pending).toMatchObject({ status: 'finished', outcome: 'unknown', code: 'timeout', phase: attempted ? 'send-invoked' : 'uploaded', uploaded: true, attempted });
   expect(disconnect).toHaveBeenCalledTimes(1);
   expect(signal?.aborted).toBe(stage === 'upload' ? true : undefined);
   expect(page.__whatsappCompanionDirectStickerInFlight).toBeUndefined();
@@ -93,7 +93,7 @@ test.each(['bytes', 'digest'])('stalled %s preparation expires before upload', a
   else vi.mocked(webcrypto.subtle.digest).mockReturnValueOnce(held.promise);
   const pending = send(args);
   await vi.advanceTimersByTimeAsync(1000);
-  expect(await pending).toMatchObject({ outcome: 'unknown', code: 'timeout', uploaded: false, attempted: false });
+  expect(await pending).toMatchObject({ outcome: 'unknown', code: 'timeout', phase: 'pre-upload', uploaded: false, attempted: false });
   expect(disconnect).toHaveBeenCalledTimes(1);
   expect(page.__whatsappCompanionDirectStickerInFlight).toBeUndefined();
   expect(vi.getTimerCount()).toBe(0);
@@ -111,7 +111,7 @@ test('overlapping calls cannot replace another nonce or release its token, even 
   const token = page.__whatsappCompanionDirectStickerInFlight;
   const next = { ...args, nonce: '550e8400-e29b-41d4-a716-446655440001', deadline: Date.now() + 5000 };
   for (const overlapping of [args, next]) {
-    expect(await send(overlapping)).toMatchObject({ outcome: 'unknown', code: 'in-flight', uploaded: false, attempted: false });
+    expect(await send(overlapping)).toMatchObject({ outcome: 'unknown', code: 'in-flight', phase: 'pre-upload', uploaded: false, attempted: false });
     expect(page.__whatsappCompanionDirectStickerInFlight).toBe(token);
   }
   expect(await resolve()).toMatchObject({ status: 'unavailable', code: 'in-flight' });
@@ -133,7 +133,7 @@ test('overlapping calls cannot replace another nonce or release its token, even 
 
 test('a call whose deadline already elapsed does not start page work', async () => {
   const { args } = await prepare();
-  expect(await send({ ...args, deadline: Date.now() - 1 })).toMatchObject({ outcome: 'unknown', code: 'timeout', uploaded: false, attempted: false });
+  expect(await send({ ...args, deadline: Date.now() - 1 })).toMatchObject({ outcome: 'unknown', code: 'timeout', phase: 'pre-upload', uploaded: false, attempted: false });
   expect(await page.eval(directStickerScript({ phase: 'resolve', nonce, deadline: Date.now() - 1 }))).toMatchObject({ status: 'unavailable', code: 'timeout' });
   expect(page.fixtureDirectUploads).toHaveLength(0);
   expect(page.__whatsappCompanionDirectStickerInFlight).toBeUndefined();
@@ -243,7 +243,7 @@ test('model-list fallback rechecks active flags during upload even with identica
   // Change internal active identity without changing the header or DOM.
   const models = page.require('WAWebCollections').Chat.getModelsArray();
   for (const chat of models) Object.defineProperty(chat, 'active', { value: chat.id.toString() === '777777@lid' });
-  expect(await pending).toMatchObject({ outcome: 'not-sent', code: 'chat-changed', uploaded: true, attempted: false });
+  expect(await pending).toMatchObject({ outcome: 'not-sent', code: 'chat-changed', phase: 'uploaded', uploaded: true, attempted: false });
   expect(page.fixtureDirectSent).toHaveLength(0);
 });
 
@@ -253,16 +253,50 @@ test.each(['identity', 'ephemeral'])('runtime shape failure retains its non-PII 
     const user = page.require('WAWebUserPrefsMeUser');
     for (const key of Object.keys(user)) user[key] = () => null;
   } else page.require('WAWebGetEphemeralFieldsMsgActionsUtils').getEphemeralFields = () => null;
-  expect(await send(args)).toMatchObject({ code: 'module-shape', attempted: false,
+  expect(await send(args)).toMatchObject({ code: 'module-shape', phase: target === 'identity' ? 'pre-upload' : 'uploaded', uploaded: target !== 'identity', attempted: false,
     detail: target === 'identity' ? 'WAWebUserPrefsMeUser.identity unavailable' : 'WAWebGetEphemeralFieldsMsgActionsUtils.getEphemeralFields result invalid' });
   expect(page.fixtureDirectSent).toHaveLength(0);
+});
+
+test.each(['module-shape', 'chat-unavailable'] as const)('%s while rechecking chat after upload reports the uploaded phase', async code => {
+  const { args } = await prepare();
+  const upload = page.require('WAWebUploadManager'), original = upload.encryptAndUpload;
+  vi.spyOn(upload, 'encryptAndUpload').mockImplementationOnce(async options => {
+    const result = await original(options);
+    page.require('WAWebCollections').Chat.getActive = () => code === 'module-shape' ? 'invalid' : null;
+    return result;
+  });
+  expect(await send(args)).toMatchObject({ status: 'finished', code, phase: 'uploaded', outcome: 'not-sent', uploaded: true, attempted: false });
+  expect(page.fixtureDirectUploads).toHaveLength(1);
+  expect(page.fixtureDirectSent).toHaveLength(0);
+});
+
+test('invalid message key after upload reports key-shape in the uploaded phase', async () => {
+  const { args } = await prepare();
+  const require = page.require, Original = require('WAWebMsgKey');
+  class InvalidKey extends Original { constructor(options: any) { super(options); this.fromMe = false; } }
+  page.require = (name: string) => name === 'WAWebMsgKey' ? InvalidKey : require(name);
+  expect(await send(args)).toMatchObject({ status: 'finished', code: 'key-shape', phase: 'uploaded', outcome: 'not-sent', uploaded: true, attempted: false });
+  expect(page.fixtureDirectUploads).toHaveLength(1);
+  expect(page.fixtureDirectSent).toHaveLength(0);
+});
+
+test.each([
+  ['WAWebStartMediaUploadQpl', 'startMediaUploadQpl', 'uploaded', 'upload-failed'],
+  ['WAWebUploadManager', 'encryptAndUpload', 'uploaded', 'upload-failed'],
+  ['WAWebSendMsgChatAction', 'addAndSendMsgToChat', 'send-invoked', 'send-failed']
+] as const)('a synchronous throw from %s.%s preserves the side-effect phase', async (module, method, phase, code) => {
+  const { args } = await prepare();
+  const invocation = vi.spyOn(page.require(module), method).mockImplementationOnce(() => { throw new Error('private failure'); });
+  expect(await send(args)).toMatchObject({ status: 'finished', code, phase, outcome: phase === 'send-invoked' ? 'unknown' : 'not-sent', uploaded: true, attempted: phase === 'send-invoked' });
+  expect(invocation).toHaveBeenCalledTimes(1);
 });
 
 test.each([false, true])('bundled main-world code uploads original bytes and sends exactly once, preserving draft (%s)', async animated => {
   const { args, sticker } = await prepare(animated), composer = page.document.querySelector('[role=textbox]');
   composer.innerHTML = 'Keep <span contenteditable="false" data-mention="true">@Alex</span> draft'; const original = composer.innerHTML;
   const result = await send(args);
-  expect(result).toMatchObject({ status: 'finished', outcome: 'confirmed', uploaded: true, attempted: true, ack: 1, type: 'sticker', to: '123456@c.us' });
+  expect(result).toMatchObject({ status: 'finished', outcome: 'confirmed', phase: 'send-invoked', uploaded: true, attempted: true, ack: 1, type: 'sticker', to: '123456@c.us' });
   expect(page.fixtureDirectSent).toHaveLength(1); expect(page.fixtureDirectUploads).toHaveLength(1);
   expect(page.fixtureDirectSent[0].isAnimated).toBe(animated);
   expect(Buffer.from(await page.fixtureDirectSent[0].file.arrayBuffer())).toEqual(sticker.bytes);
@@ -284,16 +318,16 @@ test.each(['fixtureDirectModulesMissing', 'fixtureDirectShapeMismatch'])('missin
 });
 test('module loss between resolve and send reports safe unavailable, never uploads', async () => {
   const { args } = await prepare(); page.fixtureDirectModulesMissing = true;
-  expect(await send(args)).toMatchObject({ status: 'unavailable', outcome: 'not-sent', uploaded: false, attempted: false });
+  expect(await send(args)).toMatchObject({ status: 'unavailable', outcome: 'not-sent', phase: 'pre-upload', uploaded: false, attempted: false });
 });
 test('chat switched between resolve and send aborts; identical display titles cannot retarget', async () => {
   const { args } = await prepare(); page.fixtureDirectSetPeer('777777@lid');
-  expect(await send(args)).toMatchObject({ outcome: 'not-sent', code: 'chat-changed', uploaded: false, attempted: false });
+  expect(await send(args)).toMatchObject({ outcome: 'not-sent', code: 'chat-changed', phase: 'pre-upload', uploaded: false, attempted: false });
   expect(page.fixtureDirectSent).toHaveLength(0);
 });
 test('chat switched during upload aborts without attempting send or fallback', async () => {
   const { args } = await prepare(); page.fixtureDirectSwitchDuringUpload = true;
-  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'not-sent', code: 'chat-changed', uploaded: true, attempted: false });
+  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'not-sent', code: 'chat-changed', phase: 'uploaded', uploaded: true, attempted: false });
   expect(page.fixtureDirectSent).toHaveLength(0);
 });
 test('switch away and back during upload still aborts', async () => {
@@ -305,12 +339,12 @@ test('switch away and back during upload still aborts', async () => {
 });
 test.each(['fixtureDirectUploadFails', 'fixtureDirectUploadShape'])('upload errors never claim unavailable or send (%s)', async flag => {
   const { args } = await prepare(); page[flag] = true;
-  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'not-sent', uploaded: true, attempted: false });
+  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'not-sent', phase: 'uploaded', uploaded: true, attempted: false });
   expect(page.fixtureDirectSent).toHaveLength(0);
 });
 test.each(['fixtureDirectSendFails', 'fixtureDirectSendShape'])('send errors consume the sole attempt and report unknown (%s)', async flag => {
   const { args } = await prepare(); page[flag] = true;
-  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'unknown', uploaded: true, attempted: true });
+  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'unknown', phase: 'send-invoked', uploaded: true, attempted: true });
   expect(page.fixtureDirectUploads).toHaveLength(1);
 });
 test('ack zero cannot confirm queued send', async () => {
@@ -319,9 +353,9 @@ test('ack zero cannot confirm queued send', async () => {
 });
 test('page verifies hash and bytes before upload, and rejects version/shape changes', async () => {
   const { args } = await prepare();
-  expect(await send({ ...args, phase: 'send', expectedHash: 'a'.repeat(64) } as DirectArguments)).toMatchObject({ outcome: 'not-sent', code: 'hash-mismatch', uploaded: false });
+  expect(await send({ ...args, phase: 'send', expectedHash: 'a'.repeat(64) } as DirectArguments)).toMatchObject({ outcome: 'not-sent', code: 'hash-mismatch', phase: 'pre-upload', uploaded: false });
   page.Debug.VERSION = '2.3000.2';
-  expect(await send(args)).toMatchObject({ status: 'unavailable', code: 'module-shape', detail: 'fingerprint changed', uploaded: false });
+  expect(await send(args)).toMatchObject({ status: 'unavailable', code: 'module-shape', detail: 'fingerprint changed', phase: 'pre-upload', uploaded: false });
   page.Debug.VERSION = 'private-version';
   expect(directResolveSchema.parse(await page.eval(directStickerScript({ phase: 'resolve', nonce, deadline: Date.now() + 2500 })))).toMatchObject({ status: 'unavailable', code: 'version-missing', fingerprint: null });
 });
@@ -331,7 +365,7 @@ test('a delayed upload cannot invoke send after the page deadline', async () => 
   const pending = send(args);
   while (!page.fixtureDirectUploads.length) await new Promise(resolve => setTimeout(resolve, 1));
   const now = page.Date.now(); page.Date.now = () => now + 26_000;
-  expect(await pending).toMatchObject({ status: 'finished', outcome: 'unknown', code: 'timeout', uploaded: true, attempted: false });
+  expect(await pending).toMatchObject({ status: 'finished', outcome: 'unknown', code: 'timeout', phase: 'uploaded', uploaded: true, attempted: false });
   expect(page.fixtureDirectSent).toHaveLength(0);
 });
 test('benign header status changes during upload do not change the bound title', async () => {

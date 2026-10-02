@@ -152,6 +152,24 @@ function animatedFixture(data){
  const chunks=[chunk('VP8X',x),chunk('ANIM',new Uint8Array(6)),chunk('ANMF',f)];const bytes=new Uint8Array(12+chunks.reduce((n,c)=>n+c.length,0));bytes.set([..."RIFF"].map(c=>c.charCodeAt(0)));new DataView(bytes.buffer).setUint32(4,bytes.length-8,true);bytes.set([..."WEBP"].map(c=>c.charCodeAt(0)),8);let offset=12;for(const c of chunks){bytes.set(c,offset);offset+=c.length;}return 'data:image/webp;base64,'+btoa(String.fromCharCode(...bytes));
 }
 
+// Disposable account-safety UI; neither toggle links an account or sends data.
+window.fixtureSetAccountWarning=(enabled,text='Your account is restricted')=>{
+ document.querySelector('#fixture-account-warning')?.remove();
+ if(!enabled)return;
+ const dialog=document.createElement('div');dialog.id='fixture-account-warning';dialog.dataset.testid='account-warning';dialog.setAttribute('role','dialog');
+ dialog.style.cssText='position:fixed;left:45%;top:25%;width:360px;padding:30px;background:#202c33;z-index:40';dialog.textContent=text;document.body.append(dialog);
+};
+window.fixtureSetQrScreen=enabled=>{
+ document.querySelector('#fixture-qr-screen')?.remove();document.querySelector('#main').style.display=enabled?'none':'';
+ if(!enabled)return;
+ const screen=document.createElement('div');screen.id='fixture-qr-screen';screen.dataset.testid='qrcode';
+ screen.style.cssText='position:fixed;inset:0;background:#202c33;z-index:40;padding:120px 45%';
+ const canvas=document.createElement('canvas');canvas.width=160;canvas.height=160;canvas.style.background='#fff';screen.append(canvas);document.body.append(screen);
+};
+for(const [label,toggle] of [['Toggle account warning',()=>window.fixtureSetAccountWarning(!document.querySelector('#fixture-account-warning'))],['Toggle QR screen',()=>window.fixtureSetQrScreen(!document.querySelector('#fixture-qr-screen'))]]){
+ const button=document.createElement('button');button.textContent=label;button.onclick=toggle;document.querySelector('#tools').append(button);
+}
+
 // Main-world internal send fixture. It uploads/sends only disposable local data.
 // No preload API or real WhatsApp endpoint is involved.
 window.Debug={VERSION:'2.3000.1030000000'};

@@ -1,4 +1,4 @@
-import { directArgumentsSchema, type DirectArguments, type DirectDetail } from '../shared/direct-sticker';
+import { directArgumentsSchema, type DirectArguments, type DirectDetail, type DirectSendPhase } from '../shared/direct-sticker';
 
 // Self-contained function: main serializes this bundled source, never page data
 // as code. Its only page-global state is a non-callable in-flight token; it
@@ -9,6 +9,7 @@ export async function directStickerMain(args: DirectArguments) {
     __whatsappCompanionDirectStickerInFlight?: { nonce: string; deadline: number };
   };
   let fingerprint: string | null = null, uploaded = false, attempted = false;
+  let phase: DirectSendPhase = 'pre-upload';
   const deadline = Math.min(args.deadline, Date.now() + 25_000);
   let code = 'page-error', changed = false, observer: MutationObserver | undefined;
   let detail: DirectDetail | null = null;
@@ -16,7 +17,7 @@ export async function directStickerMain(args: DirectArguments) {
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined, uploadTimer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined, cancelWait: (() => void) | undefined;
   const result = (outcome: 'confirmed' | 'not-sent' | 'unknown', status = 'finished', model?: any) => ({
-    nonce: args.nonce, fingerprint, status, code, detail, outcome, uploaded, attempted,
+    nonce: args.nonce, fingerprint, status, code, detail, phase, outcome, uploaded, attempted,
     ack: typeof model?.ack === 'number' && Number.isInteger(model.ack) && model.ack >= -10 && model.ack <= 10 ? model.ack : null,
     type: model?.type === 'sticker' ? 'sticker' : null, to: model?.to?.toString?.() ?? null
   });
@@ -201,7 +202,7 @@ export async function directStickerMain(args: DirectArguments) {
     uploadTimer = setTimeout(() => controller?.abort(), 20_000);
     let upload;
     // From this point on there can never be an automatic fallback.
-    uploaded = true; code = 'upload-failed';
+    phase = 'uploaded'; uploaded = true; code = 'upload-failed';
     try { upload = await waitFor(() => Upload.encryptAndUpload({ blob: file, type: 'sticker', signal: controller!.signal, mediaKey, uploadQpl: Qpl.startMediaUploadQpl({ entryPoint: 'MediaUpload' }) })); }
     finally { clearTimeout(uploadTimer); uploadTimer = undefined; controller = undefined; }
     if (!upload || ['url', 'encFilehash', 'directPath', 'mediaKey'].some(k => typeof upload[k] !== 'string' || !upload[k] || upload[k].length > 8192)) fail('upload-shape');
@@ -215,7 +216,7 @@ export async function directStickerMain(args: DirectArguments) {
       id: key, from: me, to: chat.id, ack: 0, local: true, self: 'out', t: Math.floor(Date.now() / 1000), isNewMsg: true, body: undefined, caption: undefined };
     delete (message as any).__x_id;
     assertChat();
-    attempted = true; code = 'send-failed';
+    phase = 'send-invoked'; attempted = true; code = 'send-failed';
     const pending = Send.addAndSendMsgToChat(chat, message); // Exactly one invocation.
     // Consume member rejections even if a promised tuple arrives after expiry.
     // This continuation carries no send state and cannot invoke send again.
@@ -239,7 +240,7 @@ export async function directStickerMain(args: DirectArguments) {
     if (expired || Date.now() >= deadline) { expired = true; code = 'timeout'; detail = null; }
     if (args.phase === 'resolve') return { nonce: args.nonce, fingerprint, status: 'unavailable', code, detail };
     // A changed destination is terminal even before upload; it never falls back.
-    return result(expired || code === 'in-flight' || attempted ? 'unknown' : 'not-sent', !uploaded && ['modules-missing', 'module-shape', 'version-missing', 'chat-unavailable'].includes(code) ? 'unavailable' : 'finished');
+    return result(expired || code === 'in-flight' || attempted ? 'unknown' : 'not-sent', phase === 'pre-upload' && ['modules-missing', 'module-shape', 'version-missing', 'chat-unavailable'].includes(code) ? 'unavailable' : 'finished');
   } finally {
     observer?.disconnect(); observer = undefined;
     clearTimeout(deadlineTimer); deadlineTimer = undefined;

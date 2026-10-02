@@ -1,4 +1,4 @@
-import { defaults, type State, type Scope, type Preferences, type ChatKind } from '../shared/model';
+import { defaults, type State, type Scope, type Preferences, type ChatKind, type DirectStickerDisabledReason } from '../shared/model';
 
 export function resolveSettings(state: State, _kind: ChatKind, chatId?: string | null) {
   // Legacy kind defaults remain on disk but all chats now inherit directly from global.
@@ -10,8 +10,20 @@ export function resolveSettings(state: State, _kind: ChatKind, chatId?: string |
 }
 export function setPreferences(state: State, scope: Scope, patch: Partial<Preferences>) {
   if (scope !== 'global' && patch.directStickerSend !== undefined) throw new Error('Direct sticker sending is a global setting.');
-  if (scope === 'global') Object.assign(state[scope], patch);
+  if (scope === 'global') {
+    Object.assign(state[scope], patch);
+    if (patch.directStickerSend === true) {
+      delete state.global.directStickerDisabledReason;
+      delete state.global.directStickerDisabledAt;
+    }
+  }
   else state.chats[scope] = { ...state.chats[scope], ...patch };
+}
+export function stopDirectStickerSending(state: State, reason: DirectStickerDisabledReason, at = Date.now()) {
+  if (!state.global.directStickerSend) return;
+  state.global.directStickerSend = false;
+  state.global.directStickerDisabledReason = reason;
+  state.global.directStickerDisabledAt = at;
 }
 export function resetPreferences(state: State, scope: Scope) {
   if (scope === 'global') state.global = { ...defaults };

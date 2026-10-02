@@ -3,12 +3,13 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { actionSchema, snapshotSchema, stickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds } from '../shared/model';
+import { actionSchema, snapshotSchema, stickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
+import { accountSafetyEventSchema, type AccountSafetyReason } from '../shared/connector';
 import { Store } from './store';
 import { Conversations } from './conversations';
 import { Vault, promptKey, configuredBackend } from './vault';
 import { Assistant } from './assistant';
-import { setPreferences, resetPreferences, resetStylePreferences } from '../core/settings';
+import { setPreferences, resetStylePreferences } from '../core/settings';
 import { learnStyle, styleSamples, minimumStyleSamples } from '../core/style';
 import { statusUpdate } from '../core/status';
 import { StickerTransfer, stickerRoute } from '../core/sticker-transfer';
@@ -23,6 +24,7 @@ import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
 import { StickerSendDiagnostics } from './sticker-send-diagnostics';
 import { PickerDiagnostics } from './picker-diagnostics';
 import { DirectStickerSender } from './direct-sticker-sender';
+import { DirectStickerSafety } from './direct-sticker-safety';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -52,6 +54,9 @@ async function start() {
   const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href : 'https://web.whatsapp.com/';
   const conversations = new Conversations(store);
   const stickerTransfer = new StickerTransfer();
+  const directStickerSafety = new DirectStickerSafety(store, stickerTransfer, () => {
+    assistant.message = 'Direct sticker sending turned off for this session; saving the setting failed. Check disk space and the data directory before re-enabling it.';
+  });
   const stickerSendDiagnostics = new StickerSendDiagnostics(app.getPath('userData'));
   let sendDiagnostic: { nonce: string; startedAt: number; result?: StickerLookupDiagnostics; written?: boolean } | undefined;
   const stickerReadiness = new StickerReadiness();
@@ -169,7 +174,7 @@ async function start() {
   // Presentation can hold composer readiness during maker teardown. Send
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
-  const status = (): Status => ({ sequence, panel, stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  const status = (): Status => ({ sequence, panel, stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   let lastMakerDiagnostic: Status['stickerSend'];
   const recordStickerSend = () => {
     const send = stickerTransfer.send;
@@ -214,8 +219,13 @@ async function start() {
     lastState = next.state;
   };
   const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => { if (!makerInputOwner) remote.webContents.focus(); } }, publish, fixture);
+  let accountSafety: AccountSafetyReason = null;
+  const disableDirect = (reason: DirectStickerDisabledReason) => {
+    directStickerSafety.stop(reason);
+    publish();
+  };
   const directStickerSender = new DirectStickerSender({ transfer: stickerTransfer, snapshot: () => assistant.snapshot,
-    enabled: () => store.state.global.directStickerSend, diagnostics: stickerSendDiagnostics, publish,
+    enabled: () => directStickerSafety.enabled(), disable: disableDirect, diagnostics: stickerSendDiagnostics, publish,
     execute: script => {
       if (remote.webContents.isDestroyed() || (fixture ? remote.webContents.getURL() !== remoteURL : new URL(remote.webContents.getURL()).origin !== 'https://web.whatsapp.com')) throw new Error('Remote page changed');
       return remote.webContents.executeJavaScript(script);
@@ -408,11 +418,10 @@ async function start() {
     try {
       if ('scope' in action) requireScope(action.scope);
       switch (action.type) {
-        case 'preferences': store.update(s => setPreferences(s, action.scope, action.patch));
-          if (!store.state.global.directStickerSend && stickerTransfer.send?.route === 'direct' && stickerTransfer.send.state === 'preparing') stickerTransfer.directResult(stickerTransfer.send.nonce, 'not-sent');
+        case 'preferences': directStickerSafety.preferences(action.scope, action.patch);
+          if (accountSafety) disableDirect(accountSafety);
           assistant.reconfigure(); break;
-        case 'resetPreferences': store.update(s => resetPreferences(s, action.scope));
-          if (!store.state.global.directStickerSend && stickerTransfer.send?.route === 'direct' && stickerTransfer.send.state === 'preparing') stickerTransfer.directResult(stickerTransfer.send.nonce, 'not-sent');
+        case 'resetPreferences': directStickerSafety.reset(action.scope);
           assistant.reconfigure(); break;
         case 'resetStylePreferences': store.update(s => resetStylePreferences(s, action.scope)); assistant.reconfigure(); break;
         case 'provider': store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); break;
@@ -454,7 +463,7 @@ async function start() {
           const sticker = store.state.stickers.find(s => s.id === action.id)!;
           const stored = storedSticker(sticker.image, sticker.id);
           const fallbackRoute = stickerRoute(assistant.snapshot, stored.animated, action.still) as 'maker' | 'picker';
-          let route = stickerRoute(assistant.snapshot, stored.animated, action.still, store.state.global.directStickerSend);
+          let route = stickerRoute(assistant.snapshot, stored.animated, action.still, directStickerSafety.enabled());
           let ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot, Date.now(), route, stored.animated);
           sendDiagnostic = { nonce: action.nonce, startedAt: Date.now() };
           if (stickerTransfer.send?.state === 'failed') break;
@@ -491,6 +500,7 @@ async function start() {
       }
       publish(); return { ok: true };
     } catch (error) {
+      if (action.type === 'preferences' || action.type === 'resetPreferences') publish();
       if (action.type === 'sendSticker' && makerInputOwner === action.nonce) {
         finishMakerInput(); stickerTransfer.result(action.nonce, false, false, 'editor-unavailable', 'maker-error'); publish();
       }
@@ -504,6 +514,14 @@ async function start() {
     if (stickerTransfer.send?.route === 'direct' && ['stickerPrepared', 'stickerClicked', 'stickerSent', 'stickerCancelled'].includes(envelope.data.type)) return;
     try {
       switch (envelope.data.type) {
+        case 'accountSafety': {
+          const v = accountSafetyEventSchema.safeParse(raw);
+          if (v.success) {
+            accountSafety = v.data.reason;
+            if (accountSafety) disableDirect(accountSafety);
+          }
+          break;
+        }
         case 'stickerPickerLayout': pickerDiagnostics.receive(raw); break;
         case 'stickerPrepared': {
           // Optional telemetry is validated separately from the transfer result.

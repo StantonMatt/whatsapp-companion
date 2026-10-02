@@ -9,7 +9,7 @@ export const directDestinationSchema = z.object({
 }).strict().refine(d => d.type === (d.wid.endsWith('@lid') ? 'lid' : d.wid.endsWith('@g.us') ? 'group' : 'user'));
 export type DirectDestination = z.infer<typeof directDestinationSchema>;
 const fingerprintSchema = z.string().max(180).regex(/^direct-v1:active-get:upload-qpl:key:ephemeral:send-tuple\|\d+(?:\.\d+){2,}$/);
-export const directFailureSchema = z.enum(['none', 'modules-missing', 'module-shape', 'version-missing', 'chat-unavailable', 'chat-changed', 'hash-mismatch', 'invalid-webp', 'upload-failed', 'upload-shape', 'key-shape', 'send-failed', 'send-shape', 'unconfirmed', 'page-error', 'invalid-result', 'timeout', 'in-flight', 'disabled', 'destination-mismatch']);
+export const directFailureSchema = z.enum(['rate-limit', 'none', 'modules-missing', 'module-shape', 'version-missing', 'chat-unavailable', 'chat-changed', 'hash-mismatch', 'invalid-webp', 'upload-failed', 'upload-shape', 'key-shape', 'send-failed', 'send-shape', 'unconfirmed', 'page-error', 'invalid-result', 'timeout', 'in-flight', 'disabled', 'destination-mismatch']);
 export type DirectFailure = z.infer<typeof directFailureSchema>;
 // Fixed structural labels only: never accept a raw exception or page/chat text.
 export const directDetailSchema = z.enum([
@@ -24,6 +24,9 @@ export const directDetailSchema = z.enum([
   'WAWebGetEphemeralFieldsMsgActionsUtils.getEphemeralFields result invalid', 'fingerprint changed'
 ]);
 export type DirectDetail = z.infer<typeof directDetailSchema>;
+// 'uploaded' means upload/network work has started, even if it later fails.
+export const directSendPhaseSchema = z.enum(['pre-upload', 'uploaded', 'send-invoked']);
+export type DirectSendPhase = z.infer<typeof directSendPhaseSchema>;
 const envelope = { nonce: z.string().uuid(), fingerprint: fingerprintSchema.nullable() };
 export const directResolveSchema = z.discriminatedUnion('status', [
   z.object({ ...envelope, status: z.literal('resolved'), fingerprint: fingerprintSchema, destination: directDestinationSchema }).strict(),
@@ -32,12 +35,14 @@ export const directResolveSchema = z.discriminatedUnion('status', [
 ]);
 export const directSendSchema = z.object({
   ...envelope, status: z.enum(['unavailable', 'finished']), code: directFailureSchema,
+  phase: directSendPhaseSchema,
   detail: directDetailSchema.nullable().optional(),
   outcome: z.enum(['confirmed', 'not-sent', 'unknown']), uploaded: z.boolean(), attempted: z.boolean(),
   ack: z.number().int().min(-10).max(10).nullable(), type: z.literal('sticker').nullable(), to: z.string().max(100).nullable()
 }).strict().refine(r =>
+  (r.uploaded === (r.phase !== 'pre-upload') && r.attempted === (r.phase === 'send-invoked')) &&
   (r.code !== 'module-shape' || r.detail != null) &&
-  (r.status !== 'unavailable' || (!r.uploaded && !r.attempted && r.outcome === 'not-sent' && ['modules-missing', 'module-shape', 'version-missing', 'chat-unavailable'].includes(r.code))) &&
+  (r.status !== 'unavailable' || (r.phase === 'pre-upload' && r.outcome === 'not-sent' && ['modules-missing', 'module-shape', 'version-missing', 'chat-unavailable'].includes(r.code))) &&
   (r.outcome !== 'confirmed' || (r.status === 'finished' && r.fingerprint !== null && r.uploaded && r.attempted && r.ack !== null && r.ack >= 1 && r.type === 'sticker' && r.to !== null && r.code === 'none')) &&
   (r.outcome !== 'not-sent' || !r.attempted));
 export const directArgumentsSchema = z.discriminatedUnion('phase', [

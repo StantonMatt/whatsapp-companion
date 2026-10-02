@@ -65,3 +65,27 @@ test('global direct opt-in reflects restored state and is absent from chat setti
   expect(host.textContent).not.toContain('Send stickers directly');
   expect(action).not.toHaveBeenCalled();
 });
+
+test.each([
+  ['logged-out', 'WhatsApp logged out.'], ['account-warning', 'WhatsApp showed an account warning.'],
+  ['send-error', 'a direct send failed.'], ['whatsapp-changed', 'WhatsApp changed.']
+] as const)('Settings shows the short hint for %s only while off', (reason, line) => {
+  const current = status(); current.state.global.directStickerDisabledReason = reason;
+  current.state.global.directStickerDisabledAt = 100;
+  const draw = () => act(() => root.render(<Settings status={current} act={vi.fn(async () => true)} close={() => {}}/>));
+  draw(); expect(host.querySelector('.hint')?.textContent).toBe(`Turned off automatically: ${line}`);
+  current.state.global.directStickerSend = true; draw();
+  expect(host.textContent).not.toContain('Turned off automatically');
+});
+
+test('an immediate safety stop during re-enable releases the pending checkbox', async () => {
+  const current = status(), request = deferred();
+  current.state.global.directStickerDisabledReason = 'account-warning';
+  const draw = () => act(() => root.render(<Settings status={current} act={() => request.promise} close={() => {}}/>));
+  draw(); const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  act(() => checkbox.click()); expect(checkbox.checked).toBe(true);
+  current.sequence++; draw();
+  await act(async () => request.resolve(true));
+  expect(checkbox.checked).toBe(false); expect(checkbox.disabled).toBe(false);
+  expect(host.textContent).toContain('Turned off automatically: WhatsApp showed an account warning.');
+});

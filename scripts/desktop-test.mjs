@@ -1613,6 +1613,62 @@ try {
   expect(await remote.evaluate(() => window.fixtureDirectSent.length)).toBe(directSendsBeforeSwitch);
   await assertShieldCleared();
   console.log('PASS switching chat during direct upload sends nothing; disabling the setting restores native routing');
+  // Safety stops persist and explain themselves in the existing Settings hint.
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  const assertSafetyStop = async (reason, line) => {
+    await assertDirectPreference(false);
+    const global = (await local.evaluate(() => window.companion.status())).state.global;
+    expect(global.directStickerDisabledReason).toBe(reason);
+    expect(global.directStickerDisabledAt).toBeGreaterThan(0);
+    expect(JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')).global).toMatchObject(global);
+    await expect(local.getByText(`Turned off automatically: ${line}`, { exact: true })).toBeVisible();
+  };
+  await directToggle.check(); await assertDirectPreference(true);
+  await remote.evaluate(() => window.fixtureSetQrScreen(true));
+  await assertSafetyStop('logged-out', 'WhatsApp logged out.');
+  await remote.evaluate(() => window.fixtureSetQrScreen(false));
+  // Let the connector publish that the safety screen has gone before re-enable.
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat.ready).toBe(true);
+  await directToggle.check(); await assertDirectPreference(true);
+  expect((await local.evaluate(() => window.companion.status())).state.global.directStickerDisabledReason).toBeUndefined();
+  await remote.evaluate(() => window.fixtureSetAccountWarning(true, 'Sua conta restrita'));
+  await assertSafetyStop('account-warning', 'WhatsApp showed an account warning.');
+  // Re-enable while the warning remains visible must stop again, releasing the toggle.
+  // The stop unchecks it again immediately, so click rather than check() (which insists it stays checked).
+  await directToggle.click(); await assertSafetyStop('account-warning', 'WhatsApp showed an account warning.');
+  await remote.evaluate(() => window.fixtureSetAccountWarning(false));
+  await remote.waitForTimeout(400);
+  await directToggle.check(); await assertDirectPreference(true);
+  expect((await local.evaluate(() => window.companion.status())).state.global.directStickerDisabledAt).toBeUndefined();
+  console.log('PASS QR/logout and account-warning screens persist safety stops; re-enable clears the reason');
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  await remote.evaluate(source => { window.fixtureHideSticker = false; window.fixtureStickerSource = source; }, originalPickerSource);
+  await editor.fill('Preserve the draft at the direct rate cap');
+  const cappedSendsBefore = await remote.evaluate(() => window.fixtureDirectSent.length);
+  let rateFallback = false;
+  // Earlier sends may still occupy the same rolling window. Eleven rapid new
+  // clicks must reach fallback, without waiting for any direct-send cooldown.
+  for (let i = 0; i < 11; i++) {
+    const previousNonce = (await stickerState())?.nonce;
+    await makerReady(sendCard()); await sendCard().click();
+    await expect.poll(async () => {
+      const current = await stickerState();
+      return current?.nonce === previousNonce ? null : current;
+    }).toMatchObject({ state: 'sent', sent: 'confirmed' });
+    if ((await stickerState()).route === 'picker') { rateFallback = true; break; }
+    expect((await stickerState()).route).toBe('direct');
+  }
+  expect(rateFallback).toBe(true);
+  expect((await remote.evaluate(() => window.fixtureDirectSent.length)) - cappedSendsBefore).toBeLessThanOrEqual(10);
+  await expect(editor).toHaveText('Preserve the draft at the direct rate cap');
+  const directRecords = (await readFile(join(dir, 'diagnostics', 'sticker-sends.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(directRecords.some(record => record.route === 'direct' && record.outcome === 'fallback' && record.code === 'rate-limit')).toBe(true);
+  expect((await local.evaluate(() => window.companion.status())).state.global.directStickerSend).toBe(true);
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  await directToggle.uncheck(); await assertDirectPreference(false);
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  await editor.fill('');
+  console.log('PASS the direct rate cap immediately routes the next sticker through the native picker');
   // Remove only this disposable index entry and its fixture images so the later
   // restart/delta checks still exercise the original single saved sticker.
   await remote.locator('#fixture-static-maker').evaluate(img => img.remove()).catch(() => {});
