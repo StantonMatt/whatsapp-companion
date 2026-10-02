@@ -35,6 +35,9 @@ export class Vault {
       const backend = process.platform === 'linux' ? safeStorage.getSelectedStorageBackend() : undefined;
       const next = vaultSchema.parse({ ...this.encrypted, ...(backend ? { backend } : {}), [provider]: safeStorage.encryptString(key).toString('base64') });
       atomicWrite(this.file, JSON.stringify(next)); this.encrypted = next;
+    } else if (this.encrypted[provider] !== undefined) {
+      const next = { ...this.encrypted }; delete next[provider];
+      atomicWrite(this.file, JSON.stringify(next)); this.encrypted = next;
     }
     this.session.set(provider, key);
   }
