@@ -2,6 +2,7 @@ import { StickerTransferConnector } from './sticker-transfer';
 import { stickerImageState } from './sticker-image-state';
 import { composerStyle } from './composer-style';
 import { StickerPickerLayout } from './sticker-picker-layout';
+import { captureStickerPicker } from './sticker-picker-capture';
 import { Navigation } from './navigation';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
 import type { Snapshot, Message } from '../shared/model';
@@ -429,6 +430,7 @@ export class DomConnector {
     field.append(instruction, apply); this.popup.append(row, field); instruction.focus();
   }
   command(command: RemoteCommand) {
+    if (command.type === 'captureStickerPickerLayout') { this.emit({ type: 'stickerPickerLayout', nonce: command.nonce, result: captureStickerPicker(this.doc) }); return; }
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }

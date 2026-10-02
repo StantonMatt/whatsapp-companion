@@ -1,5 +1,5 @@
 import { _electron as electron, expect } from '@playwright/test';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -650,6 +650,64 @@ try {
 
   const nativeStickerPicker = remote.getByTestId('expressions-panel');
   const nativeStickerTrigger = remote.getByRole('button', { name: 'Emojis, GIFs, Stickers', exact: true });
+  // Stub native diagnostic UI only for these disposable fixture scenarios.
+  await app.evaluate(({ dialog, shell }) => {
+    const showMessageBox = dialog.showMessageBox, showItemInFolder = shell.showItemInFolder;
+    globalThis.pickerDiagnosticCalls = { messages: [], paths: [] };
+    dialog.showMessageBox = async (_win, options) => { globalThis.pickerDiagnosticCalls.messages.push(options.message); return { response: 0, checkboxChecked: false }; };
+    shell.showItemInFolder = path => { globalThis.pickerDiagnosticCalls.paths.push(path); };
+    globalThis.restorePickerDiagnosticUi = () => { dialog.showMessageBox = showMessageBox; shell.showItemInFolder = showItemInFolder; };
+  });
+  const capturePickerLayout = () => app.evaluate(({ Menu }) => {
+    Menu.getApplicationMenu().items.find(item => item.label === 'Companion').submenu.items.find(item => item.label === 'Capture sticker picker layout').click();
+  });
+  const diagnosticFiles = async () => readdir(join(dir, 'diagnostics')).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  try {
+    await expect(nativeStickerPicker).toHaveCount(0);
+    await capturePickerLayout();
+    await expect.poll(() => app.evaluate(() => globalThis.pickerDiagnosticCalls.messages)).toEqual(["Open WhatsApp's sticker picker first, then try again."]);
+    expect(await diagnosticFiles()).toEqual([]);
+    await nativeStickerTrigger.click();
+    await expect(nativeStickerPicker).toBeVisible();
+    await expect.poll(() => nativeStickerPicker.evaluate(el => getComputedStyle(el.parentElement).transform)).toBe('matrix(1, 0, 0, 1, 0, 0)');
+    // Wait for the existing connector's picker layout adjustment to settle.
+    await nativeStickerPicker.evaluate(async el => {
+      let previous;
+      let stable = 0;
+      for (let frame = 0; frame < 120; frame++) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const current = el.parentElement.outerHTML;
+        stable = current === previous ? stable + 1 : 0; previous = current;
+        if (stable === 3) return;
+      }
+      throw new Error('Native picker layout did not settle');
+    });
+    const pickerState = () => remote.evaluate(() => {
+      const picker = document.querySelector('[data-testid="expressions-panel"]');
+      const elements = [picker, ...picker.querySelectorAll('*')];
+      return { html: picker.parentElement.outerHTML, scroll: elements.map(el => [el.scrollLeft, el.scrollTop]), focus: document.activeElement?.outerHTML,
+        textSent: window.fixtureSent.length, stickerSent: window.fixtureStickerSent.length };
+    });
+    const before = await pickerState();
+    await capturePickerLayout();
+    await expect.poll(diagnosticFiles).toHaveLength(1);
+    const filename = (await diagnosticFiles())[0], path = join(dir, 'diagnostics', filename);
+    expect(filename).toMatch(/^sticker-picker-.*\.json$/);
+    const contents = await readFile(path, 'utf8'), diagnostic = JSON.parse(contents);
+    expect(diagnostic).toMatchObject({ status: 'captured', appVersion: '0.1.0', connectorVersion: 1, truncated: false, tree: { tagName: 'ul', attributes: { 'data-testid': 'expressions-panel' } } });
+    for (const secret of ['PRIVATE-PICKER-TITLE', 'PRIVATE-PICKER-LABEL', 'PRIVATE-PICKER-ALT', 'Alex', '123456@c.us', 'base64,']) expect(contents).not.toContain(secret);
+    expect(diagnostic.tree.children.find(node => node.attributes['data-testid'] === 'panel-starred').labels['aria-label'].words).toEqual(['favorites']);
+    const flatten = node => [node, ...node.children.flatMap(flatten)];
+    const image = flatten(diagnostic.tree).find(node => node.tagName === 'img');
+    expect(image.image.scheme).toBe('data'); expect(image.labels.alt.words).toEqual(['sticker']);
+    expect(diagnostic.ancestors.at(-1)).toEqual({ tagName: 'body' });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await expect.poll(() => app.evaluate(() => globalThis.pickerDiagnosticCalls.paths)).toEqual([path]);
+    expect(await app.evaluate(() => globalThis.pickerDiagnosticCalls.messages.at(-1))).toContain(path);
+    expect(await pickerState()).toEqual(before);
+    await nativeStickerTrigger.click(); await expect(nativeStickerPicker).toHaveCount(0);
+    console.log('PASS sticker picker diagnostic saves redacted owner-only JSON without changing the picker, and no-picker capture creates no file');
+  } finally { await app.evaluate(() => globalThis.restorePickerDiagnosticUi()); }
   const sendCard = () => stickerCard.getByRole('button', { name: 'Send to Alex', exact: true });
   const stickerState = async () => (await local.evaluate(() => window.companion.status())).stickerSend;
   const holdStickerCommand = async type => app.evaluate(({ BrowserWindow }, type) => {

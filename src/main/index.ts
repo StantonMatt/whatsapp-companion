@@ -17,6 +17,7 @@ import { ProviderCheck } from './provider-check';
 import { ModelCatalog } from './models';
 import { currentTextModels, savedEffort, setReasoning } from '../core/model-policy';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
+import { PickerDiagnostics } from './picker-diagnostics';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -62,6 +63,12 @@ async function start() {
   win.contentView.addChildView(remote);
   win.contentView.addChildView(controls);
   controls.setVisible(false);
+  const pickerDiagnostics = new PickerDiagnostics({
+    directory: app.getPath('userData'), appVersion: app.getVersion(),
+    send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); },
+    reveal: path => shell.showItemInFolder(path),
+    notify: message => { if (!win.isDestroyed()) void dialog.showMessageBox(win, { type: 'info', message, buttons: ['OK'] }).catch(() => {}); }
+  });
   let pendingChrome = false;
   const syncChrome = () => {
     if (remote.webContents.isDestroyed()) return;
@@ -237,6 +244,7 @@ async function start() {
     if (!envelope.success) return;
     try {
       switch (envelope.data.type) {
+        case 'stickerPickerLayout': pickerDiagnostics.receive(raw); break;
         case 'stickerPrepared': {
           const v = z.object({ type: z.literal('stickerPrepared'), nonce: z.string().uuid(), found: z.boolean() }).strict().safeParse(raw);
           if (v.success) {
@@ -324,12 +332,12 @@ async function start() {
   });
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
-  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { cancelSticker(); assistant.reconfigure(); } });
-  remote.webContents.on('render-process-gone', () => { cancelSticker(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
+  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); assistant.reconfigure(); } });
+  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
-  win.on('closed', () => { stickerTransfer.cancel(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
+  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
   await win.loadURL('about:blank');
   await controls.webContents.loadURL(uiURL);
