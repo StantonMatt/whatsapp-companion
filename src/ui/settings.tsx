@@ -17,11 +17,27 @@ export function Settings({ status, act, close }: { status: Status; act: Act; clo
       {!tab ? <>
         <div className="scope-summary"><span className="scope-icon" aria-hidden="true">✦</span><div><strong>{chat ? status.chat.name : 'All conversations'}</strong><small>{chat ? (Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings for this chat' : 'Uses global settings') : 'Default AI settings'}</small></div></div>
         <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><span aria-hidden="true">›</span></button>)}</nav>
+        {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} act={act}/>}
         {chat && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
       </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}
       {!tab && !chat && <div className="footer-actions"><button className="quiet" onClick={() => void act({ type: 'reload' })}>Reload WhatsApp</button></div>}
     </div>
   </>;
+}
+function DirectStickerSetting({ checked, act }: { checked: boolean; act: Act }) {
+  const [pending, setPending] = useState<{ value: boolean; accepted: boolean } | null>(null);
+  useEffect(() => {
+    if (pending?.accepted && pending.value === checked) setPending(null);
+  }, [checked, pending]);
+  const change = async (directStickerSend: boolean) => {
+    // React restores a controlled checkbox at the end of the click. Reflect
+    // the request immediately while main persists and publishes the setting.
+    setPending({ value: directStickerSend, accepted: false });
+    const accepted = await act({ type: 'preferences', scope: 'global', patch: { directStickerSend } });
+    setPending(accepted ? { value: directStickerSend, accepted: true } : null);
+  };
+  return <Toggle label="Send stickers directly (experimental)" checked={pending?.value ?? checked}
+    disabled={pending !== null} onChange={value => void change(value)}/>;
 }
 function ReplySettings({ status, act, scope }: { status: Status; act: Act; scope: Scope }) {
   const state = status.state;
@@ -172,8 +188,8 @@ function AutoSettings({ status, act }: { status: Status; act: Act }) {
     <p className="hint">Attempts count toward limits, including unconfirmed submissions. Incoming messages and custom instructions cannot grant permission to send.</p>
   </>;
 }
-function Toggle({ label, checked, onChange, note, preserveAuto }: { label: string; checked: boolean; onChange: (value: boolean) => void; note?: string; preserveAuto?: boolean }) {
-  return <label className="toggle" data-preserve-auto={preserveAuto ? '' : undefined}><span>{label}{note && <small>{note}</small>}</span><input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}/></label>;
+function Toggle({ label, checked, onChange, note, preserveAuto, disabled }: { label: string; checked: boolean; onChange: (value: boolean) => void; note?: string; preserveAuto?: boolean; disabled?: boolean }) {
+  return <label className="toggle" data-preserve-auto={preserveAuto ? '' : undefined}><span>{label}{note && <small>{note}</small>}</span><input type="checkbox" checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)}/></label>;
 }
 function Choice({ label, value, options, onChange, note, labels }: { label: string; value: string; options: string[]; onChange: (value: string) => void; note?: string; labels?: Record<string, string> }) {
   const names: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', match: 'Match conversation', conversation: 'This conversation' };

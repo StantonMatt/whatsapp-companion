@@ -10,6 +10,7 @@ export type ModelsResult = { models: ModelOption[]; error?: string; cancelled?: 
 export const reasoningEffortSchema = z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 export const preferencesSchema = z.object({
+  directStickerSend: z.boolean().default(false),
   suggestions: z.boolean(),
   tone: z.enum(['natural', 'friendly', 'professional', 'direct']),
   length: z.enum(['brief', 'balanced', 'detailed']),
@@ -21,6 +22,9 @@ export const preferencesSchema = z.object({
   shareContext: z.boolean()
 }).strict();
 export type Preferences = z.infer<typeof preferencesSchema>;
+// Defaults migrate complete global preferences; sparse patches/overrides must
+// leave omitted fields alone (Zod's partial() preserves field defaults).
+const preferencesPatchSchema = preferencesSchema.extend({ directStickerSend: z.boolean() }).partial();
 export type ChatKind = 'direct' | 'group' | 'unknown';
 export const chatIdSchema = z.string().regex(/^[\d-]+@(c\.us|s\.whatsapp\.net|g\.us|lid)$/);
 export const settingsIdSchema = z.union([chatIdSchema, z.string().regex(/^local:[0-9a-f-]{36}$/)]);
@@ -43,7 +47,7 @@ export const autoPermissionSchema = z.enum(['enable', 'disable', 'pause', 'resum
 export type AutoPermission = z.infer<typeof autoPermissionSchema>;
 export const defaultAuto: AutoRules = { enabled: false, startHour: 9, endHour: 18, dailyLimit: 5, cooldownMinutes: 10, delaySeconds: 30, paused: false };
 export const defaults: Preferences = {
-  suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
+  directStickerSend: false, suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
   emoji: 'match', instructions: '', style: 'off', learnFromSent: false, shareContext: false
 };
 const attachmentSchema = z.enum(['image', 'sticker', 'audio', 'video', 'document']);
@@ -90,8 +94,8 @@ export const stickerSchema = z.union([
 export type Sticker = z.infer<typeof stickerSchema>;
 export const stateSchema = z.object({
   version: z.literal(1), global: preferencesSchema,
-  direct: preferencesSchema.partial(), group: preferencesSchema.partial(),
-  chats: z.record(z.string(), preferencesSchema.partial()),
+  direct: preferencesPatchSchema, group: preferencesPatchSchema,
+  chats: z.record(z.string(), preferencesPatchSchema),
   provider: providerSchema, models: z.object({ openai: modelIdSchema, anthropic: modelIdSchema }),
   reasoning: z.object({ openai: z.record(modelIdSchema, reasoningEffortSchema), anthropic: z.record(modelIdSchema, reasoningEffortSchema) }).strict().default(() => ({ openai: {}, anthropic: {} })),
   conversations: z.record(z.string(), z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(200)).default({}),
@@ -122,7 +126,8 @@ export type Status = {
 };
 export type StatusUpdate = Omit<Status, 'state'> & { state?: Omit<State, 'stickers'>; stickerChanges?: { upsert: Sticker[]; removed: string[] } };
 export const actionSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesSchema.partial() }).strict(),
+  z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()
+    .refine(action => action.scope === 'global' || action.patch.directStickerSend === undefined),
   z.object({ type: z.literal('resetPreferences'), scope: scopeSchema }).strict(),
   z.object({ type: z.literal('resetStylePreferences'), scope: settingsIdSchema }).strict(),
   z.object({ type: z.literal('provider'), provider: providerSchema, model: modelIdSchema }).strict(),

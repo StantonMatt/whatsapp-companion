@@ -31,7 +31,7 @@ export const STICKER_MAKER_CONFIRMATION_MS = 4000;
 // final result without assuming activation proves delivery.
 export const STICKER_MAKER_WATCHDOG_MS = 8000;
 
-export type StickerRoute = 'maker' | 'picker';
+export type StickerRoute = 'maker' | 'picker' | 'direct';
 export type StickerSendBlockedReason = 'busy' | 'no-chat';
 export type StickerReason = 'chat-changed' | 'editor-unavailable' | 'unconfirmed' | 'draft';
 export type StickerSendOutcome = 'confirmed' | 'not-sent' | 'unknown';
@@ -40,7 +40,7 @@ export const stickerMakerDetails = ['maker-busy', 'main-not-found', 'editor-preo
 export type StickerMakerDetail = typeof stickerMakerDetails[number];
 export type StickerTarget = Pick<Snapshot, 'chatId' | 'name' | 'revision'>;
 export type StickerSend = { id: string; nonce: string; name: string; route: StickerRoute; animated: boolean; state: 'finding' | 'preparing' | 'sending' | 'sent' | 'missing' | 'failed' | 'cancelled'; sent?: StickerSendOutcome; reason?: StickerReason; detail?: StickerMakerDetail };
-export type StickerTicket = { id: string; nonce: string; target: StickerTarget; route?: StickerRoute };
+export type StickerTicket = { id: string; nonce: string; target: StickerTarget; route?: StickerRoute; directDestination?: { wid: string; type: 'user' | 'group' | 'lid'; title: string } };
 export type StickerAuthorization = { nonce: string; phase: 'disclose' | 'send'; snapshot: Snapshot };
 export function sameStickerChat(target: StickerTarget, snapshot: Snapshot) {
   // Picker sending does not require a composer; identity and revision still

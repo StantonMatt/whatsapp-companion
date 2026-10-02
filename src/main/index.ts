@@ -22,6 +22,7 @@ import { currentTextModels, savedEffort, setReasoning } from '../core/model-poli
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
 import { StickerSendDiagnostics } from './sticker-send-diagnostics';
 import { PickerDiagnostics } from './picker-diagnostics';
+import { DirectStickerSender } from './direct-sticker-sender';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -172,7 +173,7 @@ async function start() {
   let lastMakerDiagnostic: Status['stickerSend'];
   const recordStickerSend = () => {
     const send = stickerTransfer.send;
-    if (send && sendDiagnostic?.nonce === send.nonce && !sendDiagnostic.written &&
+    if (send && send.route !== 'direct' && sendDiagnostic?.nonce === send.nonce && !sendDiagnostic.written &&
       !['finding', 'preparing', 'sending'].includes(send.state)) {
       sendDiagnostic.written = true;
       stickerSendDiagnostics.append(send, { totalMs: Math.max(sendDiagnostic.result?.totalMs ?? 0, Date.now() - sendDiagnostic.startedAt), categories: sendDiagnostic.result?.categories ?? [], ...(sendDiagnostic.result?.reason ? { reason: sendDiagnostic.result.reason } : {}) });
@@ -213,6 +214,13 @@ async function start() {
     lastState = next.state;
   };
   const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => { if (!makerInputOwner) remote.webContents.focus(); } }, publish, fixture);
+  const directStickerSender = new DirectStickerSender({ transfer: stickerTransfer, snapshot: () => assistant.snapshot,
+    enabled: () => store.state.global.directStickerSend, diagnostics: stickerSendDiagnostics, publish,
+    execute: script => {
+      if (remote.webContents.isDestroyed() || (fixture ? remote.webContents.getURL() !== remoteURL : new URL(remote.webContents.getURL()).origin !== 'https://web.whatsapp.com')) throw new Error('Remote page changed');
+      return remote.webContents.executeJavaScript(script);
+    }
+  });
   const stopStickerLookup = () => { settleMakerInput(); clearTimeout(stickerSendTimer); if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'cancelSticker' }); };
   const restoreShieldBounds = () => {
     clearTimeout(shieldRestoreTimer); shieldRestoreTimer = undefined; shieldRestoreNonce = undefined;
@@ -349,7 +357,7 @@ async function start() {
     return nonce.success && assistant.authorizeAutomatic(nonce.data);
   });
   ipcMain.handle('companion:authorize-sticker', (event, raw: unknown) => {
-    if (!isRemote(event)) return false;
+    if (!isRemote(event) || stickerTransfer.send?.route === 'direct') return false;
     if (typeof raw === 'string') {
       const nonce = z.string().uuid().safeParse(raw);
       return nonce.success && authorizeSticker(nonce.data, assistant.snapshot);
@@ -400,8 +408,12 @@ async function start() {
     try {
       if ('scope' in action) requireScope(action.scope);
       switch (action.type) {
-        case 'preferences': store.update(s => setPreferences(s, action.scope, action.patch)); assistant.reconfigure(); break;
-        case 'resetPreferences': store.update(s => resetPreferences(s, action.scope)); assistant.reconfigure(); break;
+        case 'preferences': store.update(s => setPreferences(s, action.scope, action.patch));
+          if (!store.state.global.directStickerSend && stickerTransfer.send?.route === 'direct' && stickerTransfer.send.state === 'preparing') stickerTransfer.directResult(stickerTransfer.send.nonce, 'not-sent');
+          assistant.reconfigure(); break;
+        case 'resetPreferences': store.update(s => resetPreferences(s, action.scope));
+          if (!store.state.global.directStickerSend && stickerTransfer.send?.route === 'direct' && stickerTransfer.send.state === 'preparing') stickerTransfer.directResult(stickerTransfer.send.nonce, 'not-sent');
+          assistant.reconfigure(); break;
         case 'resetStylePreferences': store.update(s => resetStylePreferences(s, action.scope)); assistant.reconfigure(); break;
         case 'provider': store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); break;
         case 'reasoning': store.update(s => setReasoning(s, action.provider, action.model, action.effort)); providerChanged(); break;
@@ -441,11 +453,18 @@ async function start() {
           if (stickerSendBlockedReason() === 'busy') throw new Error('Wait for the current sticker.');
           const sticker = store.state.stickers.find(s => s.id === action.id)!;
           const stored = storedSticker(sticker.image, sticker.id);
-          const route = stickerRoute(assistant.snapshot, stored.animated, action.still);
-          const ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot, Date.now(), route, stored.animated);
+          const fallbackRoute = stickerRoute(assistant.snapshot, stored.animated, action.still) as 'maker' | 'picker';
+          let route = stickerRoute(assistant.snapshot, stored.animated, action.still, store.state.global.directStickerSend);
+          let ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot, Date.now(), route, stored.animated);
           sendDiagnostic = { nonce: action.nonce, startedAt: Date.now() };
           if (stickerTransfer.send?.state === 'failed') break;
           assistant.activity();
+          if (route === 'direct') {
+            publish();
+            const fallback = await directStickerSender.run(ticket, stored.image, fallbackRoute);
+            if (!fallback) break;
+            ticket = fallback; route = fallbackRoute;
+          }
           clearTimeout(stickerSendTimer);
           stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { finishMakerInput(); stopStickerLookup(); publish(); } }, route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000);
           if (route === 'maker') await showStickerShield(ticket.nonce);
@@ -482,6 +501,7 @@ async function start() {
     if (!isRemote(event)) return;
     const envelope = z.object({ type: z.string() }).passthrough().safeParse(raw);
     if (!envelope.success) return;
+    if (stickerTransfer.send?.route === 'direct' && ['stickerPrepared', 'stickerClicked', 'stickerSent', 'stickerCancelled'].includes(envelope.data.type)) return;
     try {
       switch (envelope.data.type) {
         case 'stickerPickerLayout': pickerDiagnostics.receive(raw); break;

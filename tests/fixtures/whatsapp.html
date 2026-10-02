@@ -152,4 +152,47 @@ function animatedFixture(data){
  const chunks=[chunk('VP8X',x),chunk('ANIM',new Uint8Array(6)),chunk('ANMF',f)];const bytes=new Uint8Array(12+chunks.reduce((n,c)=>n+c.length,0));bytes.set([..."RIFF"].map(c=>c.charCodeAt(0)));new DataView(bytes.buffer).setUint32(4,bytes.length-8,true);bytes.set([..."WEBP"].map(c=>c.charCodeAt(0)),8);let offset=12;for(const c of chunks){bytes.set(c,offset);offset+=c.length;}return 'data:image/webp;base64,'+btoa(String.fromCharCode(...bytes));
 }
 
+// Main-world internal send fixture. It uploads/sends only disposable local data.
+// No preload API or real WhatsApp endpoint is involved.
+window.Debug={VERSION:'2.3000.1030000000'};
+window.fixtureDirectSent=[];window.fixtureDirectUploads=[];
+const directWid=value=>({toString:()=>value,equals:other=>other?.toString?.()===value,isUser:()=>/@(c\.us|lid)$/.test(value)});
+const directChats=new Map(['123456@c.us','999999@g.us','777777@lid'].map(id=>[id,{id:directWid(id),get active(){return id===peer;},get formattedTitle(){return id==='999999@g.us'?'Weekend plans':'Alex';},get name(){return this.formattedTitle;},contact:{name:'Alex'}}]));
+window.fixtureDirectSetPeer=value=>{peer=value;document.querySelector('header span').title=value.endsWith('@g.us')?'Weekend plans':'Alex';document.querySelector('header span').textContent=document.querySelector('header span').title;document.querySelector('.messages').replaceChildren();add('Disposable direct fixture chat');};
+class FixtureMsgKey{
+ constructor({to,id}){this.fromMe=true;this.remote=to;this.value='true_'+to.toString()+'_'+id;}
+ toString(){return this.value;}
+ static async newId(){return 'direct'+(++sequence);}
+}
+const directModules={
+ WAWebUserPrefsMeUser:{getMaybeMePnUser:()=>directWid('111111@c.us'),getMaybeMeLidUser:()=>directWid('777777@lid')},
+ WAWebWidFactory:{createWid:directWid},
+ // Chat.active() was not proven by the spike. Exercise the current accessor
+ // and the model collection API rather than requiring the old wa-js method.
+ WAWebCollections:{Chat:{get:id=>directChats.get(id?.toString()),getActive:()=>directChats.get(peer),getModelsArray:()=>[...directChats.values()]},Msg:{get:()=>undefined}},
+ WAWebChatCollection:{ChatCollectionImpl:class FixtureChatCollection{}},
+ WAWebUploadManager:{async encryptAndUpload({blob,signal}){
+   window.fixtureDirectUploads.push(blob);
+   if(window.fixtureDirectSwitchDuringUpload)chat(true);
+   if(window.fixtureDirectUploadDelay)await new Promise(resolve=>setTimeout(resolve,window.fixtureDirectUploadDelay));
+   if(signal.aborted||window.fixtureDirectUploadFails)throw new Error('fixture upload failed');
+   if(window.fixtureDirectUploadShape)return {};
+   return {url:'fixture-upload',encFilehash:'fixture-hash',directPath:'fixture-path',mediaKey:'fixture-key'};
+ }},
+ WAWebStartMediaUploadQpl:{startMediaUploadQpl:()=>({})},
+ WAWebMsgKey:FixtureMsgKey,
+ WAWebGetEphemeralFieldsMsgActionsUtils:{getEphemeralFields:()=>({})},
+ WAWebSendMsgChatAction:{addAndSendMsgToChat(destination,message){
+   if(window.fixtureDirectSendFails)return [Promise.reject(new Error('fixture registration failed')),Promise.reject(new Error('fixture send failed'))];
+   const file=window.fixtureDirectUploads.at(-1);
+   window.fixtureDirectSent.push({file,peer:destination.id.toString(),isAnimated:message.isAnimated,type:message.type});
+   window.fixtureStickerSent.push({source:URL.createObjectURL(file),peer:destination.id.toString()});
+   appendSticker(window.fixtureStickerSent.at(-1).source);
+   if(message.isAnimated)document.querySelector('.messages [data-testid="sticker-container"]')?.append(document.createElement('canvas'));
+   const model={...message,ack:window.fixtureDirectAck??1};
+   return window.fixtureDirectSendShape?{}:[Promise.resolve(model),Promise.resolve(true)];
+ }}
+};
+window.require=name=>{if(window.fixtureDirectModulesMissing)throw new Error('fixture modules missing');if(window.fixtureDirectShapeMismatch)return {};if(!(name in directModules))throw new Error('fixture unknown module');return directModules[name];};
+
 </script></html>

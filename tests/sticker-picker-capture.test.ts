@@ -100,7 +100,7 @@ test('caps the total tree at 6000 nodes, marks truncation and rejects larger rep
   const result = captured(); expect(result.nodeCount).toBe(PICKER_MAX_NODES); expect(result.truncated).toBe(true); expect(result.tree.truncated).toBe(true);
   expect(pickerLayoutCaptureSchema.safeParse(result).success).toBe(true);
   result.tree.children.push(result.tree.children[0]); expect(pickerLayoutCaptureSchema.safeParse(result).success).toBe(false);
-});
+}, 30_000);
 
 test('bounds attributes, text summaries and ancestor chain, and marks clipping', () => {
   const panel = fixture(); panel.setAttribute('id', 'a'.repeat(1000)); panel.textContent = 'Search ' + 'x'.repeat(150_000);

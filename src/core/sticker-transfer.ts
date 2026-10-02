@@ -1,10 +1,12 @@
 import type { Snapshot } from '../shared/model';
+import type { DirectDestination } from '../shared/direct-sticker';
+import { matchesDirectDestination } from '../shared/direct-sticker';
 import { STICKER_PICKER_WATCHDOG_MS, sameStickerChat, sameStickerPreparation, type StickerSend, type StickerTicket, type StickerRoute, type StickerReason, type StickerMakerDetail, type StickerSendOutcome, type StickerSendBlockedReason } from '../shared/sticker-transfer';
 
 export const canSendSticker = (snapshot: Snapshot) => Boolean(snapshot.conversationOpen && snapshot.name && (snapshot.settingsId ?? snapshot.chatId));
 export const composerProvablyEmpty = (snapshot: Snapshot) => snapshot.conversationOpen && snapshot.ready && !snapshot.composing && !snapshot.draftIssue && snapshot.draft === '';
-export const stickerRoute = (snapshot: Snapshot, animated: boolean, still?: true): StickerRoute =>
-  (animated && !still) || (!still && !composerProvablyEmpty(snapshot)) ? 'picker' : 'maker';
+export const stickerRoute = (snapshot: Snapshot, animated: boolean, still?: true, direct = false): StickerRoute =>
+  direct ? 'direct' : (animated && !still) || (!still && !composerProvablyEmpty(snapshot)) ? 'picker' : 'maker';
 
 // Only a validated action from the trusted local Send button creates permission.
 // Lookup consumes that click's ticket; it cannot create permission of its own.
@@ -41,7 +43,7 @@ export class StickerTransfer {
     this.usedNonces.add(nonce);
     this.authorized = false; this.disclosed = false;
     this.ticket = { id, nonce, scope, destinationToken, expires: now + (route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000), route, target: { name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision } };
-    this.send = { id, nonce, name: snapshot.name, route, animated, state: route === 'maker' ? 'preparing' : 'finding' };
+    this.send = { id, nonce, name: snapshot.name, route, animated, state: route === 'picker' ? 'finding' : 'preparing' };
     const ticket = this.ticket;
     if (route === 'maker' && !composerProvablyEmpty(snapshot)) this.finish('failed', 'draft', 'draft-present', 'not-sent');
     return ticket;
@@ -51,6 +53,38 @@ export class StickerTransfer {
   }
   private current(snapshot: Snapshot, now: number) {
     return this.ticket && now < this.ticket.expires && this.sameTarget(snapshot);
+  }
+  directCurrent(nonce: string, snapshot: Snapshot, enabled: boolean, now = Date.now()) {
+    return enabled && this.send?.route === 'direct' && this.send.nonce === nonce &&
+      this.send.state === 'preparing' && !this.authorized && Boolean(this.current(snapshot, now));
+  }
+  bindDirect(nonce: string, destination: DirectDestination, snapshot: Snapshot, enabled: boolean, now = Date.now()) {
+    if (!this.directCurrent(nonce, snapshot, enabled, now) || !matchesDirectDestination(destination, snapshot)) return false;
+    this.ticket!.directDestination = { ...destination }; return true;
+  }
+  attemptDirect(nonce: string, snapshot: Snapshot, enabled: boolean, now = Date.now()) {
+    if (!this.directCurrent(nonce, snapshot, enabled, now) || !this.ticket?.directDestination ||
+      !matchesDirectDestination(this.ticket.directDestination, snapshot)) return;
+    // Consume the only attempt before executeJavaScript, including timeout/failure.
+    this.authorized = true;
+    this.send = { ...this.send!, state: 'sending' };
+    return { ...this.ticket, directDestination: { ...this.ticket.directDestination } };
+  }
+  fallbackDirect(nonce: string, snapshot: Snapshot, route: 'maker' | 'picker', now = Date.now()) {
+    if (this.send?.nonce !== nonce || this.send.route !== 'direct' || !this.ticket || !this.current(snapshot, now)) return;
+    // Caller may release the consumed grant only for a validated pre-upload
+    // unavailable result. Never reset the nonce's one-use click latch.
+    this.authorized = false; this.ticket.directDestination = undefined;
+    this.ticket.route = route; this.ticket.expires = now + (route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000);
+    this.send = { ...this.send, route, state: route === 'picker' ? 'finding' : 'preparing' };
+    if (route === 'maker' && !composerProvablyEmpty(snapshot)) { this.finish('failed', 'draft', 'draft-present', 'not-sent'); return; }
+    return this.ticket;
+  }
+  directResult(nonce: string, outcome: StickerSendOutcome, reason?: StickerReason) {
+    if (this.send?.nonce !== nonce || this.send.route !== 'direct' || !['preparing', 'sending'].includes(this.send.state)) return;
+    const confirmed = outcome === 'confirmed' && this.authorized;
+    this.finish(confirmed ? 'sent' : 'failed', confirmed ? undefined : reason ?? 'unconfirmed', undefined,
+      outcome === 'confirmed' && !confirmed ? 'unknown' : outcome);
   }
   prepared(nonce: string, found: boolean, snapshot: Snapshot, now = Date.now()): StickerTicket | undefined {
     if (this.send?.nonce !== nonce || this.send.state !== 'finding') return;
@@ -76,7 +110,7 @@ export class StickerTransfer {
     if (this.send?.nonce === nonce && this.send.state === 'preparing' && this.authorized) this.send = { ...this.send, state: 'sending' };
   }
   authorize(nonce: string, snapshot: Snapshot, now = Date.now()): boolean {
-    if (this.authorized || this.send?.nonce !== nonce || (this.send.state !== 'sending' && this.send.state !== 'preparing') || !this.current(snapshot, now)) return false;
+    if (this.send?.route === 'direct' || this.authorized || this.send?.nonce !== nonce || (this.send.state !== 'sending' && this.send.state !== 'preparing') || !this.current(snapshot, now)) return false;
     if (this.send.route === 'maker' && (snapshot.draft !== '' || snapshot.draftIssue || snapshot.composing)) {
       this.finish('failed', 'draft', 'draft-appeared', 'not-sent'); return false;
     }
@@ -88,7 +122,7 @@ export class StickerTransfer {
     return true;
   }
   result(nonce: string, clicked: boolean, confirmed?: boolean, reason?: StickerReason, detail?: StickerMakerDetail) {
-    if (this.send?.nonce !== nonce) return;
+    if (this.send?.route === 'direct' || this.send?.nonce !== nonce) return;
     const outcome: StickerSendOutcome = !clicked ? 'not-sent' : reason === 'draft' && detail === 'draft-appeared' ? 'unknown' : confirmed === true ? 'confirmed' : 'unknown';
     if (this.send.state !== 'sending' && this.send.state !== 'preparing') return;
     const sent = outcome === 'confirmed' && this.authorized && reason !== 'draft';
@@ -96,7 +130,8 @@ export class StickerTransfer {
   }
   timeout(nonce: string) {
     if (this.send?.nonce !== nonce || (this.send.state !== 'finding' && this.send.state !== 'preparing')) return false;
-    if (this.send.route === 'picker') this.pickerMiss();
+    if (this.send.route === 'direct') this.directResult(nonce, 'not-sent');
+    else if (this.send.route === 'picker') this.pickerMiss();
     else this.finish('failed', 'editor-unavailable', 'preparation-timeout', 'not-sent');
     return true;
   }

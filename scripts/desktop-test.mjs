@@ -502,7 +502,12 @@ try {
   await editor.press('Enter');
   expect((await remote.evaluate(() => window.fixtureSent)).length).toBe(1);
   console.log('PASS Shift+Enter and Enter retain fixture behavior');
-  expect(await remote.evaluate(() => ({ node: typeof window.require, bridge: typeof window.companion, process: typeof window.process }))).toEqual({ node: 'undefined', bridge: 'undefined', process: 'undefined' });
+  // WhatsApp (and the fixture) define their own module loader as window.require; only Node's must be absent.
+  expect(await remote.evaluate(() => {
+    let fs = 'unavailable';
+    try { if (typeof window.require === 'function' && window.require('fs')?.readFileSync) fs = 'available'; } catch { /* page loader rejects Node modules */ }
+    return { nodeRequire: typeof window.require === 'function' && ('cache' in window.require || 'resolve' in window.require) ? 'node' : 'none', fs, bridge: typeof window.companion, process: typeof window.process };
+  })).toEqual({ nodeRequire: 'none', fs: 'unavailable', bridge: 'undefined', process: 'undefined' });
   console.log('PASS remote has no Node or desktop API');
   // The preceding composer scenario leaves the group open; sticker sends below
   // are explicitly bound to the fixture's Alex conversation.
@@ -1547,6 +1552,67 @@ try {
   await releaseStickerCommand();
   expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(beforePreparingCancel);
   console.log('PASS the main-process shield cap restores the native controls bounds while preparation remains cancellable');
+  // Opt-in direct route: the existing off-mode scenarios above remain native.
+  expect((await local.evaluate(() => window.companion.status())).state.global.directStickerSend).toBe(false);
+  expect(await remote.evaluate(() => window.fixtureDirectSent.length)).toBe(0);
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  const directToggle = local.getByLabel('Send stickers directly (experimental)', { exact: true });
+  const assertDirectPreference = async (enabled, page = local) => {
+    await expect.poll(async () => (await page.evaluate(() => window.companion.status())).state.global.directStickerSend).toBe(enabled);
+    await expect(page.getByLabel('Send stickers directly (experimental)', { exact: true })).toBeEnabled();
+    expect(JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')).global.directStickerSend).toBe(enabled);
+  };
+  await expect(directToggle).not.toBeChecked(); await assertDirectPreference(false);
+  await directToggle.check(); await expect(directToggle).toBeChecked(); await assertDirectPreference(true);
+  await directToggle.uncheck(); await expect(directToggle).not.toBeChecked(); await assertDirectPreference(false);
+  await directToggle.check(); await expect(directToggle).toBeChecked(); await assertDirectPreference(true);
+  console.log('PASS direct sticker opt-in reflects off/on/off clicks immediately and persists each change');
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  const directUiCounters = await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length]);
+  for (const [stickerId, animated] of [[staticMakerId, false], [firstStickerId, true]]) {
+    const saved = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id === stickerId);
+    await editor.fill('Keep this direct sticker draft'); const markup = await editor.evaluate(el => el.innerHTML);
+    const button = stickerId === staticMakerId ? makerSend() : sendCard();
+    await makerReady(button); await button.click();
+    await expect.poll(stickerState).toMatchObject({ id: stickerId, route: 'direct', animated, state: 'sent', sent: 'confirmed' });
+    expect(await editor.evaluate(el => el.innerHTML)).toBe(markup);
+    expect(await remote.evaluate(async () => {
+      const file = window.fixtureDirectSent.at(-1).file, bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
+      return 'data:image/webp;base64,' + btoa(binary);
+    })).toBe(saved.image);
+    expect(await remote.evaluate(() => window.fixtureDirectSent.at(-1).isAnimated)).toBe(animated);
+    expect(await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length])).toEqual(directUiCounters);
+    await expect(nativeStickerPicker).toHaveCount(0); await expect(remote.locator('#fixture-sticker-editor')).toHaveCount(0);
+    await assertShieldCleared();
+  }
+  console.log('PASS opt-in static and animated sends use original bytes directly, preserve drafts, and open no picker/editor/shield');
+  // Module loss can fall back before any upload. Preserve existing draft policy.
+  await remote.evaluate(source => { window.fixtureDirectModulesMissing = true; window.fixtureHideSticker = false; window.fixtureStickerSource = source; }, originalPickerSource);
+  const directUploadsBeforeFallback = await remote.evaluate(() => window.fixtureDirectUploads.length);
+  await makerReady(sendCard()); await sendCard().click();
+  await expect.poll(stickerState).toMatchObject({ route: 'picker', state: 'sent' });
+  await expect(editor).toHaveText('Keep this direct sticker draft');
+  await editor.fill(''); await makerReady(); await makerSend().click();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ route: 'maker', state: 'sent' });
+  expect(await remote.evaluate(() => window.fixtureDirectUploads.length)).toBe(directUploadsBeforeFallback);
+  await assertShieldCleared();
+  console.log('PASS missing direct modules fall back to picker with a draft and maker with an empty composer');
+  await remote.evaluate(() => { window.fixtureDirectModulesMissing = false; window.fixtureDirectSwitchDuringUpload = true; });
+  const directSendsBeforeSwitch = await remote.evaluate(() => window.fixtureDirectSent.length);
+  await makerReady(); await makerSend().click();
+  await expect.poll(stickerState).toMatchObject({ route: 'direct', state: 'failed', reason: 'chat-changed', sent: 'not-sent' });
+  expect(await remote.evaluate(() => window.fixtureDirectSent.length)).toBe(directSendsBeforeSwitch);
+  await remote.evaluate(() => { window.fixtureDirectSwitchDuringUpload = false; window.fixtureHideSticker = true; });
+  await remote.getByRole('button', { name: /^Alex/ }).click();
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  await directToggle.uncheck(); await expect(directToggle).not.toBeChecked(); await assertDirectPreference(false);
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  await editor.fill(''); await makerReady(); await makerSend().click();
+  await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ route: 'maker', state: 'sent' });
+  expect(await remote.evaluate(() => window.fixtureDirectSent.length)).toBe(directSendsBeforeSwitch);
+  await assertShieldCleared();
+  console.log('PASS switching chat during direct upload sends nothing; disabling the setting restores native routing');
   // Remove only this disposable index entry and its fixture images so the later
   // restart/delta checks still exercise the original single saved sticker.
   await remote.locator('#fixture-static-maker').evaluate(img => img.remove()).catch(() => {});
@@ -1855,6 +1921,11 @@ try {
   await editor.fill('');
   console.log('PASS a queued send rechecks main permission and cannot overtake a pause from local controls');
 
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  await directToggle.check(); await expect(directToggle).toBeChecked(); await assertDirectPreference(true);
+  expect(await local.evaluate(async () => window.companion.action({ type: 'preferences', scope: 'global',
+    patch: { language: (await window.companion.status()).state.global.language } }))).toMatchObject({ ok: true });
+  await expect(directToggle).toBeChecked(); await assertDirectPreference(true);
   await app.close(); app = undefined;
   app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000 });
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
@@ -1865,6 +1936,11 @@ try {
   const reopenedState = (await reopened.evaluate(() => window.companion.status())).state;
   expect(reopenedState.reasoning.openai).toMatchObject({ 'gpt-6-astra': 'max', 'gpt-6-luna': 'none' });
   console.log('PASS reasoning preferences persist across actual application restart');
+  expect(reopenedState.global.directStickerSend).toBe(true);
+  await reopened.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  await expect(reopened.getByLabel('Send stickers directly (experimental)', { exact: true })).toBeChecked();
+  await assertDirectPreference(true, reopened);
+  console.log('PASS direct sticker opt-in survives unrelated preference patches and actual application restart');
   await reopened.getByLabel('Close panel').click();
   const remoteReopened = (await app.windows()).find(p => p.url().endsWith('fixture.html'));
   await remoteReopened.evaluate(html => { document.querySelector('.messages').innerHTML = html; }, modernHtml);
@@ -1874,6 +1950,19 @@ try {
   await expect(reopened.getByLabel('Reply length', { exact: false })).toHaveValue('detailed');
   await expect(reopened.getByLabel('Tone', { exact: false })).toHaveValue('professional');
   console.log('PASS modern chat recognition and overrides persist across an actual application restart');
+
+  await reopened.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  const restoredDirectToggle = reopened.getByLabel('Send stickers directly (experimental)', { exact: true });
+  await restoredDirectToggle.uncheck(); await expect(restoredDirectToggle).not.toBeChecked();
+  await assertDirectPreference(false, reopened);
+  await app.close(); app = undefined;
+  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000 });
+  await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
+  const disabledReopened = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
+  await disabledReopened.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  await expect(disabledReopened.getByLabel('Send stickers directly (experimental)', { exact: true })).not.toBeChecked();
+  await assertDirectPreference(false, disabledReopened);
+  console.log('PASS disabling direct sticker sending also persists across an actual application restart');
 
 } catch (error) {
   if (app) { const pages = await app.windows(); for (const page of pages) console.log(page.url(), (await page.locator('body').innerText()).slice(0, 2500)); }
