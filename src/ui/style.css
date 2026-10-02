@@ -128,6 +128,7 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .sticker-message p { margin: 6px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .sticker-message p:has(+ button) { margin-bottom: 10px; }
 .sticker-message .msg button { font-size: 12px; min-height: 36px; padding: 8px 16px; }
+.sticker-message .msg button + button { margin-left: 8px; }
 .sticker-message .msg button[aria-disabled=true] { opacity: .45; cursor: default; filter: none; }
 .sticker-message .msg button:not(.primary) { color: var(--green); }
 .sticker-message .mark { flex-shrink: 0; margin-top: 6px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--bg); color: var(--muted); }

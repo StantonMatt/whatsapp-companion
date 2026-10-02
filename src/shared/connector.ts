@@ -1,5 +1,5 @@
 import type { Snapshot, Panel } from './model';
-import type { StickerTicket, StickerMakerDetail } from './sticker-transfer';
+import type { StickerTicket, StickerMakerDetail, StickerLookupDiagnostics } from './sticker-transfer';
 import type { PickerLayoutResult } from './sticker-picker-capture';
 // Replaceable boundary. The main process alone owns provider access and send authorization.
 export type RemoteCommand =
@@ -19,4 +19,4 @@ export interface Connector {
   send(command: RemoteCommand): void;
   focus(): void;
 }
-export type RemoteEvent = { type: 'stickerPickerLayout'; nonce: string; result: PickerLayoutResult } | { type: 'stickerPrepared'; nonce: string; found: boolean } | { type: 'stickerCancelled'; nonce: string; reason: 'chat-changed'; detail?: StickerMakerDetail } | { type: 'stickerClicked'; nonce: string } | { type: 'stickerSent'; nonce: string; clicked: boolean; confirmed?: boolean; reason?: 'editor-unavailable' | 'unconfirmed' | 'draft'; detail?: StickerMakerDetail } | { type: 'stickerLocated'; nonce: string; found: boolean } | { type: 'navigate'; panel: Panel } | { type: 'chrome'; rail: number; listWidth: number; theme: 'dark' | 'light' } | { type: 'cancelAuto' } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'activity'; editing?: boolean } | { type: 'dismiss' } | { type: 'request'; instruction?: string; key?: string; suggestionId?: string } | { type: 'result'; nonce: string; sent: boolean } | { type: 'sticker'; image: string };
+export type RemoteEvent = { type: 'stickerPickerLayout'; nonce: string; result: PickerLayoutResult } | { type: 'stickerPrepared'; nonce: string; found: boolean; diagnostics?: StickerLookupDiagnostics } | { type: 'stickerCancelled'; nonce: string; reason: 'chat-changed'; detail?: StickerMakerDetail } | { type: 'stickerClicked'; nonce: string } | { type: 'stickerSent'; nonce: string; clicked: boolean; confirmed?: boolean; reason?: 'editor-unavailable' | 'unconfirmed' | 'draft'; detail?: StickerMakerDetail; diagnostics?: StickerLookupDiagnostics } | { type: 'stickerLocated'; nonce: string; found: boolean } | { type: 'navigate'; panel: Panel } | { type: 'chrome'; rail: number; listWidth: number; theme: 'dark' | 'light' } | { type: 'cancelAuto' } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'activity'; editing?: boolean } | { type: 'dismiss' } | { type: 'request'; instruction?: string; key?: string; suggestionId?: string } | { type: 'result'; nonce: string; sent: boolean } | { type: 'sticker'; image: string };

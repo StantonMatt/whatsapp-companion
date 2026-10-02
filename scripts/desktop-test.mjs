@@ -1091,6 +1091,37 @@ try {
   await expect(nativeStickerPicker).toHaveCount(0);
   expect(await remote.evaluate(() => window.fixtureSent.length)).toBe(textSendsBeforeStickers);
   expect(await remote.evaluate(() => window.fixtureMediaSent)).toBe(0);
+  for (const delay of [3000, 8000]) {
+    await remote.evaluate(delay => { window.fixtureColdPickerDelay = delay; window.fixturePickerCache = {}; }, delay);
+    const beforeCold = await remote.evaluate(() => window.fixtureStickerSent.length);
+    const started = Date.now();
+    await sendCard().click();
+    await expect.poll(stickerState, { timeout: 16000, intervals: [50] }).toMatchObject({ route: 'picker', state: 'sent', sent: 'confirmed' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(delay);
+    expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(beforeCold + 1);
+    await expect(nativeStickerPicker).toHaveCount(0);
+  }
+  console.log('PASS cold picker spinner and empty categories load for 3–8 seconds without a false animated miss');
+  await remote.evaluate(() => { window.fixtureColdPickerDelay = -1; window.fixturePickerCache = {}; });
+  const foreverStarted = Date.now();
+  const beforeRetry = await remote.evaluate(() => window.fixtureStickerSent.length);
+  await sendCard().click();
+  await expect.poll(stickerState, { timeout: 16500, intervals: [50] }).toMatchObject({ route: 'picker', state: 'missing' });
+  expect(Date.now() - foreverStarted).toBeGreaterThanOrEqual(15000);
+  expect(Date.now() - foreverStarted).toBeLessThan(16500);
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(beforeRetry);
+  const originalRetry = stickerPanel.getByRole('button', { name: 'Try again', exact: true });
+  await expect(originalRetry).toBeVisible();
+  await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toBeVisible();
+  const missingNonce = (await stickerState()).nonce;
+  await originalRetry.evaluate(button => button.click());
+  expect((await stickerState()).nonce).toBe(missingNonce);
+  await remote.evaluate(() => { window.fixtureColdPickerDelay = 0; window.fixturePickerCache = {}; });
+  await originalRetry.click();
+  await expect.poll(stickerState, { timeout: 6000 }).toMatchObject({ route: 'picker', state: 'sent', sent: 'confirmed' });
+  expect((await stickerState()).nonce).not.toBe(missingNonce);
+  expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(beforeRetry + 1);
+  console.log('PASS forever-loading picker stops at 15 seconds; trusted Try again starts a fresh animated lookup');
   await remote.locator('#fixture-media-send').evaluate(button => button.remove());
   await holdStickerCommand('sendSticker'); await sendCard().click();
   await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);

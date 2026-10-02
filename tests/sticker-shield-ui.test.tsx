@@ -204,3 +204,33 @@ test.each(['unknown', 'confirmed', undefined] as const)('editor-unavailable does
   expect(host.querySelector('.sticker-message .msg button')).toBeNull();
   expect(action).not.toHaveBeenCalled();
 });
+
+test.each(['Try again', 'Send still'])('animated missing row %s requires a trusted event and chooses the explicit route', async label => {
+  const next = status(null), action = vi.fn(async (_action: unknown) => true), id = 'a'.repeat(64);
+  next.chat.destinationToken = '1';
+  next.state.stickers = [{ id, image: 'data:image/webp;base64,AAAA', searchTerms: 'animated', firstSeen: 1, lastSeen: 1 }];
+  const draw = () => act(() => root.render(<Stickers status={next} act={action}/>));
+  // JSDOM cannot create trusted native events. Invoke the actual React handler
+  // with the trust flag for the authorized half, and DOM click for rejection.
+  const trustedClick = async (button: HTMLButtonElement) => {
+    const key = Object.keys(button).find(key => key.startsWith('__reactProps$'))!;
+    const handler = (button as unknown as Record<string, { onClick: (event: { nativeEvent: { isTrusted: boolean } }) => void }>)[key].onClick;
+    await act(async () => handler({ nativeEvent: { isTrusted: true } }));
+  };
+  draw();
+  await trustedClick(host.querySelector<HTMLButtonElement>('.send')!);
+  const original = action.mock.calls[0][0] as { nonce: string };
+  next.stickerSend = { id, nonce: original.nonce, name: 'Alex', route: 'picker', animated: true, state: 'missing' };
+  draw();
+  const buttons = [...host.querySelectorAll<HTMLButtonElement>('.sticker-message .msg button')];
+  expect(buttons.map(button => button.textContent)).toEqual(['Send still', 'Try again']);
+  const button = buttons.find(button => button.textContent === label)!;
+  act(() => button.click());
+  expect(action).toHaveBeenCalledTimes(1);
+  await trustedClick(button);
+  expect(action).toHaveBeenCalledTimes(2);
+  const retry = action.mock.calls[1][0] as { nonce: string; still?: true };
+  expect(retry).toMatchObject({ type: 'sendSticker', id, destinationToken: '1' });
+  expect(retry.nonce).not.toBe(original.nonce);
+  expect(retry.still).toBe(label === 'Send still' ? true : undefined);
+});

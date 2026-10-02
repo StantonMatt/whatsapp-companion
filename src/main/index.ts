@@ -13,13 +13,14 @@ import { learnStyle, styleSamples, minimumStyleSamples } from '../core/style';
 import { statusUpdate } from '../core/status';
 import { StickerTransfer, stickerRoute } from '../core/sticker-transfer';
 import { StickerReadiness } from '../core/sticker-readiness';
-import { STICKER_PICKER_LOOKUP_MS, STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS, stickerMakerDetails } from '../shared/sticker-transfer';
+import { STICKER_PICKER_WATCHDOG_MS, STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS, stickerMakerDetails, stickerLookupDiagnosticsSchema, type StickerLookupDiagnostics } from '../shared/sticker-transfer';
 import { storedSticker } from './sticker-bytes';
 import { StickerInbox } from './sticker-inbox';
 import { ProviderCheck } from './provider-check';
 import { ModelCatalog } from './models';
 import { currentTextModels, savedEffort, setReasoning } from '../core/model-policy';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
+import { StickerSendDiagnostics } from './sticker-send-diagnostics';
 import { PickerDiagnostics } from './picker-diagnostics';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
@@ -50,6 +51,8 @@ async function start() {
   const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href : 'https://web.whatsapp.com/';
   const conversations = new Conversations(store);
   const stickerTransfer = new StickerTransfer();
+  const stickerSendDiagnostics = new StickerSendDiagnostics(app.getPath('userData'));
+  let sendDiagnostic: { nonce: string; startedAt: number; result?: StickerLookupDiagnostics; written?: boolean } | undefined;
   const stickerReadiness = new StickerReadiness();
   let presentedSnapshot: ReturnType<StickerReadiness['present']> | undefined;
   let stickerReadinessTimer: ReturnType<typeof setTimeout> | undefined;
@@ -167,7 +170,16 @@ async function start() {
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
   const status = (): Status => ({ sequence, panel, stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: store.state, chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   let lastMakerDiagnostic: Status['stickerSend'];
+  const recordStickerSend = () => {
+    const send = stickerTransfer.send;
+    if (send && sendDiagnostic?.nonce === send.nonce && !sendDiagnostic.written &&
+      !['finding', 'preparing', 'sending'].includes(send.state)) {
+      sendDiagnostic.written = true;
+      stickerSendDiagnostics.append(send, { totalMs: Math.max(sendDiagnostic.result?.totalMs ?? 0, Date.now() - sendDiagnostic.startedAt), categories: sendDiagnostic.result?.categories ?? [], ...(sendDiagnostic.result?.reason ? { reason: sendDiagnostic.result.reason } : {}) });
+    }
+  };
   const publish = () => {
+    recordStickerSend();
     if (makerInputOwner) {
       const send = stickerTransfer.send;
       if (send?.nonce !== makerInputOwner || send.detail === 'draft-appeared') finishMakerInput();
@@ -431,10 +443,11 @@ async function start() {
           const stored = storedSticker(sticker.image, sticker.id);
           const route = stickerRoute(assistant.snapshot, stored.animated, action.still);
           const ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot, Date.now(), route, stored.animated);
+          sendDiagnostic = { nonce: action.nonce, startedAt: Date.now() };
           if (stickerTransfer.send?.state === 'failed') break;
           assistant.activity();
           clearTimeout(stickerSendTimer);
-          stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { finishMakerInput(); stopStickerLookup(); publish(); } }, route === 'picker' ? STICKER_PICKER_LOOKUP_MS : 60_000);
+          stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { finishMakerInput(); stopStickerLookup(); publish(); } }, route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000);
           if (route === 'maker') await showStickerShield(ticket.nonce);
           if (stickerTransfer.send?.nonce !== ticket.nonce || !['finding', 'preparing'].includes(stickerTransfer.send.state)) break;
           if (route === 'maker') startMakerInput(ticket.nonce);
@@ -473,8 +486,10 @@ async function start() {
       switch (envelope.data.type) {
         case 'stickerPickerLayout': pickerDiagnostics.receive(raw); break;
         case 'stickerPrepared': {
-          const v = z.object({ type: z.literal('stickerPrepared'), nonce: z.string().uuid(), found: z.boolean() }).strict().safeParse(raw);
+          // Optional telemetry is validated separately from the transfer result.
+          const v = z.object({ type: z.literal('stickerPrepared'), nonce: z.string().uuid(), found: z.boolean(), diagnostics: stickerLookupDiagnosticsSchema.optional().catch(undefined) }).strict().safeParse(raw);
           if (v.success) {
+            if (sendDiagnostic?.nonce === v.data.nonce && !sendDiagnostic.written) sendDiagnostic.result = v.data.diagnostics;
             const ticket = stickerTransfer.prepared(v.data.nonce, v.data.found, assistant.snapshot);
             if (ticket) {
               clearTimeout(stickerSendTimer);
@@ -505,8 +520,14 @@ async function start() {
           } break;
         }
         case 'stickerSent': {
-          const v = z.object({ type: z.literal('stickerSent'), nonce: z.string().uuid(), clicked: z.boolean(), confirmed: z.boolean().optional(), reason: z.enum(['editor-unavailable', 'unconfirmed', 'draft']).optional(), detail: z.enum(stickerMakerDetails).optional() }).strict().safeParse(raw);
-          if (v.success) { if (makerInputOwner === v.data.nonce) finishMakerInput(); if (stickerTransfer.send?.nonce === v.data.nonce && ['sending', 'preparing'].includes(stickerTransfer.send.state)) clearTimeout(stickerSendTimer); stickerTransfer.result(v.data.nonce, v.data.clicked, v.data.confirmed, v.data.reason, v.data.detail); publish(); } break;
+          const v = z.object({ type: z.literal('stickerSent'), nonce: z.string().uuid(), clicked: z.boolean(), confirmed: z.boolean().optional(), reason: z.enum(['editor-unavailable', 'unconfirmed', 'draft']).optional(), detail: z.enum(stickerMakerDetails).optional(), diagnostics: stickerLookupDiagnosticsSchema.optional().catch(undefined) }).strict().safeParse(raw);
+          if (v.success) {
+            if (sendDiagnostic?.nonce === v.data.nonce && !sendDiagnostic.written && v.data.diagnostics) sendDiagnostic.result = v.data.diagnostics;
+            if (makerInputOwner === v.data.nonce) finishMakerInput();
+            if (stickerTransfer.send?.nonce === v.data.nonce && ['sending', 'preparing'].includes(stickerTransfer.send.state)) clearTimeout(stickerSendTimer);
+            stickerTransfer.result(v.data.nonce, v.data.clicked, v.data.confirmed, v.data.reason, v.data.detail);
+            publish();
+          } break;
         }
         case 'stickerLocated': {
           const v = z.object({ type: z.literal('stickerLocated'), nonce: z.string().uuid(), found: z.boolean() }).strict().safeParse(raw);
@@ -587,7 +608,7 @@ async function start() {
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
   win.on('close', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
   app.on('before-quit', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
-  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
+  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); stickerInbox.flush(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));

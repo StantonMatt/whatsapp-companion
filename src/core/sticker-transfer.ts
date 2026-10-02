@@ -1,5 +1,5 @@
 import type { Snapshot } from '../shared/model';
-import { STICKER_PICKER_LOOKUP_MS, sameStickerChat, sameStickerPreparation, type StickerSend, type StickerTicket, type StickerRoute, type StickerReason, type StickerMakerDetail, type StickerSendOutcome, type StickerSendBlockedReason } from '../shared/sticker-transfer';
+import { STICKER_PICKER_WATCHDOG_MS, sameStickerChat, sameStickerPreparation, type StickerSend, type StickerTicket, type StickerRoute, type StickerReason, type StickerMakerDetail, type StickerSendOutcome, type StickerSendBlockedReason } from '../shared/sticker-transfer';
 
 export const canSendSticker = (snapshot: Snapshot) => Boolean(snapshot.conversationOpen && snapshot.name && (snapshot.settingsId ?? snapshot.chatId));
 export const composerProvablyEmpty = (snapshot: Snapshot) => snapshot.conversationOpen && snapshot.ready && !snapshot.composing && !snapshot.draftIssue && snapshot.draft === '';
@@ -40,7 +40,7 @@ export class StickerTransfer {
     if (!scope || !canSendSticker(snapshot)) throw new Error('Open a conversation before sending a sticker.');
     this.usedNonces.add(nonce);
     this.authorized = false; this.disclosed = false;
-    this.ticket = { id, nonce, scope, destinationToken, expires: now + (route === 'picker' ? STICKER_PICKER_LOOKUP_MS : 60_000), route, target: { name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision } };
+    this.ticket = { id, nonce, scope, destinationToken, expires: now + (route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000), route, target: { name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision } };
     this.send = { id, nonce, name: snapshot.name, route, animated, state: route === 'maker' ? 'preparing' : 'finding' };
     const ticket = this.ticket;
     if (route === 'maker' && !composerProvablyEmpty(snapshot)) this.finish('failed', 'draft', 'draft-present', 'not-sent');

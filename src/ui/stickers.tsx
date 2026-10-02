@@ -17,7 +17,7 @@ const sendMessage = (send: StickerSend) => send.state === 'missing' ? 'WhatsApp 
   : noEditor(send) ? 'WhatsApp didn’t open its sticker editor. Nothing was sent.'
   : send.sent === 'confirmed' ? 'Sticker sent.'
   : 'Couldn’t confirm the sticker was sent. Check the chat before sending it again.';
-// Only these rows offer a new send: an animated miss (Send still) and a maker failure that sent nothing (Try again).
+// Only these rows offer a new send: an animated miss (Send still / Try again) and a maker failure that sent nothing (Try again).
 // A result that may have been sent never offers one.
 const offer = (send: StickerSend) => send.state === 'missing' ? { label: 'Send still', primary: true, still: true }
   : noEditor(send) ? { label: 'Try again', primary: false, still: send.route === 'maker' && send.animated } : null;
@@ -156,9 +156,9 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     void act({ type: 'sendSticker', id, nonce, destinationToken: status.chat.destinationToken, ...still && { still: true as const } }).then(ok => { if (!ok) setLocal(current => current?.nonce === nonce ? null : current); });
     return true;
   };
-  const retry = (event: React.MouseEvent, sent: StickerSend) => {
+  const retry = (event: React.MouseEvent, sent: StickerSend, original = false) => {
     const action = offer(sent);
-    if (action && start(event, sent.id, action.still)) setFocus({ id: sent.id, button: 'send' });
+    if (action && start(event, sent.id, original ? false : action.still)) setFocus({ id: sent.id, button: 'send' });
   };
   const cancel = () => { void act({ type: 'cancelSticker' }); };
   const dismiss = (id: string) => { if (message) setHidden(message.nonce); setFocus({ id, button: 'send' }); };
@@ -292,13 +292,14 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   </>;
 }
 
-function MessageBody({ message, retry, sendBlocked, dismiss }: { message: StickerSend; retry: (event: React.MouseEvent, send: StickerSend) => void; sendBlocked: boolean; dismiss?: () => void }) {
+function MessageBody({ message, retry, sendBlocked, dismiss }: { message: StickerSend; retry: (event: React.MouseEvent, send: StickerSend, original?: boolean) => void; sendBlocked: boolean; dismiss?: () => void }) {
   const action = offer(message);
   return <>
     <span className="mark" aria-hidden="true">!</span>
     <div className="msg">
       <p>{sendMessage(message)}</p>
       {action && <button className={action.primary ? 'primary' : undefined} aria-disabled={sendBlocked || undefined} onClick={e => { if (!sendBlocked) retry(e, message); }}>{action.label}</button>}
+      {message.state === 'missing' && <button aria-disabled={sendBlocked || undefined} onClick={e => { if (!sendBlocked) retry(e, message, true); }}>Try again</button>}
     </div>
     {dismiss && <button className="icon-close" aria-label="Dismiss" title="Dismiss" onClick={dismiss}>×</button>}
   </>;
@@ -306,7 +307,7 @@ function MessageBody({ message, retry, sendBlocked, dismiss }: { message: Sticke
 
 function StickerEditor({ col, sticker, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget }: {
   col: number; sticker: Sticker; draft: Draft; location: Status['stickerLocation']; message: StickerSend | null;
-  retry: (event: React.MouseEvent, send: StickerSend) => void;
+  retry: (event: React.MouseEvent, send: StickerSend, original?: boolean) => void;
   sendBlocked: boolean;
   change: (text: string) => void; close: () => void; keep: () => void; discard: () => void;
   save: () => void; locate: () => void; forget: () => void;

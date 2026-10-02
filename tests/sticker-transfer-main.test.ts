@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   app: undefined as EventEmitter | undefined,
   animated: false,
   errors: [] as unknown[],
+  diagnostics: [] as any[],
   menu: [] as any[]
 }));
 
@@ -73,6 +74,9 @@ vi.mock('electron', async () => {
     shell: {}, Menu: { buildFromTemplate: vi.fn(template => { mocks.menu = template; return template; }), setApplicationMenu: vi.fn() }
   };
 });
+vi.mock('../src/main/sticker-send-diagnostics', () => ({ StickerSendDiagnostics: class {
+  append(send: unknown, diagnostics: unknown) { mocks.diagnostics.push({ send, diagnostics }); }
+} }));
 vi.mock('../src/main/store', () => ({ Store: class {
   state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), image: 'data:image/webp;base64,UklGRg==', firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
   update(change: (state: ReturnType<typeof initialState>) => void) { change(this.state); }
@@ -101,7 +105,7 @@ beforeEach(async () => {
   vi.resetModules(); vi.useFakeTimers(); vi.setSystemTime(0);
   vi.stubGlobal('__dirname', '/tmp/sticker-main-test');
   vi.spyOn(console, 'warn').mockImplementation(() => {});
-  mocks.animated = false;
+  mocks.animated = false; mocks.diagnostics.length = 0;
   mocks.views.length = 0; mocks.handlers.clear(); mocks.errors.length = 0;
   await import('../src/main/index');
   await vi.dynamicImportSettled();
@@ -580,4 +584,76 @@ test('result cleanup preserves local focus when the sticker panel remains open',
   confirmed();
   expect(inputBlocked()).toBe(false);
   expect(remote().focus).not.toHaveBeenCalled();
+});
+
+
+test('main records validated category timings once per completed picker attempt', async () => {
+  await action({ type: 'cancelSticker' });
+  remoteEvent({ type: 'stickerSent', nonce, clicked: false, confirmed: false });
+  mocks.animated = true;
+  const nextNonce = '650e8400-e29b-41d4-a716-446655440000';
+  expect(await action({ type: 'sendSticker', id: 'a'.repeat(64), nonce: nextNonce, destinationToken: status().chat.destinationToken })).toEqual({ ok: true });
+  const diagnostics = { totalMs: 8000, categories: [{ name: 'favorites', activatedMs: 0, firstImageMs: null, settledMs: 8000, loadingSeen: true, imagesSeen: 0, found: false }] };
+  await vi.advanceTimersByTimeAsync(8000);
+  remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: false, diagnostics });
+  expect(status().stickerSend?.state).toBe('missing');
+  expect(mocks.diagnostics.filter(entry => entry.send.nonce === nextNonce)).toEqual([expect.objectContaining({ diagnostics })]);
+  remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: false, diagnostics });
+  remoteEvent({ type: 'snapshot', snapshot });
+  expect(mocks.diagnostics.filter(entry => entry.send.nonce === nextNonce)).toHaveLength(1);
+});
+
+const invalidDiagnostics = [
+  ...['activatedMs', 'firstImageMs', 'settledMs'].map(field => ({
+    totalMs: 15_010, categories: [{ name: 'recent', activatedMs: 0, firstImageMs: null, settledMs: null, loadingSeen: false, imagesSeen: 1, found: true, [field]: 15_010 }]
+  })),
+  { totalMs: 120_001, categories: [] },
+  { totalMs: 10, categories: [{ name: 'private category' }] },
+  { totalMs: 10, categories: [], extra: 'private telemetry' },
+  null
+];
+
+test.each(invalidDiagnostics)('invalid lookup telemetry cannot veto preparation: %j', async diagnostics => {
+  await action({ type: 'cancelSticker' });
+  remoteEvent({ type: 'stickerSent', nonce, clicked: false, confirmed: false });
+  mocks.animated = true;
+  const nextNonce = '650e8400-e29b-41d4-a716-446655440000';
+  expect(await action({ type: 'sendSticker', id: 'a'.repeat(64), nonce: nextNonce, destinationToken: status().chat.destinationToken })).toEqual({ ok: true });
+  await vi.advanceTimersByTimeAsync(15_010);
+  remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: true, diagnostics });
+  expect(status().stickerSend?.state).toBe('sending');
+  expect(remote().send).toHaveBeenCalledWith('companion:command', expect.objectContaining({ type: 'sendSticker', nonce: nextNonce }));
+  expect(mocks.handlers.get('companion:authorize-sticker')!(eventFor(remote()), { nonce: nextNonce, phase: 'send', snapshot })).toBe(true);
+  remoteEvent({ type: 'stickerSent', nonce: nextNonce, clicked: true, confirmed: true });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(status().stickerSend).toMatchObject({ state: 'sent', sent: 'confirmed' });
+  expect(mocks.diagnostics.find(entry => entry.send.nonce === nextNonce)?.diagnostics.categories).toEqual([]);
+});
+
+test.each(invalidDiagnostics)('invalid send telemetry cannot veto confirmation: %j', async diagnostics => {
+  expect(authorize('send')).toBe(true); clicked();
+  remoteEvent({ type: 'stickerSent', nonce, clicked: true, confirmed: true, diagnostics });
+  expect(status().stickerSend).toMatchObject({ state: 'sent', sent: 'confirmed' });
+  expect(inputBlocked()).toBe(false);
+  await vi.advanceTimersByTimeAsync(STICKER_MAKER_WATCHDOG_MS);
+  expect(status().stickerSend).toMatchObject({ state: 'sent', sent: 'confirmed' });
+  expect(mocks.diagnostics.find(entry => entry.send.nonce === nonce)?.diagnostics.categories).toEqual([]);
+});
+
+test('discarding invalid telemetry still requires a valid transfer result', () => {
+  expect(authorize('send')).toBe(true);
+  remoteEvent({ type: 'stickerSent', nonce, clicked: 'yes', confirmed: true, diagnostics: invalidDiagnostics[0] });
+  expect(status().stickerSend?.state).toBe('sending');
+  expect(inputBlocked()).toBe(true);
+});
+
+test('invalid telemetry cannot hold a failed preparation or unsent maker open', async () => {
+  remoteEvent({ type: 'stickerSent', nonce, clicked: false, confirmed: false, diagnostics: invalidDiagnostics[0] });
+  expect(status().stickerSend).toMatchObject({ state: 'failed', sent: 'not-sent' });
+  expect(inputBlocked()).toBe(false);
+  mocks.animated = true;
+  const nextNonce = '650e8400-e29b-41d4-a716-446655440000';
+  expect(await action({ type: 'sendSticker', id: 'a'.repeat(64), nonce: nextNonce, destinationToken: status().chat.destinationToken })).toEqual({ ok: true });
+  remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: false, diagnostics: invalidDiagnostics[0] });
+  expect(status().stickerSend?.state).toBe('missing');
 });

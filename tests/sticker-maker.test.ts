@@ -189,7 +189,7 @@ function setup(options: { locale?: keyof typeof makerLocales; sendLabel?: string
   const dom = new DomConnector(document, () => {});
   const events: RemoteEvent[] = [], permissions: StickerAuthorization[] = [];
   const read = () => { const value = { ...current, draft: composer.isConnected ? readDraft(composer) : '', draftIssue: composer.isConnected ? dom.read().draftIssue : null }; const preparation = connector.preparation(value); if (preparation) value.stickerPreparation = preparation; return value; };
-  const connector = new StickerTransferConnector(document, read, new Map(), event => events.push(event), async () => true, async request => { permissions.push(request); return options.authorize ? options.authorize(request) : true; });
+  const connector = new StickerTransferConnector(document, read, new Map(), event => { const { diagnostics: _diagnostics, ...result } = event as RemoteEvent & { diagnostics?: unknown }; events.push(result as RemoteEvent); }, async () => true, async request => { permissions.push(request); return options.authorize ? options.authorize(request) : true; });
   return { connector, ticket, sticker, mountEditor: () => mountEditor(), events, clicks, assignments, inputEvents, closes, discards, cancels, current, permissions, decoyEvents, unrelatedInput, unrelatedEvents, input, get composer() { return composer; } };
 }
 test('only the owned native sticker route prevents the file chooser default; user attach clicks remain normal', async () => {
@@ -828,7 +828,7 @@ test.each([
       dom.read(); await vi.advanceTimersByTimeAsync(500);
       const current = dom.read(), sticker = webp();
       const ticket = { id: sticker.id, nonce, route: 'maker' as const, target: { chatId: current.chatId, name: current.name, revision: current.revision } };
-      const connector = new StickerTransferConnector(document, read, new Map(), event => events.push(event), async () => true, async request => request.phase === 'disclose' || allowed);
+      const connector = new StickerTransferConnector(document, read, new Map(), event => { const { diagnostics: _diagnostics, ...result } = event as RemoteEvent & { diagnostics?: unknown }; events.push(result as RemoteEvent); }, async () => true, async request => request.phase === 'disclose' || allowed);
       try {
         const task = connector.make(ticket, sticker.image); await vi.advanceTimersByTimeAsync(100); await task;
         expect(events.at(-1)).toMatchObject({ type: 'stickerSent', clicked: allowed, confirmed: allowed });
@@ -853,7 +853,7 @@ test('cancelled loading fixture maker discards its already mounted native editor
   Object.assign(window, { fixtureStickerEditorDelay: 2000, fixtureMakerDiscards: 0 });
   for (const input of document.querySelectorAll<HTMLInputElement>('input[type="file"]')) Object.defineProperty(input, 'files', { value: [], writable: true });
   const events: RemoteEvent[] = [], permissions: StickerAuthorization[] = [];
-  const dom = new DomConnector(document, event => events.push(event), async () => false, async request => {
+  const dom = new DomConnector(document, event => { const { diagnostics: _diagnostics, ...result } = event as RemoteEvent & { diagnostics?: unknown }; events.push(result as RemoteEvent); }, async () => false, async request => {
     if (typeof request === 'string') return false;
     permissions.push(request); return request.phase === 'disclose';
   });

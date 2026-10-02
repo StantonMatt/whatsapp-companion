@@ -5,6 +5,7 @@ import { StickerTransferConnector } from '../src/connector/sticker-transfer';
 import { stickerImageState } from '../src/connector/sticker-image-state';
 import { emptySnapshot } from '../src/shared/model';
 import type { RemoteEvent } from '../src/shared/connector';
+import { stickerLookupDiagnosticsSchema } from '../src/shared/sticker-transfer';
 const id = 'a'.repeat(64), source = 'data:image/webp;base64,UklGRg==';
 const target = { chatId: '123@c.us', name: 'A friend', revision: '1' };
 const ticket = { id, nonce: 'nonce', target };
@@ -19,8 +20,9 @@ function setup(authorize: (nonce: string) => Promise<boolean> = async () => true
   button.addEventListener('click', () => { const row = document.createElement('div'); row.dataset.id = 'true_123@c.us_new'; row.innerHTML = '<div data-testid="sticker-container"></div>'; document.querySelector('#main')!.append(row); });
   const snapshot = { ...emptySnapshot, ...target, conversationOpen: true, ready: true, atBottom: true };
   const events: RemoteEvent[] = [];
-  const connector = new StickerTransferConnector(document, () => snapshot, new Map([[source, id]]), e => events.push(e), authorize);
-  return { image, button, snapshot, events, click, connector };
+  const diagnosticEvents: RemoteEvent[] = [];
+  const connector = new StickerTransferConnector(document, () => snapshot, new Map([[source, id]]), e => { diagnosticEvents.push(e); const { diagnostics: _diagnostics, ...event } = e as RemoteEvent & { diagnostics?: unknown }; events.push(event as RemoteEvent); }, authorize);
+  return { image, button, snapshot, events, diagnosticEvents, click, connector };
 }
 test('lookup finds the original without clicking; the click-authorized command activates it once and preserves draft', async () => {
   const { connector, events, click } = setup();
@@ -133,7 +135,7 @@ test.each(['broken', 'error', 'unsupported'])('a %s image does not prevent scrol
       image.dispatchEvent(new Event('error'));
     }
     await vi.advanceTimersByTimeAsync(10_200); await task;
-    expect(examined).toEqual([0, 210]); expect(position).toBe(210);
+    expect(examined).toEqual([0, 210, 210, 210]); expect(position).toBe(210);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
@@ -220,7 +222,111 @@ test('already-mounted ready Favorites are checked immediately even while the cat
   } finally { connector.stop(); }
 });
 
-test('every category keeps loading but the total six-second cap reports missing and closes the owned picker', async () => {
+test.each(['recent', 'open-pack', 'late-favorites'] as const)('churning Favorites cannot hide an original in %s', async destination => {
+  const { connector, image, button, events, diagnosticEvents, click } = setup(); unrelatedOriginal(connector, image);
+  const content = button.parentElement!;
+  const started = Date.now(), selected: { category: string; elapsed: number }[] = [];
+  let active = 'panel-pack';
+  let replacement = image;
+  const render = () => {
+    const next = image.cloneNode() as HTMLImageElement;
+    next.checkVisibility = image.checkVisibility; next.getBoundingClientRect = image.getBoundingClientRect;
+    next.scrollIntoView = vi.fn();
+    Object.defineProperties(next, { complete: { value: true }, naturalWidth: { value: 100 } });
+    next.src = (active === 'panel-recent' && destination === 'recent') || (active === 'panel-pack' && destination === 'open-pack') ||
+      (active === 'panel-starred' && destination === 'late-favorites' && Date.now() - started >= 5000) ? source : image.src;
+    replacement.replaceWith(next); replacement = next;
+  };
+  const tabs = categoryTabs(category => { active = category; selected.push({ category, elapsed: Date.now() - started }); render(); }, ['panel-starred', 'panel-recent', 'panel-pack']);
+  tabs[2].setAttribute('aria-selected', 'true');
+  // Replace ready nodes every 500 ms without a loading marker. This resets
+  // Favorites' quiet window on every visit, including after the first pass.
+  const churn = setInterval(() => { if (active === 'panel-starred') render(); }, 500);
+  try {
+    const task = connector.prepare(ticket);
+    await vi.advanceTimersByTimeAsync(destination === 'late-favorites' ? 14_900 : 4100); await task;
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+    const result = diagnosticEvents.at(-1) as Extract<RemoteEvent, { type: 'stickerPrepared' }>;
+    expect(result.diagnostics?.totalMs).toBeLessThanOrEqual(destination === 'late-favorites' ? 15_000 : 4000);
+    expect(selected[0]).toEqual({ category: 'panel-starred', elapsed: 0 });
+    expect(selected[1]).toEqual({ category: 'panel-recent', elapsed: 2000 });
+    if (destination !== 'recent') {
+      expect(selected[2]).toEqual({ category: 'panel-pack', elapsed: 3500 });
+      if (destination === 'late-favorites') expect(selected[3]).toEqual({ category: 'panel-starred', elapsed: 5000 });
+    }
+    expect(content.contains(replacement)).toBe(true); expect(click).not.toHaveBeenCalled();
+  } finally { clearInterval(churn); connector.stop(); }
+});
+
+test('all loaded categories with no original settle during the first pass', async () => {
+  const { connector, image, events, diagnosticEvents } = setup(); unrelatedOriginal(connector, image);
+  const selected: string[] = [];
+  const tabs = categoryTabs(category => selected.push(category), ['panel-starred', 'panel-recent', 'panel-pack']);
+  tabs[2].setAttribute('aria-selected', 'true');
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(4600); await task;
+    expect(selected).toEqual(['panel-starred', 'panel-recent', 'panel-pack']);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
+    const result = diagnosticEvents.at(-1) as Extract<RemoteEvent, { type: 'stickerPrepared' }>;
+    expect(result.diagnostics?.totalMs).toBe(4500);
+    expect(result.diagnostics?.categories.filter(entry => entry.name !== 'current').every(entry => entry.settledMs !== null)).toBe(true);
+  } finally { connector.stop(); }
+});
+
+test.each([true, false])('categories that finish their quiet window exactly at the slice boundary settle (populated=%s)', async populated => {
+  const { connector, image, button, events, diagnosticEvents } = setup(); unrelatedOriginal(connector, image);
+  const content = button.parentElement!, panel = document.querySelector('[data-testid="expressions-panel"]')!;
+  const selected: string[] = [];
+  categoryTabs(category => {
+    selected.push(category); button.remove(); panel.setAttribute('aria-busy', 'true');
+    setTimeout(() => {
+      panel.removeAttribute('aria-busy');
+      if (populated) content.append(button);
+    }, populated ? 500 : 1200);
+  });
+  try {
+    const task = connector.prepare(ticket);
+    await vi.advanceTimersByTimeAsync(3999); expect(events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1); await task;
+    expect(selected).toEqual(['panel-starred', 'panel-recent']);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
+    const result = diagnosticEvents.at(-1) as Extract<RemoteEvent, { type: 'stickerPrepared' }>;
+    expect(result.diagnostics?.totalMs).toBe(4000);
+    expect(result.diagnostics?.categories.filter(entry => entry.name !== 'current').map(entry => entry.settledMs)).toEqual([2000, 4000]);
+  } finally { connector.stop(); }
+});
+
+test.each(['unchanged', 'replacement', 'loading'] as const)('a continuously active category keeps settling across slices while respecting %s content', async change => {
+  const { connector, image, button, events, diagnosticEvents } = setup(); unrelatedOriginal(connector, image);
+  const content = button.parentElement!, panel = document.querySelector('[data-testid="expressions-panel"]')!;
+  const selected: string[] = [];
+  categoryTabs(category => {
+    selected.push(category); button.remove(); panel.setAttribute('aria-busy', 'true');
+    setTimeout(() => { content.append(button); panel.removeAttribute('aria-busy'); }, 600);
+  }, ['panel-starred']);
+  if (change === 'replacement') setTimeout(() => {
+    const replacement = image.cloneNode() as HTMLImageElement;
+    replacement.checkVisibility = image.checkVisibility; replacement.getBoundingClientRect = image.getBoundingClientRect;
+    Object.defineProperties(replacement, { complete: { value: true }, naturalWidth: { value: 100 } });
+    image.replaceWith(replacement);
+  }, 2050);
+  if (change === 'loading') {
+    setTimeout(() => panel.setAttribute('aria-busy', 'true'), 2050);
+    setTimeout(() => panel.removeAttribute('aria-busy'), 2250);
+  }
+  const expected = change === 'unchanged' ? 2100 : change === 'replacement' ? 3600 : 3800;
+  try {
+    const task = connector.prepare(ticket);
+    await vi.advanceTimersByTimeAsync(expected - 1); expect(events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1); await task;
+    expect(selected).toEqual(['panel-starred']);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
+    const result = diagnosticEvents.at(-1) as Extract<RemoteEvent, { type: 'stickerPrepared' }>;
+    expect(result.diagnostics?.totalMs).toBe(expected);
+  } finally { connector.stop(); }
+});
+
+test('every category keeps loading but the total 15-second cap reports missing and closes the owned picker', async () => {
   const { connector, panel, button, events, click } = ownedPicker();
   document.body.append(panel); button.remove();
   const started = Date.now(), selected: { category: string; elapsed: number }[] = [];
@@ -230,24 +336,24 @@ test('every category keeps loading but the total six-second cap reports missing 
   let elapsed = 0;
   try {
     const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
-    await vi.advanceTimersByTimeAsync(5900);
+    await vi.advanceTimersByTimeAsync(14_900);
     expect(events).toEqual([]); expect(panel.isConnected).toBe(true);
-    expect(selected).toEqual([
+    expect(selected.slice(0, 3)).toEqual([
       { category: 'panel-starred', elapsed: 0 },
-      { category: 'panel-recent', elapsed: 1500 },
-      { category: 'panel-pack', elapsed: 3000 }
+      { category: 'panel-recent', elapsed: 2000 },
+      { category: 'panel-pack', elapsed: 4000 }
     ]);
     await vi.advanceTimersByTimeAsync(100); await task;
-    expect(elapsed).toBeLessThanOrEqual(6000);
+    expect(elapsed).toBeLessThanOrEqual(15_000);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
     expect(panel.isConnected).toBe(false); expect(click).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1000);
-    expect(selected).toHaveLength(3); expect(events).toHaveLength(1);
+    expect(selected.length).toBeGreaterThanOrEqual(3); expect(events).toHaveLength(1);
   } finally { connector.stop(); }
 });
 
 test('a picker opening at the total deadline cannot activate the remaining category tabs', async () => {
-  const { connector, panel, events, click } = ownedPicker(5800);
+  const { connector, panel, events, click } = ownedPicker(14_800);
   document.body.append(panel);
   const selected: string[] = [];
   categoryTabs(category => selected.push(category));
@@ -257,8 +363,8 @@ test('a picker opening at the total deadline cannot activate the remaining categ
   let elapsed = 0;
   try {
     const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
-    await vi.advanceTimersByTimeAsync(6000); await task;
-    expect(elapsed).toBeLessThanOrEqual(6000);
+    await vi.advanceTimersByTimeAsync(15_000); await task;
+    expect(elapsed).toBeLessThanOrEqual(15_000);
     expect(selected).toEqual([]); expect(click).not.toHaveBeenCalled();
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
     expect(panel.isConnected).toBe(false);
@@ -303,8 +409,8 @@ test('the hidden-sticker desktop fixture reports missing within three seconds', 
   try {
     const task = connector.prepare(ticket).then(() => { elapsed = Date.now() - started; });
     await vi.advanceTimersByTimeAsync(3400); await task;
-    expect(activated).toEqual([0, 800]);
-    expect(elapsed).toBe(1600);
+    expect(activated).toEqual([0, 1400]);
+    expect(elapsed).toBe(2800);
     expect(elapsed).toBeLessThanOrEqual(3000);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
@@ -323,7 +429,7 @@ test('every scrolling category reaches its end and settles before an early missi
   categoryTabs(() => { examined.push(position); position = 0; });
   try {
     const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(10_200); await task;
-    expect(examined).toEqual([0, 210]); expect(position).toBe(210);
+    expect(examined).toEqual([0, 210, 210, 210]); expect(position).toBe(210);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
@@ -402,18 +508,18 @@ test('an image starting to load at the end restarts the settle window once ready
   } finally { connector.stop(); }
 });
 
-test('images that never finish loading remain bounded by the six-second deadline', async () => {
+test('images that never finish loading remain bounded by the 15-second deadline', async () => {
   const { connector, image, events } = setup();
   Object.defineProperty(image, 'complete', { value: false });
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(14_900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
 
-test.each([false, true])('the six-second deadline still bounds an endlessly growing picker (at end=%s)', async atEnd => {
+test.each([false, true])('the 15-second deadline still bounds an endlessly growing picker (at end=%s)', async atEnd => {
   const { connector, image, button, events } = setup();
   image.src = 'data:image/webp;base64,b3RoZXI='; connector['verified'].set(image.src, 'b'.repeat(64));
   const viewport = document.createElement('div'); viewport.style.overflowY = 'auto';
@@ -424,7 +530,7 @@ test.each([false, true])('the six-second deadline still bounds an endlessly grow
   if (atEnd) Object.defineProperty(viewport, 'scrollTop', { get: () => height - 150, set: () => {} });
   const growth = setInterval(() => { height += 150; }, 250);
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(14_900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
@@ -515,7 +621,7 @@ test('a picker that never mounts stops waiting at the lookup deadline', async ()
   const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Emojis, GIFs, Stickers"]')!;
   trigger.click = vi.fn();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(6100); await task;
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(15_100); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
   } finally { connector.stop(); }
 });
@@ -548,7 +654,7 @@ test.each(['send', 'missing'])('a user-opened picker remains open after %s', asy
   const { connector, button, click, events } = setup();
   try {
     if (outcome === 'missing') button.remove();
-    const lookup = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(outcome === 'missing' ? 6100 : 100); await lookup;
+    const lookup = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(outcome === 'missing' ? 15_100 : 100); await lookup;
     if (outcome === 'send') await connector.send(ticket, Date.now() + 5000);
     expect(document.querySelector('[data-testid="expressions-panel"]')).not.toBeNull();
     expect(click).toHaveBeenCalledTimes(outcome === 'send' ? 1 : 0);
@@ -573,6 +679,46 @@ function unrelatedOriginal(connector: StickerTransferConnector, image: HTMLImage
   image.src = 'data:image/webp;base64,b3RoZXI=';
   connector['verified'].set(image.src, 'b'.repeat(64));
 }
+
+test('round-robin visits resume a long virtual Favorites grid after searching Recent', async () => {
+  const { connector, image, button, events } = setup(); unrelatedOriginal(connector, image);
+  const panel = document.querySelector('[data-testid="expressions-panel"]')!;
+  const content = button.parentElement!;
+  let active = 'panel-pack';
+  const { viewport, advances } = lookupGrid(button, 1200, position => {
+    image.src = active === 'panel-starred' && position >= 900 ? source : 'data:image/webp;base64,b3RoZXI=';
+  });
+  const selected: string[] = [];
+  categoryTabs(category => {
+    active = category; selected.push(category);
+    if (category === 'panel-starred') { panel.append(viewport); viewport.append(button); advances(0); }
+    else { viewport.remove(); content.append(button); image.src = 'data:image/webp;base64,b3RoZXI='; }
+  });
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(7000); await task;
+    expect(selected.slice(0, 3)).toEqual(['panel-starred', 'panel-recent', 'panel-starred']);
+    expect(selected.slice(3).every(category => category === 'panel-starred')).toBe(true);
+    expect(advances.mock.calls.some(([position]) => position >= 900)).toBe(true);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+  } finally { connector.stop(); }
+});
+
+test('a very late picker opening reserves time for an unsearched Recent category', async () => {
+  const { connector, panel, image, events } = ownedPicker(14_000); unrelatedOriginal(connector, image);
+  document.body.append(panel);
+  const started = Date.now(), selected: { category: string; elapsed: number }[] = [];
+  categoryTabs(category => {
+    selected.push({ category, elapsed: Date.now() - started });
+    if (category === 'panel-starred') panel.setAttribute('aria-busy', 'true');
+    else { panel.removeAttribute('aria-busy'); image.src = source; }
+  });
+  panel.remove();
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(14_900); await task;
+    expect(selected).toEqual([{ category: 'panel-starred', elapsed: 14_000 }, { category: 'panel-recent', elapsed: 14_500 }]);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+  } finally { connector.stop(); }
+});
 
 test.each(['cap', 'stalled'])('Favorites is searched before a %s open pack', async mode => {
   const { connector, image, button, events, click } = setup(); unrelatedOriginal(connector, image);
@@ -692,7 +838,7 @@ test('a category whose content never mounts cannot prove an early miss', async (
   button.remove(); document.querySelector('[role="list"]')!.remove();
   categoryTabs();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(14_900);
     expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
@@ -736,11 +882,12 @@ test.each(['cap', 'stalled', 'pending'])('a %s category never proves an early mi
   categoryTabs(category => {
     selected.push(category);
     if (category === 'panel-recent') { viewport.remove(); panel.append(button); Object.defineProperty(image, 'complete', { value: true, configurable: true }); }
+    else { panel.append(viewport); viewport.append(button); if (mode === 'pending') Object.defineProperty(image, 'complete', { value: false, configurable: true }); }
   });
   panel.remove();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900);
-    expect(selected).toEqual(['panel-starred', 'panel-recent']); expect(events).toEqual([]);
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(14_900);
+    expect(selected).toContain('panel-starred'); expect(selected).toContain('panel-recent'); expect(events).toEqual([]);
     await vi.advanceTimersByTimeAsync(200); await task;
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: false }]);
     expect(panel.isConnected).toBe(false);
@@ -758,9 +905,55 @@ test('a slow picker opening still reserves a search slice for Favorites and Rece
   });
   panel.remove();
   try {
-    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(5900); await task;
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(14_900); await task;
     expect(selected).toEqual(['panel-starred', 'panel-recent']);
     expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+  } finally { connector.stop(); }
+});
+
+test.each(['recent', 'open-pack'] as const)('a picker opening at 14 seconds reserves the remaining first-pass time for %s despite requeues', async destination => {
+  const { connector, panel, image, events, click } = ownedPicker(14_000); unrelatedOriginal(connector, image);
+  document.body.append(panel); panel.setAttribute('aria-busy', 'true');
+  const started = Date.now(), selected: { category: string; elapsed: number }[] = [];
+  const categories = destination === 'recent' ? ['panel-starred', 'panel-recent'] : ['panel-starred', 'panel-recent', 'panel-pack'];
+  let active = 'panel-pack';
+  const tabs = categoryTabs(category => {
+    active = category; selected.push({ category, elapsed: Date.now() - started });
+    image.src = 'data:image/webp;base64,b3RoZXI=';
+    const wanted = destination === 'recent' ? 'panel-recent' : 'panel-pack';
+    if (category === wanted) setTimeout(() => { if (active === wanted) image.src = source; }, destination === 'recent' ? 300 : 200);
+  }, categories);
+  if (destination === 'open-pack') tabs[2].setAttribute('aria-selected', 'true');
+  panel.remove();
+  try {
+    const task = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(15_000); await task;
+    expect(selected).toEqual(destination === 'recent' ? [
+      { category: 'panel-starred', elapsed: 14_000 }, { category: 'panel-recent', elapsed: 14_500 }
+    ] : [
+      { category: 'panel-starred', elapsed: 14_000 }, { category: 'panel-recent', elapsed: 14_333 }, { category: 'panel-pack', elapsed: 14_666 }
+    ]);
+    expect(events).toEqual([{ type: 'stickerPrepared', nonce: ticket.nonce, found: true }]);
+    expect(click).not.toHaveBeenCalled();
+  } finally { connector.stop(); }
+});
+
+test('synchronous DOM reads crossing the lookup cap produce bounded diagnostic offsets', async () => {
+  const { connector, image, diagnosticEvents } = setup(); unrelatedOriginal(connector, image);
+  categoryTabs(() => { image.src = source; }, ['panel-starred']);
+  const started = Date.now();
+  // The ready-image diagnostic read can finish after the deadline even when
+  // the immediately preceding match was found within the lookup budget.
+  let readyReads = 0;
+  Object.defineProperty(image, 'complete', { configurable: true, get: () => {
+    if (image.src === source && ++readyReads === 3) vi.setSystemTime(started + 15_010);
+    return true;
+  } });
+  try {
+    await connector.prepare(ticket);
+    const result = diagnosticEvents.at(-1) as Extract<RemoteEvent, { type: 'stickerPrepared' }>;
+    expect(result.found).toBe(true);
+    expect(result.diagnostics?.categories.find(entry => entry.name === 'favorites')?.firstImageMs).toBe(15_000);
+    expect(stickerLookupDiagnosticsSchema.safeParse(result.diagnostics).success).toBe(true);
   } finally { connector.stop(); }
 });
 
@@ -942,4 +1135,59 @@ test.each(['sticker', 'text'] as const)('only the last outgoing sticker can conf
     const task = s.connector.send(ticket, Date.now() + 5000); await vi.advanceTimersByTimeAsync(4200); await task;
     expect(s.events.at(-1)).toMatchObject({ clicked: true, confirmed: laterContent === 'text' });
   } finally { s.connector.stop(); }
+});
+
+test.each([3000, 5000, 8000, -1])('cold fixture picker loads at %s ms without a false missing result', async delay => {
+  const { connector, events, diagnosticEvents, click } = setup();
+  const fixture = readFileSync('tests/fixtures/whatsapp.html', 'utf8');
+  document.body.innerHTML = fixture;
+  const script = fixture.match(/<script>([\s\S]*?)<\/script>/)![1];
+  window.eval(`let peer = '123456@c.us';\n${script.slice(script.indexOf('window.fixtureStickerSent=[];'))}`);
+  Object.assign(window, { fixtureStickerSource: source, fixtureHideSticker: false, fixtureColdPickerDelay: delay, fixturePickerCache: {} });
+  const show = () => {
+    for (const element of document.querySelectorAll<HTMLElement>('*')) {
+      element.checkVisibility = () => true;
+      element.getBoundingClientRect = () => ({ width: 100, height: 100, top: 0, bottom: 100 } as DOMRect);
+    }
+    for (const image of document.querySelectorAll('img')) {
+      Object.defineProperties(image, { complete: { value: true, configurable: true }, naturalWidth: { value: 100, configurable: true } });
+      image.scrollIntoView = vi.fn();
+    }
+  };
+  show();
+  document.querySelector('[aria-label="Emojis, GIFs, Stickers"]')!.addEventListener('click', () => {
+    // Category activation may mount rows synchronously at a slice boundary,
+    // before the MutationObserver can install JSDOM's visibility stubs.
+    for (const tab of document.querySelectorAll('[data-testid="panel-starred"], [data-testid="panel-recent"]')) tab.addEventListener('click', show);
+  });
+  const observer = new MutationObserver(show); observer.observe(document.body, { childList: true, subtree: true });
+  const started = Date.now();
+  try {
+    const task = connector.prepare(ticket);
+    await vi.advanceTimersByTimeAsync(delay < 0 ? 14_900 : delay - 100);
+    expect(events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(200); await task;
+    expect(events.at(-1)).toMatchObject({ type: 'stickerPrepared', found: delay > 0 });
+    const result = diagnosticEvents.at(-1) as Extract<RemoteEvent, { type: 'stickerPrepared' }>;
+    expect(result.diagnostics?.totalMs).toBeGreaterThanOrEqual(delay < 0 ? 15_000 : delay);
+    expect(result.diagnostics?.totalMs).toBeLessThanOrEqual(15_000);
+    expect(result.diagnostics?.categories.some(entry => entry.loadingSeen)).toBe(true);
+    if (delay < 0) expect(result.diagnostics?.totalMs).toBe(15_000);
+    else expect(result.diagnostics?.categories.some(entry => entry.found && entry.firstImageMs !== null)).toBe(true);
+    expect(click).not.toHaveBeenCalled();
+  } finally { observer.disconnect(); connector.stop(); Object.assign(window, { fixtureColdPickerDelay: 0, fixturePickerCache: {} }); }
+});
+
+test('a fresh animated search after a miss finds the now-loaded original', async () => {
+  const { connector, image, button, events } = setup();
+  const content = button.parentElement!;
+  button.remove(); categoryTabs();
+  try {
+    const first = connector.prepare(ticket); await vi.advanceTimersByTimeAsync(1700); await first;
+    expect(events.at(-1)).toMatchObject({ type: 'stickerPrepared', found: false });
+    content.append(button);
+    await connector.prepare({ ...ticket, nonce: 'retry' });
+    expect(events.at(-1)).toMatchObject({ type: 'stickerPrepared', nonce: 'retry', found: true });
+    expect(image.scrollIntoView).toHaveBeenCalledOnce();
+  } finally { connector.stop(); }
 });

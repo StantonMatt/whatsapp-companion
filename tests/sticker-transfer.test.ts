@@ -137,10 +137,10 @@ test('drafts and incoming messages do not alter the ticket destination or draft'
   expect(t.prepared(nonce, true, next, 5)?.target).toEqual({ name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision });
   expect(next.draft).toBe('Unsent text');
 });
-test('lookup permission lasts six seconds and activation has a separate five-second deadline', () => {
-  const t = finding(); expect(t.prepared(nonce, true, snapshot, 5999)).toBeDefined();
-  expect(t.authorize(nonce, snapshot, 10_998)).toBe(true);
-  const expired = finding(); expect(expired.prepared(nonce, true, snapshot, 6000)).toBeUndefined();
+test('lookup permission includes a one-second delivery margin after the 15-second cap and activation has a separate five-second deadline', () => {
+  const t = finding(); expect(t.prepared(nonce, true, snapshot, 15_999)).toBeDefined();
+  expect(t.authorize(nonce, snapshot, 20_998)).toBe(true);
+  const expired = finding(); expect(expired.prepared(nonce, true, snapshot, 16_000)).toBeUndefined();
   expect(expired.send?.state).toBe('missing');
   const late = sending(); expect(late.authorize(nonce, snapshot, 5002)).toBe(false);
   late.result(nonce, false); expect(late.send?.state).toBe('failed');

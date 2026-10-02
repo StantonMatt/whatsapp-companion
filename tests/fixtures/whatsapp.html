@@ -35,17 +35,36 @@ pickerTrigger.onclick=()=>{
   const portal=document.createElement('div');portal.id='expressions-panel-container';
   const wrapper=document.createElement('div');wrapper.style.cssText=`position:fixed;left:${document.querySelector('#main').getBoundingClientRect().left-200}px;bottom:90px;width:560px;max-width:560px;transform:scale(.7);transform-origin:center bottom;overflow:hidden;z-index:10`;
   const picker=document.createElement('ul');picker.dataset.testid='expressions-panel';picker.style.cssText='margin:0;width:100%;height:210px;background:#242626;border:1px solid #303333;padding:16px';
-  for(const [testid,label] of [['expressions-btn-sticker','Stickers selector'],['panel-starred','Favorites'],['panel-recent','Recent']]){
-    const tab=document.createElement('button');tab.dataset.testid=testid;tab.setAttribute('aria-label',label);tab.setAttribute('aria-selected','true');tab.textContent=label;if(testid==='panel-starred'){tab.title='Favorites PRIVATE-PICKER-TITLE';tab.setAttribute('aria-label','Favorites PRIVATE-PICKER-LABEL');}picker.append(tab);
+  // Both categories start cold together, as WhatsApp's lazy data cache does.
+  // Positive delay: 3–8 s in scenarios; negative delay: loading forever.
+  const delay=window.fixtureColdPickerDelay||0;
+  const cache=window.fixturePickerCache??(window.fixturePickerCache={});
+  for(const category of ['panel-starred','panel-recent']){
+    if(!cache[category]||cache[category].delay!==delay){
+      const state=cache[category]={delay,loaded:!delay};
+      if(delay>0)setTimeout(()=>{state.loaded=true;if(picker.isConnected&&active===category)render();},delay);
+    }
   }
-  // Keep the rendered category container present even when its collection is empty.
+  let active='panel-starred';
   const content=document.createElement('div');content.setAttribute('role','list');picker.append(content);
-  if(window.fixtureStickerSource&&!window.fixtureHideSticker){
-    const send=document.createElement('button');send.setAttribute('aria-label','Send sticker');
-    const item=document.createElement('span');item.dataset.testid='sticker-item';
-    const img=document.createElement('img');img.alt='sticker PRIVATE-PICKER-ALT';img.src=window.fixtureStickerSource;img.width=100;item.append(img);send.append(item);
-    send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});appendSticker(img.src);};content.append(send);
+  function render(){
+    content.replaceChildren();content.removeAttribute('aria-busy');
+    if(!cache[active].loaded){
+      content.setAttribute('aria-busy','true');
+      const spinner=document.createElement('div');spinner.dataset.testid='loading-spinner';spinner.setAttribute('role','progressbar');spinner.textContent='Loading';content.append(spinner);return;
+    }
+    if(window.fixtureStickerSource&&!window.fixtureHideSticker){
+      const send=document.createElement('button');send.setAttribute('aria-label','Send sticker');
+      const item=document.createElement('span');item.dataset.testid='sticker-item';
+      const img=document.createElement('img');img.alt='sticker PRIVATE-PICKER-ALT';img.src=window.fixtureStickerSource;img.width=100;item.append(img);send.append(item);
+      send.onclick=()=>{window.fixtureStickerSent.push({source:img.src,peer});appendSticker(img.src);};content.append(send);
+    }
   }
+  for(const [testid,label] of [['expressions-btn-sticker','Stickers selector'],['panel-starred','Favorites'],['panel-recent','Recent']]){
+    const tab=document.createElement('button');tab.dataset.testid=testid;tab.setAttribute('aria-label',label);tab.setAttribute('aria-selected',String(testid==='expressions-btn-sticker'||testid===active));tab.textContent=label;if(testid==='panel-starred'){tab.title='Favorites PRIVATE-PICKER-TITLE';tab.setAttribute('aria-label','Favorites PRIVATE-PICKER-LABEL');}picker.insertBefore(tab,content);
+    if(testid!=='expressions-btn-sticker')tab.onclick=()=>{active=testid;for(const other of picker.querySelectorAll('button[data-testid^="panel-"]'))other.setAttribute('aria-selected',String(other===tab));render();};
+  }
+  render();
   wrapper.append(picker);portal.append(wrapper);document.body.append(portal);
   requestAnimationFrame(()=>{wrapper.style.transition='transform .2s';wrapper.style.transform='scale(1)';});
 };document.querySelector('footer').prepend(pickerTrigger);

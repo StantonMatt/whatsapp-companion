@@ -1,8 +1,22 @@
+import { z } from 'zod';
 import type { Snapshot } from './model';
 
-// Animated originals must be loaded in the native picker. Keep the whole
-// lookup (including opening it) short enough to offer Send still promptly.
-export const STICKER_PICKER_LOOKUP_MS = 6000;
+// Stable categories finish promptly; loading evidence can use the full cap.
+export const STICKER_PICKER_LOOKUP_MS = 15_000;
+// Leave IPC delivery time after the connector's cap before main revokes lookup.
+export const STICKER_PICKER_WATCHDOG_MS = STICKER_PICKER_LOOKUP_MS + 1000;
+export const stickerLookupDiagnosticsSchema = z.object({
+  reason: z.enum(['not-found', 'lookup-cap', 'picker-unavailable', 'chat-changed']).optional(),
+  totalMs: z.number().int().min(0).max(120_000),
+  categories: z.array(z.object({
+    name: z.enum(['current', 'favorites', 'recent', 'open-pack']),
+    activatedMs: z.number().int().min(0).max(STICKER_PICKER_LOOKUP_MS),
+    firstImageMs: z.number().int().min(0).max(STICKER_PICKER_LOOKUP_MS).nullable(),
+    settledMs: z.number().int().min(0).max(STICKER_PICKER_LOOKUP_MS).nullable(),
+    loadingSeen: z.boolean(), imagesSeen: z.number().int().min(0).max(100_000), found: z.boolean()
+  }).strict()).max(4)
+}).strict();
+export type StickerLookupDiagnostics = z.infer<typeof stickerLookupDiagnosticsSchema>;
 
 // Native maker preparation normally takes 2–4 seconds. Bound a missing or
 // unsafe editor to five seconds, separately from post-click confirmation.

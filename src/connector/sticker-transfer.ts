@@ -1,7 +1,7 @@
 import type { RemoteEvent } from '../shared/connector';
 import type { Snapshot } from '../shared/model';
 import { MAX_STICKER_BYTES, MAX_STICKER_DATA_URL_LENGTH } from '../shared/sticker-limits';
-import { STICKER_PICKER_LOOKUP_MS, STICKER_MAKER_PREPARATION_MS, STICKER_MAKER_CONFIRMATION_MS, sameStickerChat, sameStickerPreparation, type StickerAuthorization, type StickerTicket, type StickerMakerDetail } from '../shared/sticker-transfer';
+import { STICKER_PICKER_LOOKUP_MS, STICKER_MAKER_PREPARATION_MS, STICKER_MAKER_CONFIRMATION_MS, sameStickerChat, sameStickerPreparation, type StickerAuthorization, type StickerTicket, type StickerMakerDetail, type StickerLookupDiagnostics } from '../shared/sticker-transfer';
 import { messageDirection, ownElements, quoteSelector } from './message-direction';
 import { stickerImageState } from './sticker-image-state';
 import { composerProvablyEmpty } from './draft';
@@ -30,19 +30,25 @@ type MakerOwnership = {
   draftBlocked?: boolean; cleanup?: { editor: HTMLElement; promise: Promise<boolean> };
 };
 type Match = { image: HTMLImageElement; button: HTMLElement; source: string };
+type CategoryEndState = { scroll?: HTMLElement; content?: HTMLElement; height: number; viewportHeight: number; position: number; images: { image: HTMLImageElement; source: string }[] };
+type CategoryProgress = {
+  position: number; incomplete: boolean; sawMountedRow: boolean; activatedAt: number; stableSince: number;
+  pendingSince?: number; endState?: CategoryEndState; movement?: { scroll: HTMLElement; from: number };
+};
 type MessageBaseline = { ids: Set<string>; rows: HTMLElement[]; frontier: Set<string>; frontierRow?: HTMLElement; rejected: Set<string>; rejectedRows: WeakSet<HTMLElement> };
 const messageSelector = '[data-id], [data-testid^="conv-msg-"], [data-testid="grouped-sticker-item"]';
 const categoryBudget = 2000, settleWindow = 800, pendingRowWait = 1500;
-// Give an unmounted/loading category time to appear; an idle rendered empty
-// container can start its quiet window immediately. Loading cannot consume
-// the slices reserved for other categories.
-const initialMountGrace = 1500, populatedSettleWindow = 1500, maxScrollSteps = 40;
+// A cold empty category gets an initial mount window before its quiet window.
+// Explicit loading and pending images stay queued through the lookup cap.
+const initialMountGrace = 600, populatedSettleWindow = 1500, maxScrollSteps = 40;
+const diagnosticElapsed = (startedAt: number, maximum = 120_000) => Math.min(maximum, Math.max(0, Date.now() - startedAt));
 
 // DOM-only adapter using native picker/maker controls. No private stores,
 // WhatsApp internal modules, direct upload API or connector re-encoding.
 export class StickerTransferConnector {
   private verified = new Map<string, string>();
-  private prepared?: StickerTicket & Match & { messageIds: Set<string> };
+  private prepared?: StickerTicket & Match & { messageIds: Set<string>; diagnostics: StickerLookupDiagnostics; startedAt: number };
+  private pickerOpenedInSession = false;
   private controller?: AbortController;
   private sendGeneration = 0;
   private sendingGeneration?: number;
@@ -264,10 +270,12 @@ export class StickerTransferConnector {
   }
   private makerActive = false;
   async make(ticket: StickerTicket, image: string) {
-    if (this.makerActive) { this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false, reason: 'editor-unavailable', detail: 'maker-busy' }); return; }
+    const startedAt = Date.now();
+    const result = (event: Extract<RemoteEvent, { type: 'stickerSent' }>) => this.emit({ ...event, diagnostics: { totalMs: diagnosticElapsed(startedAt), categories: [] } });
+    if (this.makerActive) { result({ type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false, reason: 'editor-unavailable', detail: 'maker-busy' }); return; }
     const initial = this.read(), initialMessageIds = this.messageIdentities();
     if (!this.composerEmpty()) {
-      this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false, reason: 'draft', detail: 'draft-present' }); return;
+      result({ type: 'stickerSent', nonce: ticket.nonce, clicked: false, confirmed: false, reason: 'draft', detail: 'draft-present' }); return;
     }
     this.makerActive = true;
     this.cancel();
@@ -441,10 +449,10 @@ export class StickerTransferConnector {
       this.makerActive = false;
       if (this.controller === controller) this.controller = undefined;
       if (draftBlocked) {
-        this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked, confirmed: false, reason: 'draft', detail: 'draft-appeared' });
+        result({ type: 'stickerSent', nonce: ticket.nonce, clicked, confirmed: false, reason: 'draft', detail: 'draft-appeared' });
       } else if (generation === this.sendGeneration) {
         if (changed) this.emit({ type: 'stickerCancelled', nonce: ticket.nonce, reason: 'chat-changed', detail: 'chat-changed' });
-        else this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked, confirmed, ...(!confirmed ? { reason: clicked ? 'unconfirmed' as const : 'editor-unavailable' as const, detail } : {}) });
+        else result({ type: 'stickerSent', nonce: ticket.nonce, clicked, confirmed, ...(!confirmed ? { reason: clicked ? 'unconfirmed' as const : 'editor-unavailable' as const, detail } : {}) });
       }
     }
   }
@@ -597,7 +605,7 @@ export class StickerTransferConnector {
     if (!panel) return { content: undefined, loading: true };
     const containerSelector = '[role="tabpanel"], [role="grid"], [role="list"]';
     const content = scroll ?? (panel.matches(containerSelector) && visible(panel) ? panel : [...panel.querySelectorAll<HTMLElement>(`${containerSelector}, ul, [data-testid="sticker-item"]`)].find(visible));
-    const loadingSelector = '[aria-busy="true"], [role="progressbar"], [data-icon*="spinner"], [data-testid*="spinner"], [data-testid*="loading"], [data-testid*="skeleton"]';
+    const loadingSelector = '[aria-busy="true"], [role="progressbar"], [data-icon*="spinner"], [data-testid*="spinner"], [data-testid*="loading"], [data-testid*="skeleton"], [data-testid*="placeholder"]';
     // The panel also contains navigation. Its presence alone does not prove
     // that the category content has mounted, unlike a list/grid, row or viewport.
     return { content, loading: !content || (panel.matches(loadingSelector) && visible(panel)) || [...panel.querySelectorAll<HTMLElement>(loadingSelector)].some(visible) };
@@ -607,12 +615,28 @@ export class StickerTransferConnector {
     for (const message of this.read().messages) messageIds.add(message.id);
     this.cancel(); const controller = new AbortController(); this.controller = controller;
     const signal = controller.signal;
-    const lookupDeadline = Date.now() + STICKER_PICKER_LOOKUP_MS;
+    const startedAt = Date.now();
+    const cold = !this.pickerOpenedInSession && !this.picker();
+    const diagnostics: StickerLookupDiagnostics = { totalMs: 0, categories: [] };
+    const trace = (name: StickerLookupDiagnostics['categories'][number]['name']) => {
+      const previous = diagnostics.categories.find(entry => entry.name === name);
+      if (previous) return previous;
+      const entry = { name, activatedMs: diagnosticElapsed(startedAt, STICKER_PICKER_LOOKUP_MS), firstImageMs: null as number | null, settledMs: null as number | null, loadingSeen: false, imagesSeen: 0, found: false };
+      diagnostics.categories.push(entry); return entry;
+    };
+    const observe = (entry: StickerLookupDiagnostics['categories'][number], loading = false) => {
+      const images = this.images();
+      entry.imagesSeen = Math.min(100_000, Math.max(entry.imagesSeen, images.length));
+      if (images.some(image => stickerImageState(image) === 'ready')) entry.firstImageMs ??= diagnosticElapsed(startedAt, STICKER_PICKER_LOOKUP_MS);
+      entry.loadingSeen ||= loading || images.some(image => stickerImageState(image) === 'pending');
+    };
+    const lookupDeadline = startedAt + STICKER_PICKER_LOOKUP_MS;
     const deadline = setTimeout(() => controller.abort(), STICKER_PICKER_LOOKUP_MS);
     let match: Match | undefined;
     try {
       if (!this.valid(ticket, signal)) return;
       await this.openPicker(lookupDeadline);
+      if (this.picker()) this.pickerOpenedInSession = true;
       if (!this.picker() || !this.valid(ticket, signal)) return;
       const stickerTab = this.picker()?.querySelector<HTMLElement>('[data-testid="expressions-btn-sticker"]');
       if (stickerTab && stickerTab.getAttribute('aria-selected') !== 'true') { stickerTab.click(); await this.wait(ticket, signal, 200); }
@@ -625,61 +649,85 @@ export class StickerTransferConnector {
       const selectedPacks = [...panel.querySelectorAll<HTMLElement>('button[aria-selected="true"], [role="button"][aria-selected="true"], [role="tab"][aria-selected="true"]')].filter(tab =>
         !tab.contains(favorites) && !tab.contains(recent) && !tab.dataset.testid?.startsWith('expressions-') && !/store/i.test(tab.dataset.testid ?? '') && !tab.querySelector('[data-testid^="expressions-"], [data-testid*="store"]') && !tab.closest('[data-testid="sticker-item"]') && visible(tab));
       const pack = selectedPacks.length === 1 ? selectedPacks[0] : undefined;
-      let allExhausted = true;
-      const categories: (string | HTMLElement)[] = [
+      const unfinished = new Set<string | HTMLElement | undefined>();
+      const categories: readonly (string | HTMLElement)[] = [
         ...(favorites && visible(favorites) ? ['panel-starred'] : []),
         ...(recent && visible(recent) ? ['panel-recent'] : []),
         ...(pack ? [pack] : [])
       ];
       // A picker with no category navigation still exposes its current grid.
-      const searches: (string | HTMLElement | undefined)[] = categories.length ? categories : [undefined];
+      const searches: (string | HTMLElement | undefined)[] = categories.length ? [...categories] : [undefined];
+      const unsearched = new Set(searches);
+      const progress = new Map<string | HTMLElement | undefined, CategoryProgress>();
+      let active: { category: string | HTMLElement | undefined; tab?: HTMLElement; panel: HTMLElement } | undefined;
       // The mounted grid may belong to a pack with no selected tab we can
       // safely rediscover. Poll pending originals before switching away,
       // while reserving search time for the known native category controls.
-      const currentGridStarted = Date.now();
-      const currentGridDeadline = Math.floor(currentGridStarted + Math.min(categoryBudget, (lookupDeadline - currentGridStarted) / (searches.length + 1)));
+      const currentGridDeadline = Math.floor(Math.min(lookupDeadline, Date.now() + Math.min(categoryBudget, (lookupDeadline - Date.now()) / (categories.length + 1))));
+      const currentTrace = trace('current');
       do {
+        observe(currentTrace, this.categoryState(this.scrollContainer()).loading);
         match = await this.find(ticket, signal, currentGridDeadline);
+        currentTrace.found = Boolean(match);
         if (match || !categories.length || pack || !this.images().some(image => stickerImageState(image) === 'pending') || Date.now() >= currentGridDeadline) break;
         await this.wait(ticket, signal, Math.min(100, currentGridDeadline - Date.now()));
       } while (Date.now() < currentGridDeadline);
-      for (const [index, category] of searches.entries()) {
+      if (this.images().some(image => stickerImageState(image) === 'pending') && !pack && categories.length) unfinished.add('current');
+      if (!currentTrace.found && !currentTrace.imagesSeen && !currentTrace.loadingSeen) diagnostics.categories.pop();
+      for (const category of searches) {
         if (match) break;
         if (!this.valid(ticket, signal)) return;
         if (Date.now() >= lookupDeadline) break;
-        const activatedAt = Date.now();
-        // Divide the remaining total budget as well, so a slow opening cannot
-        // consume the slices reserved for later categories.
-        const categoryDeadline = Math.floor(activatedAt + Math.min(categoryBudget, (lookupDeadline - activatedAt) / (searches.length - index)));
-        const tab = typeof category === 'string' ? this.picker()?.querySelector<HTMLElement>(`[data-testid="${category}"]`) : category;
+        const visitStartedAt = Date.now();
+        // Incomplete categories return to the queue. Do not let one slow
+        // category prevent checking the others, or discard it after its slice.
+        // Reserve an equal slice for every still-unsearched category when the
+        // picker opens late. After the first pass, unfinished visits rotate.
+        const reservedCategories = Math.max(1, unsearched.size);
+        unsearched.delete(category);
+        const categoryDeadline = Math.floor(Math.min(lookupDeadline, visitStartedAt + Math.min(categoryBudget, (lookupDeadline - visitStartedAt) / reservedCategories)));
+        const entry = trace(category === 'panel-starred' ? 'favorites' : category === 'panel-recent' ? 'recent' : category ? 'open-pack' : 'current');
+        const tab = typeof category === 'string' ? this.picker()?.querySelector<HTMLElement>(`[data-testid="${category}"]`) ?? undefined : category;
+        const previous = progress.get(category);
+        const continuous = previous && active && active.category === category && active.tab === tab && active.panel === this.picker() && tab?.getAttribute('aria-selected') !== 'false';
         if (category) {
-          if (!tab || !tab.isConnected || !this.picker()?.contains(tab) || !visible(tab)) { allExhausted = false; continue; }
-          tab.click();
+          if (!tab || !tab.isConnected || !this.picker()?.contains(tab) || !visible(tab)) { unfinished.add(category); continue; }
+          if (!continuous) tab.click();
         }
+        active = { category, tab, panel: this.picker()! };
+        const activatedAt = continuous ? previous.activatedAt : visitStartedAt;
         let scroll = this.scrollContainer();
-        let resetScroll = true, scrollSteps = 0, stableSince = 0, pollDelay = 0;
-        let pendingSince: number | undefined, sawMountedRow = false, incomplete = false, exhausted = false;
-        let movement: { scroll: HTMLElement; from: number } | undefined;
-        let endState: { scroll?: HTMLElement; content?: HTMLElement; height: number; viewportHeight: number; position: number; images: { image: HTMLImageElement; source: string }[] } | undefined;
+        let resetScroll = !continuous, scrollSteps = 0, stableSince = continuous ? previous.stableSince : 0, pollDelay = 0;
+        let pendingSince = continuous ? previous.pendingSince : undefined, sawMountedRow = previous?.sawMountedRow ?? false, incomplete = previous?.incomplete ?? false, exhausted = false;
+        let movement = continuous ? previous.movement : undefined;
+        let endState = continuous ? previous.endState : undefined;
         while (Date.now() < categoryDeadline) {
           if (pollDelay) await this.wait(ticket, signal, Math.min(pollDelay, categoryDeadline - Date.now()));
+          // One final, synchronous settlement check belongs to this slice.
+          // It cannot start another wait, hash, or scroll at the boundary.
+          const atBoundary = Date.now() >= categoryDeadline;
           pollDelay = 100;
           // A pending neighbor never hides a ready original, including the row
           // mounted when a user-opened picker is already scrolled down.
-          match = await this.find(ticket, signal, categoryDeadline);
+          if (!atBoundary) match = await this.find(ticket, signal, categoryDeadline);
           if (!this.valid(ticket, signal)) throw new Error('Cancelled');
-          if (match) break;
+          observe(entry);
+          if (match) { entry.found = true; break; }
           scroll = scroll?.isConnected ? scroll : this.scrollContainer();
           if (resetScroll) {
             resetScroll = false;
-            if (scroll && scroll.scrollTop > 0) {
+            // Resume a sliced scan instead of repeatedly searching only its
+            // first rows. Check the mounted row before restoring the position.
+            const position = previous?.position ?? 0;
+            if (scroll && scroll.scrollTop !== position) {
+              if (Date.now() >= categoryDeadline) break;
               movement = { scroll, from: scroll.scrollTop };
-              scroll.scrollTop = 0; pollDelay = 400; continue;
+              scroll.scrollTop = position; pollDelay = 400; continue;
             }
           }
           // A stuck/replaced viewport is incomplete, never proof of absence.
           if (movement) {
-            if (scroll !== movement.scroll || scroll.scrollTop === movement.from) { incomplete = true; break; }
+            if (scroll !== movement.scroll || scroll.scrollTop === movement.from) { movement = undefined; incomplete = true; break; }
             movement = undefined;
           }
           const atEnd = !scroll || scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2;
@@ -691,23 +739,29 @@ export class StickerTransferConnector {
             return atEnd || !viewport || (rect.bottom > viewport.top && rect.top < viewport.bottom);
           });
           const { content, loading } = this.categoryState(scroll);
-          // Explicit loading and populated partial batches each get mount grace.
-          if (loading) {
+          // Visible loading holds exhaustion open through subsequent visits.
+          const coldMount = cold && !sawMountedRow && Date.now() - activatedAt < initialMountGrace;
+          observe(entry, loading || coldMount);
+          if (loading || coldMount) {
             endState = undefined;
-            if (Date.now() - activatedAt < initialMountGrace) continue;
-            incomplete = true; break;
+            if (atBoundary) break;
+            continue;
           }
           const pending = rowImages.some(image => stickerImageState(image) === 'pending') || (!rowImages.length && Boolean(scroll || sawMountedRow));
           if (pending) {
             endState = undefined;
             pendingSince ??= Date.now();
-            if (Date.now() - pendingSince < pendingRowWait) continue;
+            if (atEnd || Date.now() - pendingSince < pendingRowWait) {
+              if (atBoundary) break;
+              continue;
+            }
             incomplete = true;
-            // Skip a stuck virtual row to examine later rows. At the end there
-            // is no remaining progress to make, so reserve time for Favorites/Recent.
-            if (atEnd) break;
+            // Skip a stuck virtual row to examine later rows. The incomplete
+            // category remains queued even if the rest of its grid settles.
           } else pendingSince = undefined;
           if (atEnd) {
+            // Growth/replacement can restart settling, but never extend this
+            // visit. An unsettled grid returns after the other categories.
             const state = { scroll, content, height: scroll?.scrollHeight ?? 0, viewportHeight: scroll?.clientHeight ?? 0, position: scroll?.scrollTop ?? 0, images: images.map(image => ({ image, source: image.currentSrc || image.src })) };
             const unchanged = endState && state.scroll === endState.scroll && state.content === endState.content && state.height === endState.height && state.viewportHeight === endState.viewportHeight && state.position === endState.position && state.images.length === endState.images.length && state.images.every((entry, i) => entry.image === endState!.images[i].image && entry.source === endState!.images[i].source);
             if (!unchanged) stableSince = Date.now();
@@ -717,38 +771,50 @@ export class StickerTransferConnector {
             const quietWindow = images.length || sawMountedRow ? populatedSettleWindow : settleWindow;
             if (Date.now() - stableSince >= quietWindow) {
               const currentImages = this.images();
-              if (this.categoryState(scroll).content === content && (this.scrollContainer() ?? scroll) === scroll && (!scroll || (scroll.isConnected && scroll.scrollHeight === state.height && scroll.clientHeight === state.viewportHeight && scroll.scrollTop === state.position)) && currentImages.length === state.images.length && currentImages.every((image, i) => image === state.images[i].image && (image.currentSrc || image.src) === state.images[i].source && stickerImageState(image) !== 'pending')) {
+              const currentState = this.categoryState(scroll);
+              if (!currentState.loading && currentState.content === content && (this.scrollContainer() ?? scroll) === scroll && (!scroll || (scroll.isConnected && scroll.scrollHeight === state.height && scroll.clientHeight === state.viewportHeight && scroll.scrollTop === state.position)) && currentImages.length === state.images.length && currentImages.every((image, i) => image === state.images[i].image && (image.currentSrc || image.src) === state.images[i].source && stickerImageState(image) !== 'pending')) {
                 exhausted = !incomplete;
+                entry.settledMs = diagnosticElapsed(startedAt, STICKER_PICKER_LOOKUP_MS);
                 break;
               }
               endState = undefined;
             }
           } else {
             endState = undefined;
-            if (scrollSteps >= maxScrollSteps) { incomplete = true; break; }
+            if (Date.now() >= categoryDeadline) break;
+            if (Date.now() - visitStartedAt >= categoryBudget || scrollSteps >= maxScrollSteps) { incomplete = true; break; }
             movement = { scroll: scroll!, from: scroll!.scrollTop };
             scroll!.scrollTop += Math.max(100, scroll!.clientHeight * .7);
             scrollSteps++; pendingSince = undefined; pollDelay = 400;
           }
+          if (atBoundary) break;
         }
+        // After completing an incomplete scan, revisit rows skipped while
+        // pending. Otherwise preserve progress through a long virtual grid.
+        const restart = incomplete && (!scroll || scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2);
+        progress.set(category, { position: restart ? 0 : scroll?.scrollTop ?? 0, incomplete: restart ? false : incomplete, sawMountedRow, activatedAt, stableSince, pendingSince, endState: restart ? undefined : endState, movement: restart ? undefined : movement });
+        if (restart) active = undefined;
         if (match) break;
-        allExhausted &&= exhausted;
+        if (exhausted) unfinished.delete(category);
+        else { unfinished.add(category); searches.push(category); }
       }
       // Incomplete categories are not proof of absence. Check late ready rows
       // only within the remaining total budget, then report missing so the
       // user can choose Send still.
-      while (!match && !allExhausted && Date.now() < lookupDeadline) {
+      while (!match && unfinished.size > 0 && Date.now() < lookupDeadline) {
         await this.wait(ticket, signal, Math.min(100, lookupDeadline - Date.now()));
         match = await this.find(ticket, signal, lookupDeadline);
       }
-      if (match && this.valid(ticket, signal)) { match.image.scrollIntoView({ block: 'center' }); this.prepared = { ...ticket, ...match, messageIds }; }
+      if (match && this.valid(ticket, signal)) { match.image.scrollIntoView({ block: 'center' }); this.prepared = { ...ticket, ...match, messageIds, diagnostics, startedAt }; }
     } catch { /* A cancelled/changed/unavailable picker cannot grant sending permission. */ }
     finally {
       clearTimeout(deadline);
       if (this.controller === controller) {
         this.controller = undefined;
+        diagnostics.totalMs = diagnosticElapsed(startedAt);
+        if (!this.prepared) diagnostics.reason = Date.now() >= lookupDeadline ? 'lookup-cap' : !sameStickerChat(ticket.target, this.read()) ? 'chat-changed' : !this.picker() ? 'picker-unavailable' : 'not-found';
         if (!this.prepared || !this.valid(ticket, signal)) this.closeOpenedPicker();
-        this.emit({ type: 'stickerPrepared', nonce: ticket.nonce, found: Boolean(this.prepared && this.valid(ticket, signal)) });
+        this.emit({ type: 'stickerPrepared', nonce: ticket.nonce, found: Boolean(this.prepared && this.valid(ticket, signal)), diagnostics });
       }
     }
   }
@@ -780,6 +846,6 @@ export class StickerTransferConnector {
     }
     if (generation === this.sendGeneration) this.closeOpenedPicker();
     if (this.sendingGeneration === generation) this.sendingGeneration = undefined;
-    this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked, confirmed, ...(clicked && !confirmed ? { reason: 'unconfirmed' as const, detail: 'confirm-timeout' as const } : {}) });
+    this.emit({ type: 'stickerSent', nonce: ticket.nonce, clicked, confirmed, ...(prepared ? { diagnostics: { ...prepared.diagnostics, totalMs: diagnosticElapsed(prepared.startedAt) } } : {}), ...(clicked && !confirmed ? { reason: 'unconfirmed' as const, detail: 'confirm-timeout' as const } : {}) });
   }
 }
