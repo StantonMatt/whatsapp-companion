@@ -1,11 +1,12 @@
 import { z } from 'zod';
 import { MAX_STICKER_BYTES } from './sticker-limits';
 import type { Snapshot } from './model';
+import { readChatTitle } from './chat-title';
 
 export const DIRECT_SHAPE = 'direct-v1:active-get:upload-qpl:key:ephemeral:send-tuple';
 export const directDestinationSchema = z.object({
   wid: z.string().max(100).regex(/^\d+(?:-\d+)?@(c\.us|g\.us|lid)$/),
-  type: z.enum(['user', 'group', 'lid']), title: z.string().min(1).max(150)
+  type: z.enum(['user', 'group', 'lid']), title: z.string().min(1).max(1024)
 }).strict().refine(d => d.type === (d.wid.endsWith('@lid') ? 'lid' : d.wid.endsWith('@g.us') ? 'group' : 'user'));
 export type DirectDestination = z.infer<typeof directDestinationSchema>;
 const fingerprintSchema = z.string().max(180).regex(/^direct-v1:active-get:upload-qpl:key:ephemeral:send-tuple\|\d+(?:\.\d+){2,}$/);
@@ -17,7 +18,7 @@ export const directDetailSchema = z.enum([
   'WAWebWidFactory.createWid missing', 'Collections.Chat.get missing', 'Collections.Msg.get missing',
   'Collections.Chat.getActive/active/models missing', 'Collections.Chat.getActive result invalid',
   'Collections.Chat.active result invalid', 'Collections.Chat.getModelsArray result invalid', 'Collections.Chat.models result invalid',
-  'Collections.Chat.active ambiguous', 'Chat.id invalid', 'Chat.title unavailable', 'Chat.title mismatch',
+  'Collections.Chat.active ambiguous', 'Chat.id invalid', 'Chat.title unavailable', 'Chat.header title missing', 'Chat.title mismatch',
   'WAWebUploadManager.encryptAndUpload missing', 'WAWebStartMediaUploadQpl.startMediaUploadQpl missing',
   'WAWebSendMsgChatAction.addAndSendMsgToChat missing', 'WAWebMsgKey constructor missing', 'WAWebMsgKey.newId missing',
   'WAWebGetEphemeralFieldsMsgActionsUtils.getEphemeralFields missing',
@@ -57,6 +58,7 @@ export type DirectArguments = z.infer<typeof directArgumentsSchema>;
 export function matchesDirectDestination(destination: DirectDestination, snapshot: Snapshot) {
   // PN and LID are distinct identities. Never translate one into the other by title.
   const peer = snapshot.chatId?.replace(/@s\.whatsapp\.net$/, '@c.us');
-  return snapshot.conversationOpen && destination.title === snapshot.name && (!peer || peer === destination.wid) &&
+  const title = readChatTitle(destination.title);
+  return snapshot.conversationOpen && Boolean(title) && title === readChatTitle(snapshot.name) && (!peer || peer === destination.wid) &&
     (snapshot.kind !== 'group' || destination.type === 'group') && (snapshot.kind !== 'direct' || destination.type !== 'group');
 }

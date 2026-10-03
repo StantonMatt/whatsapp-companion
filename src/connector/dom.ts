@@ -11,6 +11,7 @@ import { StickerPickerLayout } from './sticker-picker-layout';
 import { captureStickerPicker } from './sticker-picker-capture';
 import { Navigation } from './navigation';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
+import { readChatTitle } from '../shared/chat-title';
 import type { Snapshot, Message } from '../shared/model';
 import { snapshotKey, suggestionKey } from '../core/suggestions';
 import type { RemoteCommand, RemoteEvent, AccountSafetyReason } from '../shared/connector';
@@ -159,7 +160,7 @@ export class DomConnector {
     const emptyComposer = composerProvablyEmpty(editor, this.composing);
     const draft = emptyComposer ? '' : editor ? readDraft(editor) : '';
     const title = main?.querySelector('header [data-testid="conversation-info-header-chat-title"]');
-    const name = (title?.textContent ?? main?.querySelector('header [title]')?.getAttribute('title') ?? main?.querySelector('header')?.textContent ?? '').trim().slice(0, 150);
+    const name = readChatTitle(title ?? main?.querySelector('header [title]') ?? main?.querySelector('header')).slice(0, 1024);
     const selected = this.doc.querySelector('#pane-side [aria-selected="true"]');
     const nodes = [...(main?.querySelectorAll<HTMLElement>('[data-id]') ?? [])].filter(n => !n.closest(quoteSelector) && (peerFromMessageId(n.dataset.id ?? '') || (/^[A-Za-z0-9_-]{6,150}$/.test(n.dataset.id ?? '') && n.dataset.testid === `conv-msg-${n.dataset.id}`)));
     const peers = [...new Set(nodes.map(n => peerFromMessageId(n.dataset.id!)).filter((id): id is string => id !== null))];

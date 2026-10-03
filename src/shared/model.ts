@@ -66,7 +66,7 @@ export const messageSchema = z.object({
 }).strict();
 export type Message = z.infer<typeof messageSchema>;
 export const snapshotSchema = z.object({
-  chatId: chatIdSchema.nullable(), name: z.string().max(150), kind: z.enum(['direct', 'group', 'unknown']),
+  chatId: chatIdSchema.nullable(), name: z.string().max(1024), kind: z.enum(['direct', 'group', 'unknown']),
   messages: z.array(messageSchema).max(30), draft: z.string().max(8000),
   // A visible, stable conversation can be open even when its composer is missing.
   conversationOpen: z.boolean(),

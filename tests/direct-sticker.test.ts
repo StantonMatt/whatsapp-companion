@@ -108,11 +108,21 @@ test('binding cross-checks names/kinds and treats PN and LID as distinct exact d
 test('arguments bound actual decoded bytes, hash, nonce and all keys', () => {
   const args = { phase: 'send', nonce, deadline: Date.now() + 25_000, destination, fingerprint, base64: bytes.toString('base64'), expectedHash: id };
   expect(directArgumentsSchema.safeParse(args).success).toBe(true);
-  for (const change of [{ base64: Buffer.alloc(1024 * 1024 + 1).toString('base64') }, { expectedHash: 'invalid' }, { nonce: 'bad' }, { extra: 'eval' }, { destination: { ...destination, title: 'x'.repeat(151) } },
+  for (const change of [{ base64: Buffer.alloc(1024 * 1024 + 1).toString('base64') }, { expectedHash: 'invalid' }, { nonce: 'bad' }, { extra: 'eval' }, { destination: { ...destination, title: 'x'.repeat(1025) } },
     ...[undefined, 0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1].map(deadline => ({ deadline }))]) expect(directArgumentsSchema.safeParse({ ...args, ...change }).success).toBe(false);
   expect(directArgumentsSchema.safeParse({ ...args, base64: Buffer.alloc(1024 * 1024).toString('base64') }).success).toBe(true);
   expect(directArgumentsSchema.safeParse({ phase: 'resolve', nonce, deadline: Date.now() + 2500 }).success).toBe(true);
   expect(directArgumentsSchema.safeParse({ phase: 'resolve', nonce, deadline: Date.now() + 2500, base64: 'unexpected' }).success).toBe(false);
+});
+test('destination binding uses normalized exact titles without weakening peer or kind checks', () => {
+  const titled = { ...destination, title: 'José 😀 Smith' };
+  const matching = { ...snapshot, name: '\u200eJose\u0301\u00a0😀   Smith\u2069' };
+  expect(matchesDirectDestination(titled, matching)).toBe(true);
+  for (const change of [{ name: 'José 😀' }, { name: 'José 😎 Smith' }, { chatId: '777@lid' }, { kind: 'group' as const }]) {
+    expect(matchesDirectDestination(titled, { ...matching, ...change })).toBe(false);
+  }
+  expect(matchesDirectDestination({ ...destination, title: '\u200e' }, { ...snapshot, name: '\u200f' })).toBe(false);
+  expect(directDestinationSchema.safeParse({ ...destination, title: 'x'.repeat(200) }).success).toBe(true);
 });
 test('result validation rejects contradictory success/fallback, raw extras and oversized values', () => {
   const { sent } = setup(); expect(directSendSchema.safeParse(sent).success).toBe(true);

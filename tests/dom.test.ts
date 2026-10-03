@@ -91,6 +91,17 @@ function modernFixture() {
   message.dataset.id = 'ABC123456'; message.dataset.testid = 'conv-msg-ABC123456';
   return editor;
 }
+test.each([
+  ['\u200eJose\u0301\u00a0 <img class="emoji" alt="😀">  Smith\u2069', 'José 😀 Smith'],
+  ['Alex <span class="emoji" data-plain-text="👩🏽‍💻"></span>', 'Alex 👩🏽‍💻'],
+  ['Alex <span alt="😀" style="background-image:url(emoji.png)"></span>', 'Alex 😀'],
+  ['A'.repeat(200), 'A'.repeat(200)]
+])('connector preserves the normalized full header title %s', (html, name) => {
+  modernFixture();
+  const node = document.querySelector('[data-testid="conversation-info-header-chat-title"]')!;
+  node.setAttribute('title', 'Stale tooltip'); node.innerHTML = html;
+  expect(snapshotSchema.parse(new DomConnector(document, () => {}).read()).name).toBe(name);
+});
 test('opaque live message IDs permit global assistance without inventing a persistent identity or sender', () => {
   vi.useFakeTimers(); modernFixture(); const connector = new DomConnector(document, () => {});
   expect(connector.read().ready).toBe(false); vi.advanceTimersByTime(600);

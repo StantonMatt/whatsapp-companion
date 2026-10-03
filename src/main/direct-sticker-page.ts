@@ -1,9 +1,10 @@
 import { directArgumentsSchema, type DirectArguments, type DirectDetail, type DirectSendPhase } from '../shared/direct-sticker';
+import { readChatTitle } from '../shared/chat-title';
 
 // Self-contained function: main serializes this bundled source, never page data
 // as code. Its only page-global state is a non-callable in-flight token; it
 // installs no page-callable send endpoint or desktop API.
-export async function directStickerMain(args: DirectArguments) {
+export async function directStickerMain(readTitle: typeof readChatTitle, args: DirectArguments) {
   const page = window as unknown as {
     require?: (name: string) => any; Debug?: { VERSION?: string };
     __whatsappCompanionDirectStickerInFlight?: { nonce: string; deadline: number };
@@ -129,12 +130,15 @@ export async function directStickerMain(args: DirectArguments) {
     };
     const describe = (chat: any) => {
       const wid = serialized(chat?.id);
-      const titles = [chat.formattedTitle, chat.name, chat.contact?.name].filter((t): t is string => typeof t === 'string' && t.length > 0 && t.length <= 150);
-      if (!titles.length) fail('chat-unavailable', 'Chat.title unavailable');
+      const titleFailure = args.phase === 'send' ? 'chat-changed' : 'chat-unavailable';
+      const titles = [chat.formattedTitle, chat.name, chat.contact?.name, wid.endsWith('@g.us') ? chat.groupMetadata?.subject : undefined]
+        .filter((t): t is string => typeof t === 'string').map(t => readTitle(t)).filter(t => t.length > 0 && t.length <= 1024);
+      if (!titles.length) fail(titleFailure, 'Chat.title unavailable');
       const node = document.querySelector('#main header [data-testid="conversation-info-header-chat-title"]');
-      const visibleTitle = node?.getAttribute('title') || node?.textContent?.trim();
+      const visibleTitle = readTitle(node);
+      if (!visibleTitle) fail(titleFailure, 'Chat.header title missing');
       const title = titles.find(t => t === visibleTitle);
-      if (!title) fail(args.phase === 'send' ? 'chat-changed' : 'chat-unavailable', 'Chat.title mismatch');
+      if (!title) fail(titleFailure, 'Chat.title mismatch');
       if (Collections.Chat.get(chat.id) !== chat || !Wid.createWid(wid)?.equals(chat.id)) fail('chat-unavailable', 'Chat.id invalid');
       return { wid, title, type: wid.endsWith('@lid') ? 'lid' as const : wid.endsWith('@g.us') ? 'group' as const : 'user' as const };
     };
@@ -148,7 +152,7 @@ export async function directStickerMain(args: DirectArguments) {
     const titleNode = header?.querySelector('[data-testid="conversation-info-header-chat-title"]');
     const title = () => {
       const n = header?.querySelector('[data-testid="conversation-info-header-chat-title"]');
-      return n?.getAttribute('title') || n?.textContent?.trim();
+      return readTitle(n);
     };
     const headerChanged = (records: MutationRecord[]) => records.some(r => !titleNode?.isConnected ||
       header?.querySelector('[data-testid="conversation-info-header-chat-title"]') !== titleNode ||
@@ -163,7 +167,7 @@ export async function directStickerMain(args: DirectArguments) {
     assertChat();
     // Abort even if the user switches away and back while upload is pending.
     observer = new MutationObserver(records => { changed ||= headerChanged(records); });
-    observer.observe(header!, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['title'] });
+    observer.observe(header!, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['title', 'alt', 'data-plain-text', 'data-emoji', 'class', 'data-testid'] });
     const binary = atob(args.base64);
     if (binary.length < 20 || binary.length > 1024 * 1024) fail('invalid-webp');
     const bytes = Uint8Array.from(binary, c => c.charCodeAt(0)), view = new DataView(bytes.buffer);
@@ -253,5 +257,5 @@ export async function directStickerMain(args: DirectArguments) {
 }
 export function directStickerScript(raw: DirectArguments) {
   const args = directArgumentsSchema.parse(raw);
-  return `(${directStickerMain.toString()})(${JSON.stringify(args)})`;
+  return `(${directStickerMain.toString()}).bind(null, ${readChatTitle.toString()})(${JSON.stringify(args)})`;
 }

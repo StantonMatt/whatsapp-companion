@@ -160,6 +160,77 @@ test.each(['name', 'contact.name', 'formattedTitle-mismatch'])('title fallback %
   expect(await send(args)).toMatchObject({ outcome: 'confirmed' });
 });
 
+test.each([
+  ['emoji img', 'Alex 😀', 'Alex <img class="emoji" alt="😀">', 'Alex 😀'],
+  ['emoji span alt', 'Alex 😀', 'Alex <span alt="😀" style="background-image:url(emoji.png)"></span>', 'Alex 😀'],
+  ['emoji plain text', 'Alex 👩🏽‍💻', 'Alex <span data-testid="emoji" data-plain-text="👩🏽‍💻"></span>', 'Alex 👩🏽‍💻'],
+  ['emoji data attribute', 'Alex 😀', 'Alex <span class="emoji" data-emoji="😀"></span>', 'Alex 😀'],
+  ['emoji presentation selector', 'Alex \u2764', 'Alex <img class="emoji" alt="\u2764\ufe0f">', 'Alex \u2764'],
+  ['bidi marks', '\u200eAlex\u202c', '\u200f\u202aAlex\u202b\u202d\u202e\u2066\u2067\u2068\u2069\ufeff\u061c', 'Alex'],
+  ['whitespace', ' Alex\u00a0\u00a0 Smith  ', '  Alex\u00a0 <span> \tSmith\n</span>', 'Alex Smith'],
+  ['Unicode NFC', 'Jose\u0301', 'José', 'José'],
+  ['Unicode NFD', 'José', 'Jose\u0301', 'José'],
+  ['Unicode with embedded bidi', 'Jose\u200e\u0301', 'José', 'José'],
+  ['long title', 'A'.repeat(200), 'A'.repeat(200), 'A'.repeat(200)],
+  ['raw title over limit', `Alex${' '.repeat(1024)}Smith`, 'Alex Smith', 'Alex Smith']
+])('normalized %s title resolves and stays bound through send', async (_kind, modelTitle, html, expected) => {
+  const chat = page.require('WAWebCollections').Chat.getActive();
+  Object.defineProperty(chat, 'formattedTitle', { value: modelTitle });
+  const node = page.document.querySelector('[data-testid="conversation-info-header-chat-title"]');
+  node.removeAttribute('title'); node.innerHTML = html;
+  const { args } = await prepare();
+  expect((args as any).destination).toMatchObject({ wid: '123456@c.us', title: expected });
+  expect(await send(args)).toMatchObject({ outcome: 'confirmed', to: '123456@c.us' });
+  expect(page.fixtureDirectSent).toHaveLength(1);
+});
+
+test('group subject is a title cross-check only for the already-active group model', async () => {
+  page.fixtureDirectSetPeer('999999@g.us');
+  const chat = page.require('WAWebCollections').Chat.getActive();
+  for (const property of ['formattedTitle', 'name', 'contact']) Object.defineProperty(chat, property, { value: undefined });
+  chat.groupMetadata = { subject: 'Weekend 😀' };
+  const node = page.document.querySelector('[data-testid="conversation-info-header-chat-title"]');
+  node.removeAttribute('title'); node.innerHTML = 'Weekend <img alt="😀" class="emoji">';
+  const { args } = await prepare();
+  expect((args as any).destination).toEqual({ wid: '999999@g.us', title: 'Weekend 😀', type: 'group' });
+  expect(await send(args)).toMatchObject({ outcome: 'confirmed', to: '999999@g.us' });
+});
+
+test.each(['Other chat', 'Alex Smith', 'alex', 'Álex', 'Ａlex'])('different visible title %s fails in both phases even with a matching title attribute', async text => {
+  const { args } = await prepare();
+  const node = page.document.querySelector('[data-testid="conversation-info-header-chat-title"]');
+  node.textContent = text; // Leave title="Alex": the visible content must match.
+  expect(await resolve()).toMatchObject({ status: 'unavailable', code: 'chat-unavailable', detail: 'Chat.title mismatch' });
+  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'not-sent', code: 'chat-changed', detail: 'Chat.title mismatch', uploaded: false, attempted: false });
+  expect(page.fixtureDirectUploads).toHaveLength(0); expect(page.fixtureDirectSent).toHaveLength(0);
+});
+
+test.each(['missing', 'empty', 'format-only'])('%s header title fails closed in both phases', async kind => {
+  const { args } = await prepare();
+  const node = page.document.querySelector('[data-testid="conversation-info-header-chat-title"]');
+  if (kind === 'missing') node.remove();
+  else node.textContent = kind === 'empty' ? '' : '\u200e\u2066\u2069';
+  expect(await resolve()).toMatchObject({ status: 'unavailable', code: 'chat-unavailable', detail: 'Chat.header title missing' });
+  expect(await send(args)).toMatchObject({ status: 'finished', outcome: 'not-sent', code: 'chat-changed', detail: 'Chat.header title missing', uploaded: false, attempted: false });
+  expect(page.fixtureDirectUploads).toHaveLength(0); expect(page.fixtureDirectSent).toHaveLength(0);
+});
+
+test('emoji alt changing away and back during upload still revokes the bound chat', async () => {
+  const chat = page.require('WAWebCollections').Chat.getActive();
+  Object.defineProperty(chat, 'formattedTitle', { value: 'Alex 😀' });
+  const node = page.document.querySelector('[data-testid="conversation-info-header-chat-title"]');
+  node.removeAttribute('title'); node.innerHTML = 'Alex <img class="emoji" alt="😀">';
+  const { args } = await prepare();
+  const upload = page.require('WAWebUploadManager'), original = upload.encryptAndUpload;
+  vi.spyOn(upload, 'encryptAndUpload').mockImplementationOnce(async options => {
+    const result = await original(options), emoji = node.querySelector('img');
+    emoji.alt = '😎'; emoji.alt = '😀';
+    return result;
+  });
+  expect(await send(args)).toMatchObject({ outcome: 'not-sent', code: 'chat-changed', phase: 'uploaded', uploaded: true, attempted: false });
+  expect(page.fixtureDirectSent).toHaveLength(0);
+});
+
 test('LID-only own-identity getter is supported, as on the working spike', async () => {
   delete page.require('WAWebUserPrefsMeUser').getMaybeMePnUser;
   page.fixtureDirectSetPeer('777777@lid');
