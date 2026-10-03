@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, statSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StickerTransfer, stickerRoute } from '../src/core/sticker-transfer';
@@ -431,4 +431,19 @@ test.each([
   s.execute.mockReset().mockResolvedValueOnce(s.resolved).mockResolvedValueOnce(result);
   expect(await s.sender.run(s.ticket, image, 'picker')).toBeUndefined();
   expect(s.stop).toHaveBeenCalledExactlyOnceWith('send-error');
+});
+
+
+test.each(['forget', 'missing'])('direct dispatch re-reads the current verified file after async resolution (%s)', async change => {
+  directory = mkdtempSync(join(tmpdir(), 'direct-file-race-'));
+  const store = new Store(directory), observation = { id, image, firstSeen: 1, lastSeen: 1, searchTerms: '' };
+  store.update(state => { state.stickers.push(store.stickerFiles.write(observation)); });
+  const transfer = new StickerTransfer(), ticket = transfer.begin(id, nonce, transfer.destinationToken(snapshot), snapshot, Date.now(), 'direct', false);
+  const pending = deferred<unknown>(), execute = vi.fn(async () => pending.promise), readSticker = vi.fn((hash: string) => store.readSticker(hash).image);
+  const sender = new DirectStickerSender({ transfer, readSticker, snapshot: () => snapshot, enabled: () => true, disable: vi.fn(), execute, publish: vi.fn(), diagnostics: new StickerSendDiagnostics(directory) });
+  const running = sender.run(ticket, store.readSticker(id).image, 'maker');
+  if (change === 'forget') store.forgetSticker(id); else unlinkSync(join(directory, 'stickers', `${id}.webp`));
+  pending.resolve({ nonce, fingerprint, status: 'resolved', destination }); await running;
+  expect(readSticker).toHaveBeenCalledWith(id); expect(execute).toHaveBeenCalledTimes(1);
+  expect(transfer.send).toMatchObject({ state: 'failed', sent: 'not-sent' });
 });

@@ -2,12 +2,13 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { atomicWrite } from './store';
+import { atomicWrite, syncSavedDirectory } from './store';
 import { pickerLayoutDiagnosticSchema, pickerLayoutEventSchema } from '../shared/sticker-picker-capture';
 import type { RemoteCommand } from '../shared/connector';
 
 const envelopeSchema = z.object({ type: z.literal('stickerPickerLayout'), nonce: z.string().uuid(), result: z.unknown() }).strict();
 export class PickerDiagnostics {
+  private durabilityWarning = false;
   private pending?: { nonce: string; timer: ReturnType<typeof setTimeout> };
   constructor(private options: {
     directory: string; appVersion: string; send: (command: RemoteCommand) => void;
@@ -38,7 +39,8 @@ export class PickerDiagnostics {
       const directory = join(this.options.directory, 'diagnostics');
       mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
       const path = join(directory, `sticker-picker-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-      atomicWrite(path, `${JSON.stringify(diagnostic, null, 2)}\n`);
+      if (this.durabilityWarning) this.durabilityWarning = !syncSavedDirectory(directory, undefined, 'picker:retry');
+      this.durabilityWarning = !atomicWrite(path, `${JSON.stringify(diagnostic, null, 2)}\n`);
       this.options.reveal(path);
       this.options.notify(`Sticker picker layout saved to:\n${path}`);
     } catch { this.options.notify('Sticker picker capture could not be saved. Check disk space and the data directory.'); }

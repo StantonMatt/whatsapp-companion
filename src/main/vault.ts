@@ -1,10 +1,10 @@
 import { safeStorage } from 'electron';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { Provider } from '../shared/model';
-import { atomicWrite } from './store';
+import { atomicWrite, syncSavedDirectory, type StorageFault } from './store';
 
 const vaultSchema = z.object({ openai: z.string().optional(), anthropic: z.string().optional(), backend: z.enum(['kwallet', 'kwallet5', 'kwallet6', 'gnome_libsecret']).optional() }).strict();
 export function configuredBackend(directory: string) {
@@ -15,9 +15,15 @@ export class Vault {
   private session = new Map<Provider, string>();
   private file: string;
   private encrypted: z.infer<typeof vaultSchema>;
-  constructor(directory: string) {
+  durabilityWarning = false;
+  constructor(directory: string, private fault?: StorageFault) {
     this.file = join(directory, 'credentials.json');
     this.encrypted = existsSync(this.file) ? vaultSchema.parse(JSON.parse(readFileSync(this.file, 'utf8'))) : {};
+  }
+  private save(next: z.infer<typeof vaultSchema>, applySession: () => void) {
+    if (this.durabilityWarning) this.durabilityWarning = !syncSavedDirectory(dirname(this.file), this.fault, 'vault:retry');
+    this.durabilityWarning = !atomicWrite(this.file, JSON.stringify(next), this.fault, 'vault');
+    this.encrypted = next; applySession();
   }
   secure() { return safeStorage.isEncryptionAvailable() && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'); }
   has(provider: Provider) { return this.session.has(provider) || Boolean(this.encrypted[provider]); }
@@ -34,16 +40,16 @@ export class Vault {
       if (!this.secure()) throw new Error('Secure OS storage is unavailable. Unlock KWallet or Secret Service, or use a session-only key.');
       const backend = process.platform === 'linux' ? safeStorage.getSelectedStorageBackend() : undefined;
       const next = vaultSchema.parse({ ...this.encrypted, ...(backend ? { backend } : {}), [provider]: safeStorage.encryptString(key).toString('base64') });
-      atomicWrite(this.file, JSON.stringify(next)); this.encrypted = next;
+      this.save(next, () => this.session.set(provider, key)); return;
     } else if (this.encrypted[provider] !== undefined) {
       const next = { ...this.encrypted }; delete next[provider];
-      atomicWrite(this.file, JSON.stringify(next)); this.encrypted = next;
+      this.save(next, () => this.session.set(provider, key)); return;
     }
     this.session.set(provider, key);
   }
   remove(provider: Provider) {
     const next = { ...this.encrypted }; delete next[provider];
-    atomicWrite(this.file, JSON.stringify(next)); this.encrypted = next; this.session.delete(provider);
+    this.save(next, () => this.session.delete(provider));
   }
 }
 

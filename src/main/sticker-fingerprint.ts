@@ -1,4 +1,4 @@
-import type { Sticker } from '../shared/model';
+import type { Sticker, DiscoveredSticker } from '../shared/model';
 import { storedSticker } from './sticker-bytes';
 
 export type StickerFingerprint = NonNullable<Sticker['fingerprint']>;
@@ -41,7 +41,7 @@ async function decodeWithDeadline(image: string, decode: StickerPixels, signal?:
   }
 }
 
-export async function fingerprintSticker(sticker: Sticker, decode: StickerPixels, signal?: AbortSignal): Promise<StickerFingerprint> {
+export async function fingerprintSticker(sticker: DiscoveredSticker, decode: StickerPixels, signal?: AbortSignal): Promise<StickerFingerprint> {
   const { animated } = storedSticker(sticker.image, sticker.id);
   checkStickerDimensions(sticker.image);
   const pixels = await decodeWithDeadline(sticker.image, decode, signal);

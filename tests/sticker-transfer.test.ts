@@ -296,7 +296,7 @@ describe('sticker panel action races', () => {
     document.body.replaceChildren();
     vi.unstubAllGlobals();
   });
-  const sticker = (id: string, lastSeen: number, searchTerms = 'saved terms'): Sticker => ({ id, lastSeen, firstSeen: 0, searchTerms, image: 'data:image/webp;base64,UklGRg==' });
+  const sticker = (id: string, lastSeen: number, searchTerms = 'saved terms'): Sticker => ({ id, lastSeen, firstSeen: 0, searchTerms, kind: 'static', size: 12 });
   const panelStatus = (stickers = [sticker(id, 1)]): Status => ({
     sequence: 1, runtimePaused: false, state: { ...initialState(), stickers },
     chat: { chatId: snapshot.chatId, settingsId: snapshot.settingsId, name: snapshot.name, kind: snapshot.kind, ready: true, canSendSticker: true, destinationToken },

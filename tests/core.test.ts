@@ -1,8 +1,9 @@
 import { describe, test, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { initialState, emptySnapshot, defaultAuto, actionSchema, stickerSchema, snapshotSchema, type Snapshot } from '../src/shared/model';
+import { initialState, emptySnapshot, defaultAuto, actionSchema, stickerSchema, discoveredStickerSchema, snapshotSchema, type Snapshot } from '../src/shared/model';
 import { resolveSettings, setPreferences, resetPreferences, resetStylePreferences } from '../src/core/settings';
 import { learnStyle, styleFor, styleSamples } from '../src/core/style';
 import { SuggestionGate, snapshotKey, suggestionKey, suggestionContext } from '../src/core/suggestions';
@@ -17,21 +18,29 @@ import type { Vault } from '../src/main/vault';
 import type { RemoteCommand } from '../src/shared/connector';
 import { StatusCache, statusUpdate } from '../src/core/status';
 
-test('larger animated sticker images survive schema validation and tagged persistence', () => {
-  const image = `data:image/webp;base64,${Buffer.alloc(966752).toString('base64')}`;
-  const sticker = { id: 'b'.repeat(64), image, searchTerms: 'cat, surprised, gato, sorpresa', firstSeen: 1, lastSeen: 1 };
-  expect(stickerSchema.safeParse(sticker).success).toBe(true);
-  expect(stickerSchema.safeParse({ ...sticker, image: `data:image/webp;base64,${Buffer.alloc(1048580).toString('base64')}` }).success).toBe(false);
+test('larger animated stickers persist as metadata without inline images', () => {
+  const bytes = Buffer.alloc(966752); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WEBP', 8);
+  bytes.write('ANIM', 12); bytes.writeUInt32LE(bytes.length - 20, 16);
+  const image = `data:image/webp;base64,${bytes.toString('base64')}`;
+  const sticker = { id: createHash('sha256').update(bytes).digest('hex'), image, searchTerms: 'cat, surprised, gato, sorpresa', firstSeen: 1, lastSeen: 1 };
+  expect(discoveredStickerSchema.safeParse(sticker).success).toBe(true);
+  expect(discoveredStickerSchema.safeParse({ ...sticker, image: `data:image/webp;base64,${Buffer.alloc(1048580).toString('base64')}` }).success).toBe(false);
   const dir = mkdtempSync(join(tmpdir(), 'companion-large-sticker-'));
   try {
-    const store = new Store(dir); store.update(state => upsertSticker(state.stickers, sticker));
+    const store = new Store(dir), metadata = store.stickerFiles.write(sticker); store.update(state => upsertSticker(state.stickers, metadata));
     const restored = new Store(dir).state.stickers;
-    expect(restored).toEqual([sticker]); expect(searchStickers(restored, 'gato sorpresa')).toEqual([sticker]);
+    expect(restored).toEqual([metadata]); expect(searchStickers(restored, 'gato sorpresa')).toEqual([metadata]);
+    expect(readFileSync(join(dir, 'companion.json'), 'utf8')).not.toContain(image);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 import { StickerInbox } from '../src/main/sticker-inbox';
 import type { Status, StatusUpdate } from '../src/shared/model';
 
+function discovery(index = 0) {
+  const bytes = Buffer.alloc(24); bytes.write('RIFF'); bytes.writeUInt32LE(16, 4); bytes.write('WEBP', 8);
+  bytes.write('VP8 ', 12); bytes.writeUInt32LE(4, 16); bytes.writeUInt32LE(index, 20);
+  return { id: createHash('sha256').update(bytes).digest('hex'), image: `data:image/webp;base64,${bytes.toString('base64')}`, searchTerms: '', firstSeen: 1, lastSeen: 1 };
+}
 const chat = '123@c.us', group = '456@g.us';
 const snap = (patch: Partial<Snapshot> = {}): Snapshot => ({ ...emptySnapshot, chatId: chat, name: 'Alex', conversationOpen: true, ready: true, atBottom: true, caretAtEnd: true, messages: [{ id: 'a', text: 'Hello', outgoing: false }], ...patch });
 const dirs: string[] = [];
@@ -279,7 +288,7 @@ describe('incremental desktop status', () => {
   });
   test('sticker changes send only new entries and survive updates before the initial read', () => {
     const a = full(1), b = full(2), c = full(3), cache = new StatusCache();
-    const sticker = { id: 'a'.repeat(64), image: 'data:image/webp;base64,UklGRg==', searchTerms: '', firstSeen: 1, lastSeen: 1 };
+    const sticker = { id: 'a'.repeat(64), kind: 'static' as const, size: 12, searchTerms: '', firstSeen: 1, lastSeen: 1 };
     a.state.stickers = [sticker]; b.state.stickers = [sticker, { ...sticker, id: 'b'.repeat(64) }]; c.state = { ...b.state, global: { ...b.state.global, tone: 'friendly' } };
     const delta = statusUpdate(b, a.state); expect(delta.stickerChanges?.upsert).toHaveLength(1); expect(delta.state).not.toHaveProperty('stickers');
     cache.accept(delta); cache.accept(statusUpdate(c, b.state)); const result = cache.accept(a);
@@ -288,14 +297,17 @@ describe('incremental desktop status', () => {
   });
 });
 describe('sticker persistence and search', () => {
-  const sticker = { id: 'a'.repeat(64), image: 'data:image/webp;base64,UklGRg==', searchTerms: 'Buenos días, happy, good morning sunshine', firstSeen: 1, lastSeen: 1 };
+  const sticker = { id: 'a'.repeat(64), kind: 'static' as const, size: 12, searchTerms: 'Buenos días, happy, good morning sunshine', firstSeen: 1, lastSeen: 1 };
   test('legacy tags and captions migrate losslessly, remain editable and survive restart', () => {
     const dir = directory();
-    const { searchTerms: _terms, ...base } = sticker;
+    const image = JSON.parse(readFileSync(new URL('./fixtures/sticker-dedupe/images.json', import.meta.url), 'utf8')).original.image as string;
+    const id = createHash('sha256').update(Buffer.from(image.split(',')[1], 'base64')).digest('hex');
+    const base = { id, image, firstSeen: 1, lastSeen: 1 };
     const legacy = { ...base, tags: ['happy', 'feliz'], keywords: 'good morning sunshine, buenos días' };
-    writeFileSync(join(dir, 'companion.json'), JSON.stringify({ ...initialState(), stickers: [legacy] }));
+    writeFileSync(join(dir, 'companion.json'), JSON.stringify({ ...initialState(), version: 1, stickers: [legacy] }));
     const store = new Store(dir);
-    expect(store.state.stickers[0]).toEqual({ ...base, searchTerms: 'happy, feliz, good morning sunshine, buenos días' });
+    expect(store.state.stickers[0]).toMatchObject({ id, searchTerms: 'happy, feliz, good morning sunshine, buenos días' });
+    expect(store.state.stickers[0]).not.toHaveProperty('image');
     for (const query of ['happy', 'feliz', '"good morning"', '"buenos dias"']) expect(searchStickers(store.state.stickers, query)).toHaveLength(1);
     store.update(s => { s.stickers[0].searchTerms += ', smile, sonrisa'; });
     const next = new Store(dir);
@@ -322,14 +334,14 @@ describe('sticker persistence and search', () => {
   test('many discoveries share one transaction and one publication', async () => {
     vi.useFakeTimers(); const store = new Store(directory()), write = vi.spyOn(store, 'update'), changed = vi.fn();
     const inbox = new StickerInbox(store, changed, () => { throw new Error('Unexpected failure'); });
-    for (let i = 0; i < 150; i++) inbox.add({ ...sticker, id: i.toString(16).padStart(64, '0') });
+    for (let i = 0; i < 150; i++) inbox.add(discovery(i));
     expect(write).not.toHaveBeenCalled(); await vi.advanceTimersByTimeAsync(501);
     expect(write).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledTimes(1); expect(store.state.stickers).toHaveLength(150);
     await inbox.flush(); expect(write).toHaveBeenCalledTimes(1);
   });
   test('a failed sticker batch preserves state and can be retried', async () => {
     const store = new Store(directory()), failed = vi.fn(), write = vi.spyOn(store, 'update');
-    const inbox = new StickerInbox(store, () => {}, failed); inbox.add(sticker);
+    const inbox = new StickerInbox(store, () => {}, failed); inbox.add(discovery());
     write.mockImplementationOnce(() => { throw new Error('Disk full'); }); expect(await inbox.flush()).toBe(false);
     expect(store.state.stickers).toHaveLength(0); expect(failed).toHaveBeenCalledTimes(1);
     expect(await inbox.flush()).toBe(true); expect(store.state.stickers).toHaveLength(1);

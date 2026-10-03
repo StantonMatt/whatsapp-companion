@@ -11,7 +11,7 @@ export class DirectStickerSender {
   private invocations: number[] = [];
   private succeeded = false;
   constructor(private options: {
-    transfer: StickerTransfer; snapshot: () => Snapshot; enabled: () => boolean;
+    readSticker?: (id: string) => string; transfer: StickerTransfer; snapshot: () => Snapshot; enabled: () => boolean;
     disable: (reason: DirectStickerDisabledReason) => void;
     execute: (script: string) => Promise<unknown>; publish: () => void; diagnostics: StickerSendDiagnostics;
   }) {}
@@ -62,6 +62,8 @@ export class DirectStickerSender {
       if (resolved.data.status === 'unavailable') return fallback(resolved.data.code, resolved.data.detail);
       if (!t.bindDirect(ticket.nonce, resolved.data.destination, o.snapshot(), o.enabled())) { abort('destination-mismatch'); return; }
       log('resolved', 'none'); phase = 'send'; started = Date.now();
+      // Resolve may have yielded to Forget or disk changes. Re-read verified bytes before disclosure.
+      if (o.readSticker) image = o.readSticker(ticket.id);
       // Serialize/bound arguments before consuming the only send attempt.
       const args = { phase: 'send' as const, nonce: ticket.nonce, deadline: Date.now() + 25_000, destination: resolved.data.destination,
         fingerprint: resolved.data.fingerprint, base64: image.slice('data:image/webp;base64,'.length), expectedHash: ticket.id };

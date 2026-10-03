@@ -1,9 +1,9 @@
-import { app, BrowserWindow, WebContentsView, ipcMain, session, dialog, shell, Menu } from 'electron';
+import { app, BrowserWindow, WebContentsView, ipcMain, session, protocol, dialog, shell, Menu } from 'electron';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { actionSchema, snapshotSchema, stickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
+import { actionSchema, snapshotSchema, discoveredStickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
 import { accountSafetyEventSchema, type AccountSafetyReason } from '../shared/connector';
 import { Store } from './store';
 import { Conversations } from './conversations';
@@ -18,11 +18,11 @@ import { STICKER_PICKER_WATCHDOG_MS, STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WAT
 import { storedSticker } from './sticker-bytes';
 import { StickerInbox } from './sticker-inbox';
 import { decodeStickerPixels } from './sticker-fingerprint';
-import { forgetSticker } from '../core/stickers';
+import { STICKER_SCHEME, stickerResponse } from './sticker-protocol';
 import { ProviderCheck } from './provider-check';
 import { ModelCatalog } from './models';
 import { currentTextModels, savedEffort, setReasoning } from '../core/model-policy';
-import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
+import { MAX_STICKER_BYTES, MAX_LIBRARY_STICKERS, MAX_LIBRARY_BYTES } from '../shared/sticker-limits';
 import { StickerSendDiagnostics } from './sticker-send-diagnostics';
 import { PickerDiagnostics } from './picker-diagnostics';
 import { DirectStickerSender } from './direct-sticker-sender';
@@ -32,6 +32,7 @@ import { DirectStickerSafety } from './direct-sticker-safety';
 // compatibility fallback to remove protection from the embedded remote page.
 app.commandLine.removeSwitch('no-sandbox');
 app.enableSandbox();
+protocol.registerSchemesAsPrivileged([{ scheme: STICKER_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 const fixture = process.argv.includes('--fixture') && !app.isPackaged;
 const dataArg = process.argv.find(x => x.startsWith('--data-dir='));
 if (dataArg && !app.isPackaged) app.setPath('userData', resolve(dataArg.slice(11)));
@@ -81,14 +82,29 @@ async function start() {
   let shieldRestoreNonce: string | undefined;
   let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
   let closing = false, indexDrained = false;
+  let stickerIntakeError: string | undefined;
+  const stickerBlobErrors = new Map<string, string>();
+  const readSticker = (id: string) => {
+    try {
+      const sticker = store.readSticker(id);
+      if (stickerBlobErrors.delete(id)) publish();
+      return sticker;
+    } catch (error) {
+      if (store.state.stickers.some(s => s.id === id)) stickerBlobErrors.set(id, error instanceof Error ? error.message : 'Sticker file unavailable.');
+      else stickerBlobErrors.delete(id);
+      throw error;
+    }
+  };
   let stickerLocation: Status['stickerLocation'] = null;
   let locateRequest: { nonce: string; destinationToken: string; timer: ReturnType<typeof setTimeout> } | undefined;
   let chrome = { rail: 64, listWidth: 430, theme: 'dark' as 'dark' | 'light' };
   const win = new BrowserWindow({ width: 1280, height: 860, minWidth: 880, minHeight: 620, backgroundColor: '#161717', title: 'WhatsApp Companion',
     icon: join(root, 'icon.png'),
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
-  const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
+  const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), partition: fixture ? 'persist:fixture' : 'persist:whatsapp', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true } });
+  // Scheme privileges are global; the handler exists only in the local session.
+  controls.webContents.session.protocol.handle(STICKER_SCHEME, request => stickerResponse({ readSticker }, request));
   // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
   const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
   remote.webContents.setUserAgent(`Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`);
@@ -177,7 +193,8 @@ async function start() {
   // Presentation can hold composer readiness during maker teardown. Send
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
-  const status = (): Status => ({ sequence, panel, stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  const libraryMessage = () => stickerBlobErrors.values().next().value ?? stickerIntakeError ?? store.recoveryHint ?? (store.state.stickers.length >= MAX_LIBRARY_STICKERS || store.state.stickers.reduce((total, s) => total + s.size, 0) >= MAX_LIBRARY_BYTES ? 'Sticker library is full' : undefined);
+  const status = (): Status => ({ sequence, panel, stickerLibraryError: libraryMessage(), stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   let lastMakerDiagnostic: Status['stickerSend'];
   const recordStickerSend = () => {
     const send = stickerTransfer.send;
@@ -227,7 +244,8 @@ async function start() {
     directStickerSafety.stop(reason);
     publish();
   };
-  const directStickerSender = new DirectStickerSender({ transfer: stickerTransfer, snapshot: () => assistant.snapshot,
+  const directStickerSender = new DirectStickerSender({ readSticker: id => readSticker(id).image,
+    transfer: stickerTransfer, snapshot: () => assistant.snapshot,
     enabled: () => directStickerSafety.enabled(), disable: disableDirect, diagnostics: stickerSendDiagnostics, publish,
     execute: script => {
       if (remote.webContents.isDestroyed() || (fixture ? remote.webContents.getURL() !== remoteURL : new URL(remote.webContents.getURL()).origin !== 'https://web.whatsapp.com')) throw new Error('Remote page changed');
@@ -310,6 +328,9 @@ async function start() {
     stickerSendTimer = setTimeout(() => { stickerTransfer.result(nonce, true, false, 'unconfirmed', 'confirm-timeout'); finishMakerInput(); stopStickerLookup(); publish(); }, STICKER_MAKER_WATCHDOG_MS);
   };
   const authorizeSticker = (nonce: string, snapshot: typeof assistant.snapshot) => {
+    const send = stickerTransfer.send;
+    try { if (!send || send.nonce !== nonce) return false; readSticker(send.id); }
+    catch (error) { cancelSticker(); publish(); return false; }
     const allowed = stickerTransfer.authorize(nonce, snapshot);
     // Start the outcome budget at the grant, even if navigation or a renderer
     // failure prevents the clicked notification from reaching main.
@@ -361,7 +382,13 @@ async function start() {
   controls.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
     if (mainFrame && !inPlace) { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); assistant.activity(); }
   });
-  const stickerInbox = new StickerInbox(store, publish, () => { assistant.message = 'Sticker indexing could not be saved. Check disk space, then reload WhatsApp to retry.'; publish(); }, image =>
+  const stickerInbox = new StickerInbox(store, () => {
+    for (const id of stickerBlobErrors.keys()) {
+      if (!store.state.stickers.some(s => s.id === id)) stickerBlobErrors.delete(id);
+      else try { readSticker(id); } catch { /* Still needs recovery. */ }
+    }
+    publish();
+  }, message => { stickerIntakeError = message; publish(); }, image =>
     controls.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(${decodeStickerPixels.toString()})(${JSON.stringify(image)})` }]));
   const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === controls.webContents && event.senderFrame === controls.webContents.mainFrame && event.senderFrame.url === uiURL;
   const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => !closing && event.sender === remote.webContents && event.senderFrame === remote.webContents.mainFrame && (fixture ? event.senderFrame.url === remoteURL : new URL(event.senderFrame.url).origin === 'https://web.whatsapp.com');
@@ -383,6 +410,8 @@ async function start() {
     if (stickerTransfer.send?.nonce !== request.data.nonce || !['preparing', 'sending'].includes(stickerTransfer.send.state)) return false;
     const snapshot = { ...request.data.snapshot, settingsId: identifyStickerDestination(request.data.snapshot) };
     if (observeStickerDestination(snapshot)) { publish(); return false; }
+    try { if (!stickerTransfer.send || stickerTransfer.send.nonce !== request.data.nonce) return false; readSticker(stickerTransfer.send.id); }
+    catch (error) { cancelSticker(); publish(); return false; }
     const allowed = request.data.phase === 'disclose' ? stickerTransfer.disclose(request.data.nonce, snapshot) : authorizeSticker(request.data.nonce, snapshot);
     if (allowed && request.data.phase === 'disclose' && makerInputOwner === request.data.nonce) {
       makerInputDisclosed = true;
@@ -465,7 +494,7 @@ async function start() {
           if (panel !== 'stickers' || !store.state.stickers.some(s => s.id === action.id)) throw new Error('Open the sticker library and choose an indexed sticker.');
           if (stickerSendBlockedReason() === 'busy') throw new Error('Wait for the current sticker.');
           const sticker = store.state.stickers.find(s => s.id === action.id)!;
-          const stored = storedSticker(sticker.image, sticker.id);
+          const stored = readSticker(sticker.id);
           const fallbackRoute = stickerRoute(assistant.snapshot, stored.animated, action.still) as 'maker' | 'picker';
           let route = stickerRoute(assistant.snapshot, stored.animated, action.still, directStickerSafety.enabled());
           let ticket = stickerTransfer.begin(action.id, action.nonce, action.destinationToken, assistant.snapshot, Date.now(), route, stored.animated);
@@ -482,14 +511,15 @@ async function start() {
           stickerSendTimer = setTimeout(() => { if (stickerTransfer.timeout(ticket.nonce)) { finishMakerInput(); stopStickerLookup(); publish(); } }, route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000);
           if (route === 'maker') await showStickerShield(ticket.nonce);
           if (stickerTransfer.send?.nonce !== ticket.nonce || !['finding', 'preparing'].includes(stickerTransfer.send.state)) break;
+          try { readSticker(ticket.id); } catch (error) { cancelSticker(); throw error; }
           if (route === 'maker') startMakerInput(ticket.nonce);
           remote.webContents.send('companion:command', route === 'maker' ? { type: 'makeSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route, image: stored.image } : { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route }); break;
         }
         case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
-        case 'forgetSticker': store.update(s => forgetSticker(s, action.id)); stickerInbox.discard(action.id); break;
+        case 'forgetSticker': store.forgetSticker(action.id); stickerInbox.discard(action.id); if (stickerTransfer.send?.id === action.id) cancelSticker(); stickerBlobErrors.delete(action.id); break;
         case 'locateSticker': {
           stickerTransfer.requireDestination(action.destinationToken, assistant.snapshot);
-          if (!store.state.stickers.some(s => s.id === action.id)) throw new Error('Sticker no longer indexed.');
+          readSticker(action.id);
           clearTimeout(locateRequest?.timer);
           const nonce = randomUUID();
           stickerLocation = { id: action.id, state: 'looking' };
@@ -505,9 +535,16 @@ async function start() {
       publish(); return { ok: true };
     } catch (error) {
       if (action.type === 'preferences' || action.type === 'resetPreferences') publish();
-      if (action.type === 'sendSticker' && makerInputOwner === action.nonce) {
-        finishMakerInput(); stickerTransfer.result(action.nonce, false, false, 'editor-unavailable', 'maker-error'); publish();
+      if (action.type === 'sendSticker') {
+        if (stickerTransfer.send?.nonce === action.nonce) {
+          if (makerInputOwner === action.nonce) {
+            finishMakerInput(); stickerTransfer.result(action.nonce, false, false, 'editor-unavailable', 'maker-error');
+          } else cancelSticker();
+          clearStickerShield();
+        }
+        publish();
       }
+      if (action.type === 'locateSticker') publish();
       return { ok: false, error: error instanceof Error ? error.message : 'Operation failed. Your previous data is preserved.' };
     }
   });
@@ -618,8 +655,11 @@ async function start() {
           storedSticker(v.data.image, id);
           if (store.state.forgottenStickers.includes(id)) break;
           const existing = store.state.stickers.find(x => x.id === id);
-          if (existing && Date.now() - existing.lastSeen < 60000) break;
-          const sticker = stickerSchema.parse({ id, image: v.data.image, searchTerms: '', firstSeen: Date.now(), lastSeen: Date.now() });
+          if (existing && Date.now() - existing.lastSeen < 60000) {
+            try { readSticker(id); break; }
+            catch { /* A fresh observation can repair a missing or damaged blob. */ }
+          }
+          const sticker = discoveredStickerSchema.parse({ id, image: v.data.image, searchTerms: '', firstSeen: Date.now(), lastSeen: Date.now() });
           stickerInbox.add(sticker); break;
         }
       }
@@ -645,6 +685,8 @@ async function start() {
     void dialog.showMessageBox(win, { message: `Allow WhatsApp to use ${permission === 'media' ? 'your microphone or camera' : 'desktop notifications'}?`, buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 }).then(r => { if (r.response === 1) grantedPermissions.add(permission); callback(r.response === 1); });
   });
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  controls.webContents.session.setPermissionCheckHandler(() => false);
+  controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
   remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); } });
   controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); });

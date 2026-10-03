@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { captureStickerPicker, redactPickerText } from '../src/connector/sticker-picker-capture';
 import { DomConnector } from '../src/connector/dom';
+import * as store from '../src/main/store';
 import { PickerDiagnostics } from '../src/main/picker-diagnostics';
 import { PICKER_MAX_DEPTH, PICKER_MAX_NODES, PICKER_UI_WORDS, pickerLayoutCaptureSchema, pickerLayoutDiagnosticSchema, pickerLayoutEventSchema, pickerLayoutResultSchema, type PickerLayoutCapture, type PickerCaptureNode } from '../src/shared/sticker-picker-capture';
 import type { RemoteCommand, RemoteEvent } from '../src/shared/connector';
 
 const directories: string[] = [];
-afterEach(() => { vi.useRealTimers(); document.body.replaceChildren(); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); document.body.replaceChildren(); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture() {
   document.body.innerHTML = '<div id="main"><span>Private conversation and account</span></div><div id="expressions-panel-container" aria-label="Private ancestor"><section role="dialog" data-testid="picker-wrapper"><ul data-testid="expressions-panel" class="opaque-one opaque-two" style="direction:rtl;overflow-y:auto"><button data-testid="panel-starred" role="tab" aria-label="Favorites SECRET-PACK" title="Buscar PRIVATE-TITLE" aria-selected="true" data-private="PRIVATE-ATTRIBUTE">Recent PRIVATE-TEXT<img src="https://private.example/secret-image?token=secret" alt="Sticker PRIVATE-ALT"></button><span style="display:none">search hidden text</span><script>search secret script</script></ul></section></div>';
   const panel = document.querySelector<HTMLElement>('[data-testid="expressions-panel"]')!;
@@ -161,4 +162,21 @@ test('invalid replies consume authorization without saving; cancelled and timed-
   f.diagnostics.capture(); const expired = f.reply(result); vi.advanceTimersByTime(10_000); f.diagnostics.receive(expired);
   expect(f.notify).toHaveBeenLastCalledWith('Sticker picker capture timed out. Reload WhatsApp and try again.'); expect(f.reveal).not.toHaveBeenCalled();
   expect(existsSync(join(f.directory, 'diagnostics'))).toBe(false);
+});
+
+
+test('a diagnostic installed before directory sync fails is revealed normally and retries on the next capture', () => {
+  vi.useFakeTimers(); fixture(); const f = mainFixture(), result = captured();
+  const original = store.atomicWrite;
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const write = vi.spyOn(store, 'atomicWrite').mockImplementationOnce((path, contents) => original(path, contents, step => {
+    if (step === 'manifest:directory-sync') throw new Error('sync failed');
+  }));
+  const sync = vi.spyOn(store, 'syncSavedDirectory');
+  f.diagnostics.capture(); f.diagnostics.receive(f.reply(result));
+  expect(f.reveal).toHaveBeenCalledOnce(); expect(f.notify).toHaveBeenLastCalledWith(expect.stringContaining('layout saved to:'));
+  vi.advanceTimersByTime(1); f.diagnostics.capture(); f.diagnostics.receive(f.reply(result));
+  expect(sync).toHaveBeenCalledWith(join(f.directory, 'diagnostics'), undefined, 'picker:retry');
+  expect(write).toHaveBeenCalledTimes(2); expect(f.reveal).toHaveBeenCalledTimes(2);
+  expect(readdirSync(join(f.directory, 'diagnostics'))).toHaveLength(2);
 });

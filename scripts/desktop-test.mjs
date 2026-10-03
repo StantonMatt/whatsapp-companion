@@ -1,6 +1,7 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
 const dir = await mkdtemp(join(tmpdir(), 'companion-desktop-'));
@@ -790,6 +791,28 @@ try {
   // concurrency. Do not change the fixture's native picker's source.
   await stickerSearch.fill('');
   const firstStickerId = await stickerCard.getAttribute('data-sticker');
+  const localStickerURL = `companion-sticker://${firstStickerId}`;
+  expect((await local.evaluate(() => window.companion.status())).state.stickers.every(sticker => !('image' in sticker))).toBe(true);
+  expect(await local.locator(`[data-sticker="${firstStickerId}"] img`).getAttribute('src')).toBe(localStickerURL);
+  await expect.poll(() => local.locator(`[data-sticker="${firstStickerId}"] img`).evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
+  expect(await remote.evaluate(async url => {
+    const image = new Image(); let timer;
+    const loaded = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), 3000); image.onload = () => resolve('loaded'); image.onerror = () => resolve('error'); });
+    image.src = url; document.body.append(image);
+    const result = await loaded; clearTimeout(timer); image.remove(); return result;
+  }, localStickerURL)).toBe('error');
+  expect(await remote.evaluate(async url => { try { await fetch(url); return true; } catch { return false; } }, localStickerURL)).toBe(false);
+  expect(await app.evaluate(async ({ BrowserWindow, WebContentsView }, url) => {
+    const remote = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
+    const probe = new WebContentsView({ webPreferences: { session: remote.session, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+    try { await probe.webContents.loadURL(url); return true; } catch { return false; } finally { probe.webContents.close(); }
+  }, localStickerURL)).toBe(false);
+  expect(await app.evaluate(({ BrowserWindow }, scheme) => {
+    const views = BrowserWindow.getAllWindows()[0].contentView.children;
+    return Promise.all(views.map(view => view.webContents.session.protocol.isProtocolHandled(scheme)));
+  }, 'companion-sticker')).toEqual([false, true]);
+  console.log('PASS controls loads verified sticker URLs; remote image/fetch/navigation cannot resolve them; status is metadata only');
+
   await remote.evaluate(() => {
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
     const context = canvas.getContext('2d'); context.fillStyle = '#3388cc'; context.fillRect(0, 0, 64, 64);
@@ -810,7 +833,7 @@ try {
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(3);
   const thirdStickerId = (await local.evaluate(() => window.companion.status())).state.stickers.find(sticker => ![firstStickerId, otherStickerId].includes(sticker.id)).id;
   await expect.poll(gridIds).toEqual([firstStickerId, otherStickerId, thirdStickerId]);
-  const otherImage = (await local.evaluate(() => window.companion.status())).state.stickers.find(sticker => sticker.id === otherStickerId).image;
+  const otherImage = `data:image/webp;base64,${(await readFile(join(dir, 'stickers', `${otherStickerId}.webp`))).toString('base64')}`;
   // Reindex B through main's fixture IPC with a later clock, bypassing only the
   // one-minute discovery throttle. Both newcomers must retain their own ranks.
   await app.evaluate(({ ipcMain, BrowserWindow }, image) => {
@@ -930,7 +953,7 @@ try {
   await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click();
   const temporaryCard = stickerPanel.getByRole('group', { name: 'temporary fixture sticker', exact: true });
   await temporaryCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
-  const forgottenFixtureImage = await remote.locator('#fixture-extra-sticker').getAttribute('src');
+  const forgottenFixtureImage = `data:image/webp;base64,${(await readFile(join(dir, 'stickers', `${otherStickerId}.webp`))).toString('base64')}`;
   await remote.locator('#fixture-extra-sticker').evaluate(image => image.remove());
   await stickerEditor.getByRole('button', { name: 'Forget', exact: true }).click();
   await expect(temporaryCard).toHaveCount(0); await expect(stickerEditor).toHaveCount(0);
@@ -1077,8 +1100,8 @@ try {
   await nativeStickerPicker.getByTestId('sticker-item').evaluate(item => item.remove());
   await releaseStickerCommand();
   await expect.poll(async () => (await stickerState())?.state).toBe('failed');
-  await expect(stickerLive).toContainText(/Couldn[’']t confirm the sticker was sent/);
-  await expect(stickerPanel.getByText(/^Couldn[’']t confirm the sticker was sent\. Check the chat before sending it again\.$/)).toBeVisible();
+  await expect(stickerLive).toContainText('Nothing was sent');
+  await expect(stickerPanel.getByText(/^Couldn[’']t send the sticker\. Nothing was sent\.$/)).toBeVisible();
   await expect(stickerPanel.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
   await expect(stickerPanel.getByRole('button', { name: 'Send still', exact: true })).toHaveCount(0);
   await stickerPanel.getByRole('button', { name: 'Dismiss', exact: true }).click();
@@ -1187,6 +1210,7 @@ try {
   });
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(2);
   const staticMakerId = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id !== firstStickerId).id;
+  const storedStatic = await readFile(join(dir, 'stickers', `${staticMakerId}.webp`));
   const staticMakerCard = stickerPanel.locator(`[data-sticker="${staticMakerId}"]`);
   const makerSend = () => staticMakerCard.getByRole('button', { name: 'Send to Alex', exact: true });
   const makerReady = async (button = makerSend()) => {
@@ -1218,8 +1242,9 @@ try {
   await editor.fill('Keep this unsent sticker draft');
   const staticDraftMarkup = await editor.evaluate(element => element.innerHTML);
   const staticDraftCounters = await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length]);
-  const originalPickerSource = await remote.evaluate(() => window.fixtureStickerSource);
-  await remote.evaluate(() => { window.fixtureStickerSource = document.querySelector('#fixture-static-maker').src; window.fixtureHideSticker = false; });
+  const originalPickerSource = `data:image/webp;base64,${(await readFile(join(dir, 'stickers', `${firstStickerId}.webp`))).toString('base64')}`;
+  const staticPickerSource = `data:image/webp;base64,${storedStatic.toString('base64')}`;
+  await remote.evaluate(source => { window.fixtureStickerSource = source; window.fixtureHideSticker = false; }, staticPickerSource);
   const staticPickerNonce = await startMaker();
   await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ nonce: staticPickerNonce, route: 'picker', animated: false, state: 'sent', sent: 'confirmed' });
   expect(await editor.evaluate(element => element.innerHTML)).toBe(staticDraftMarkup);
@@ -1239,10 +1264,10 @@ try {
   const composerlessCounters = await remote.evaluate(() => [window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length, window.fixtureSent.length]);
   const composerlessSendsBefore = await remote.evaluate(() => window.fixtureStickerSent.length);
   try {
-    await remote.evaluate(() => {
-      window.fixtureStickerSource = document.querySelector('#fixture-static-maker').src;
+    await remote.evaluate(source => {
+      window.fixtureStickerSource = source;
       window.fixtureHideSticker = false; window.fixtureComposerPresent(false);
-    });
+    }, staticPickerSource);
     await expect(editor).toHaveCount(0);
     await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Alex', ready: false, canSendSticker: true });
     await expect(makerSend()).not.toHaveAttribute('aria-disabled', 'true');
@@ -1433,11 +1458,12 @@ try {
   console.log('PASS maker send preserves chat readiness and header; panel stays fixed on every shield show/hide frame');
   expect(await remote.evaluate(() => window.fixturePhotoAssignments)).toBe(0);
   expect(await remote.evaluate(() => ({ assignments: window.fixtureUnrelatedImageAssignments, files: document.querySelector('#fixture-unrelated-image-input').files.length, menuRetained: Boolean(document.querySelector('#fixture-unrelated-menu[hidden]')) }))).toEqual({ assignments: 0, files: 0, menuRetained: true });
-  const storedStatic = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id === staticMakerId).image;
-  expect(await remote.evaluate(async () => {
+  const sentStatic = await remote.evaluate(async () => {
     const file = window.fixtureMakerSent.at(-1).file;
-    return 'data:image/webp;base64,' + btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
-  })).toBe(storedStatic);
+    let binary = ''; for (const byte of new Uint8Array(await file.arrayBuffer())) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  });
+  expect(Buffer.from(sentStatic, 'base64')).toEqual(storedStatic);
   await expect(editor).toHaveText('');
   await expect(nativeStickerPicker).toHaveCount(0);
   console.log('PASS static stored WebP uses the New sticker route without a loaded native picker item; decoy never receives files; composer stays empty');
@@ -1603,17 +1629,18 @@ try {
   await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
   const directUiCounters = await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length]);
   for (const [stickerId, animated] of [[staticMakerId, false], [firstStickerId, true]]) {
-    const saved = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id === stickerId);
+    const storedBytes = await readFile(join(dir, 'stickers', `${stickerId}.webp`));
     await editor.fill('Keep this direct sticker draft'); const markup = await editor.evaluate(el => el.innerHTML);
     const button = stickerId === staticMakerId ? makerSend() : sendCard();
     await makerReady(button); await button.click();
     await expect.poll(stickerState).toMatchObject({ id: stickerId, route: 'direct', animated, state: 'sent', sent: 'confirmed' });
     expect(await editor.evaluate(el => el.innerHTML)).toBe(markup);
-    expect(await remote.evaluate(async () => {
+    const sentBytes = await remote.evaluate(async () => {
       const file = window.fixtureDirectSent.at(-1).file, bytes = new Uint8Array(await file.arrayBuffer());
       let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
-      return 'data:image/webp;base64,' + btoa(binary);
-    })).toBe(saved.image);
+      return btoa(binary);
+    });
+    expect(Buffer.from(sentBytes, 'base64')).toEqual(storedBytes);
     expect(await remote.evaluate(() => window.fixtureDirectSent.at(-1).isAnimated)).toBe(animated);
     expect(await remote.evaluate(() => [window.fixtureAttachClicks || 0, window.fixtureMakerOpens, window.fixtureMakerAssignments, window.fixtureMakerSent.length])).toEqual(directUiCounters);
     await expect(nativeStickerPicker).toHaveCount(0); await expect(remote.locator('#fixture-sticker-editor')).toHaveCount(0);
@@ -2057,6 +2084,42 @@ try {
   await expect(disabledReopened.getByLabel('Send stickers directly (experimental)', { exact: true })).not.toBeChecked();
   await assertDirectPreference(false, disabledReopened);
   console.log('PASS disabling direct sticker sending also persists across an actual application restart');
+
+  await app.close(); app = undefined;
+  const migrationDir = join(dir, 'migration'); await mkdir(migrationDir);
+  const sample = JSON.parse(await readFile('tests/fixtures/sticker-dedupe/images.json', 'utf8')).animated;
+  const migrationBytes = Buffer.from(sample.image.split(',')[1], 'base64');
+  const migrationId = createHash('sha256').update(migrationBytes).digest('hex');
+  const legacy = { ...JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')), version: 1,
+    forgottenStickers: JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')).forgottenStickers.filter(id => id !== migrationId),
+    stickers: [{ id: migrationId, image: sample.image, searchTerms: 'migration animation', firstSeen: 10, lastSeen: 20 }] };
+  const legacyText = JSON.stringify(legacy); await writeFile(join(migrationDir, 'companion.json'), legacyText);
+  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${migrationDir}`], timeout: 30000 });
+  await expect.poll(async () => (await app.windows()).some(page => page.url().endsWith('/ui/index.html'))).toBe(true);
+  const migrated = (await app.windows()).find(page => page.url().endsWith('/ui/index.html'));
+  await migrated.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  const migratedCard = migrated.locator(`[data-sticker="${migrationId}"]`);
+  await expect(migratedCard).toBeVisible();
+  await expect.poll(() => migratedCard.locator('img').evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
+  const migratedState = (await migrated.evaluate(() => window.companion.status())).state;
+  expect(migratedState.version).toBe(2);
+  expect(migratedState.stickers).toEqual([{ id: migrationId, searchTerms: 'migration animation', firstSeen: 10, lastSeen: 20, kind: 'animated', size: migrationBytes.length }]);
+  expect(await readFile(join(migrationDir, 'companion.v1-backup.json'), 'utf8')).toBe(legacyText);
+  expect(await readFile(join(migrationDir, 'stickers', `${migrationId}.webp`))).toEqual(migrationBytes);
+  console.log('PASS actual startup migrates schema v1, preserves metadata/backup/original animation, and renders from the controls protocol');
+  await rm(join(migrationDir, 'stickers', `${migrationId}.webp`));
+  await migrated.reload();
+  await migrated.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
+  await expect(migrated.getByRole('button', { name: 'Image unavailable · Retry' })).toBeVisible();
+  expect((await migrated.evaluate(() => window.companion.status())).state.stickers).toHaveLength(1);
+  await expect.poll(async () => (await migrated.evaluate(() => window.companion.status())).chat.destinationToken).not.toBeUndefined();
+  const missingSend = await migrated.evaluate(id => window.companion.status().then(status => window.companion.action({ type: 'sendSticker', id, nonce: crypto.randomUUID(), destinationToken: status.chat.destinationToken })), migrationId);
+  expect(missingSend).toMatchObject({ ok: false, error: expect.stringContaining('missing or damaged') });
+  await writeFile(join(migrationDir, 'stickers', `${migrationId}.webp`), migrationBytes, { mode: 0o600 });
+  await migrated.getByRole('button', { name: 'Image unavailable · Retry' }).click();
+  await expect.poll(() => migrated.locator(`[data-sticker="${migrationId}"] img`).evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
+  await expect(migrated.getByRole('button', { name: 'Image unavailable · Retry' })).toHaveCount(0);
+  console.log('PASS missing blobs retain cards, sends fail closed, and restoring the file plus Retry recovers the image');
 
 } catch (error) {
   if (app) { const pages = await app.windows(); for (const page of pages) console.log(page.url(), (await page.locator('body').innerText()).slice(0, 2500)); }

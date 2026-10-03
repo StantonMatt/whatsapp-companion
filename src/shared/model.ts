@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MAX_STICKER_DATA_URL_LENGTH } from './sticker-limits';
+import { MAX_STICKER_DATA_URL_LENGTH, MAX_STICKER_BYTES, MAX_LIBRARY_BYTES, MAX_LIBRARY_STICKERS } from './sticker-limits';
 import type { StickerSend, StickerSendBlockedReason } from './sticker-transfer';
 
 export const providerSchema = z.enum(['openai', 'anthropic']);
@@ -85,8 +85,9 @@ export const profileSchema = z.object({
   source: z.enum(['observed', 'selected', 'edited'])
 }).strict();
 export type StyleProfile = z.infer<typeof profileSchema>;
+export const stickerImageSchema = z.string().max(MAX_STICKER_DATA_URL_LENGTH).regex(/^data:image\/webp;base64,[A-Za-z0-9+/=]+$/);
 const stickerBaseSchema = z.object({
-  id: z.string().regex(/^[a-f0-9]{64}$/), image: z.string().max(MAX_STICKER_DATA_URL_LENGTH).regex(/^data:image\/webp;base64,[A-Za-z0-9+/=]+$/),
+  id: z.string().regex(/^[a-f0-9]{64}$/),
   firstSeen: z.number(), lastSeen: z.number(),
   fingerprint: z.object({
     version: z.literal(1), animated: z.boolean(), hash: z.string().regex(/^[a-f0-9]{16}$/),
@@ -94,17 +95,21 @@ const stickerBaseSchema = z.object({
     pixels: z.string().length(288).regex(/^[A-Za-z0-9+/]+$/)
   }).strict().optional()
 }).strict();
-export const stickerImageSchema = stickerBaseSchema.shape.image;
 const searchTermsSchema = z.string().max(4000);
 // Read existing collections without dropping any labels, synonyms or captions.
 // Subsequent saves use the single searchTerms field.
-export const stickerSchema = z.union([
-  stickerBaseSchema.extend({ searchTerms: searchTermsSchema }).strict(),
-  stickerBaseSchema.extend({ tags: z.array(z.string().max(60)).max(30), keywords: z.string().max(1000) }).strict()
+export const legacyStickerSchema = z.union([
+  stickerBaseSchema.extend({ image: stickerImageSchema }).extend({ searchTerms: searchTermsSchema }).strict(),
+  stickerBaseSchema.extend({ image: stickerImageSchema }).extend({ tags: z.array(z.string().max(60)).max(30), keywords: z.string().max(1000) }).strict()
     .transform(({ tags, keywords, ...sticker }) => ({ ...sticker, searchTerms: [...tags, keywords].filter(Boolean).join(', ') }))
 ]);
+export const stickerSchema = stickerBaseSchema.extend({
+  searchTerms: searchTermsSchema, kind: z.enum(['static', 'animated']), size: z.number().int().min(12).max(MAX_STICKER_BYTES)
+}).strict();
+export const discoveredStickerSchema = stickerBaseSchema.extend({ searchTerms: searchTermsSchema, image: stickerImageSchema }).strict();
+export type DiscoveredSticker = z.infer<typeof discoveredStickerSchema>;
 export type Sticker = z.infer<typeof stickerSchema>;
-export const stateSchema = z.object({
+const stateBaseSchema = z.object({
   version: z.literal(1), global: globalPreferencesSchema,
   direct: preferencesPatchSchema, group: preferencesPatchSchema,
   chats: z.record(z.string(), preferencesPatchSchema),
@@ -114,12 +119,19 @@ export const stateSchema = z.object({
   profiles: z.record(z.string(), profileSchema),
   auto: z.record(z.string(), autoSchema),
   ledger: z.record(z.string(), z.array(z.object({ at: z.number(), messageId: z.string().max(250) })).max(100)),
-  stickers: z.array(stickerSchema).max(2000),
+  stickers: z.array(legacyStickerSchema).max(MAX_LIBRARY_STICKERS),
   forgottenStickers: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(5000).default([])
 }).strict();
+export const legacyStateSchema = stateBaseSchema;
+export const stateSchema = stateBaseSchema.extend({ version: z.literal(2), stickers: z.array(stickerSchema).max(MAX_LIBRARY_STICKERS) }).strict()
+  .superRefine((state, context) => {
+    const ids = new Set(state.stickers.map(s => s.id));
+    if (ids.size !== state.stickers.length || state.stickers.some(s => state.forgottenStickers.includes(s.id))) context.addIssue({ code: 'custom', message: 'Invalid sticker references.' });
+    if (state.stickers.reduce((total, s) => total + s.size, 0) > MAX_LIBRARY_BYTES) context.addIssue({ code: 'custom', message: 'Sticker library is full.' });
+  });
 export type State = z.infer<typeof stateSchema>;
 export function initialState(): State {
-  return { version: 1, global: { ...defaults }, direct: {}, group: {}, chats: {},
+  return { version: 2, global: { ...defaults }, direct: {}, group: {}, chats: {},
     provider: 'openai', models: { openai: 'gpt-6-luna', anthropic: 'claude-sonnet-5-5' }, reasoning: { openai: {}, anthropic: {} },
     conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [], forgottenStickers: [] };
 }
@@ -131,6 +143,7 @@ export type Status = {
   runtimePaused: boolean;
   state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { canSendSticker: boolean; stickerSendBlockedReason?: StickerSendBlockedReason; loadedSentSamples?: number; destinationToken?: string };
   panel?: Panel; theme?: 'dark' | 'light';
+  stickerLibraryError?: string;
   stickerLocation?: { id: string; state: 'looking' | 'found' | 'missing' | 'unavailable' } | null;
   stickerSend?: StickerSend | null;
   stickerShield?: StickerShield | null;

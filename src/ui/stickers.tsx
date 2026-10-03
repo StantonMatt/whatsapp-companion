@@ -1,3 +1,4 @@
+import { stickerURL } from '../shared/sticker-url';
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Status, Sticker } from '../shared/model';
 import type { StickerSend } from '../shared/sticker-transfer';
@@ -15,6 +16,7 @@ const sendMessage = (send: StickerSend) => send.state === 'missing' ? 'WhatsApp 
   : send.reason === 'draft' && send.detail === 'draft-appeared' && send.sent === 'unknown' ? 'Couldn’t confirm the sticker was sent. Check the chat before sending again.'
   : send.reason === 'draft' ? 'Send or clear your draft first, then send the sticker.'
   : noEditor(send) ? 'WhatsApp didn’t open its sticker editor. Nothing was sent.'
+  : send.sent === 'not-sent' ? 'Couldn’t send the sticker. Nothing was sent.'
   : send.sent === 'confirmed' ? 'Sticker sent.'
   : 'Couldn’t confirm the sticker was sent. Check the chat before sending it again.';
 // Only these rows offer a new send: an animated miss (Send still / Try again) and a maker failure that sent nothing (Try again).
@@ -23,7 +25,7 @@ const offer = (send: StickerSend) => send.state === 'missing' ? { label: 'Send s
   : noEditor(send) ? { label: 'Try again', primary: false, still: send.route === 'maker' && send.animated } : null;
 const announcement = (send: StickerSend) => inFlight(send) ? 'Sending sticker…' : send.reason === 'draft' ? sendMessage(send) : ({
   sent: `Sent to ${send.name}`, missing: 'Animated version not loaded. Send still?', cancelled: 'Cancelled',
-  failed: noEditor(send) ? 'WhatsApp didn’t open its sticker editor' : send.sent === 'confirmed' ? 'Sticker sent' : 'Couldn’t confirm the sticker was sent'
+  failed: noEditor(send) ? 'WhatsApp didn’t open its sticker editor' : send.sent === 'not-sent' ? 'Nothing was sent' : send.sent === 'confirmed' ? 'Sticker sent' : 'Couldn’t confirm the sticker was sent'
 } as Record<StickerSend['state'], string>)[send.state];
 const COLUMNS = 3;
 const RESULT_MS = 1500;
@@ -41,6 +43,8 @@ type FocusTarget = { id: string; button: 'send' | 'edit' | 'offer' } | 'search'
   | { id: string; field: 'textarea' | 'keep'; open?: boolean; scroll?: boolean };
 
 export function Stickers({ status, act }: { status: Status; act: Act }) {
+  const [broken, setBroken] = useState(() => new Set<string>());
+  const [imageRevisions, setImageRevisions] = useState(() => new Map<string, number>());
   const [query, setQuery] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
   // Filtering may hide an editor without discarding its sticker's unsaved text.
@@ -262,7 +266,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   return <>
     <input ref={search} className="search" aria-label="Search stickers" placeholder="Search stickers" value={query} onChange={e => { queryRevision.current++; locating.current = null; setFocus(null); setQuery(e.target.value); }}/>
     {/* A filtered-out send stays explained here, so the dimmed Send buttons have a visible reason. */}
-    <p className="hint">{all.length} stickers indexed{unavailableLabel && !busy && ` · ${unavailableLabel}`}{busy && !visible.current.has(busy.id) ? ' · Sending…' : filteredMessage ? ` · ${sendMessage(filteredMessage)}` : flash && ` · ${flash}`}</p>
+    <p className="hint">{status.stickerLibraryError ? `${status.stickerLibraryError} · ` : ''}{all.length} stickers indexed{unavailableLabel && !busy && ` · ${unavailableLabel}`}{busy && !visible.current.has(busy.id) ? ' · Sending…' : filteredMessage ? ` · ${sendMessage(filteredMessage)}` : flash && ` · ${flash}`}</p>
     <p className="sr-only" aria-live="polite">{shown ? announcement(shown) : ''}</p>
     {!stickers.length && <div className="empty"><span aria-hidden="true">▧</span><p>{query ? 'No matching stickers' : 'Your stickers will appear here'}</p><small>{query ? 'Try another word or phrase.' : 'Open WhatsApp’s sticker picker and select Favorites. Wait for your stickers to load.'}</small></div>}
     {!!stickers.length && <div className="sticker-grid" ref={grid}>{stickers.flatMap((sticker, i) => {
@@ -274,7 +278,8 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
       const expanded = editing?.id === sticker.id;
       const card = <div key={sticker.id} className="sticker" role="group" data-sticker={sticker.id} aria-label={sticker.searchTerms.slice(0, 120) || 'Sticker without search terms'} data-attached={detailId === sticker.id ? '' : undefined}>
         <div className="sticker-art" title={sticker.searchTerms || undefined} data-busy={own && own !== 'missing' && own !== 'failed' ? '' : undefined}>
-          <img src={sticker.image} alt="" draggable={false}/>
+          <img key={`${sticker.id}-${imageRevisions.get(sticker.id) ?? 0}`} src={stickerURL(sticker.id)} loading="lazy" alt="" draggable={false} onError={() => setBroken(previous => previous.has(sticker.id) ? previous : new Set(previous).add(sticker.id))} onLoad={() => setBroken(previous => { if (!previous.has(sticker.id)) return previous; const next = new Set(previous); next.delete(sticker.id); return next; })}/>
+          {broken.has(sticker.id) && <div className="sticker-overlay"><button onClick={() => setImageRevisions(previous => new Map(previous).set(sticker.id, (previous.get(sticker.id) ?? 0) + 1))}>Image unavailable · Retry</button></div>}
           {ownBusy && <div className="sticker-overlay" aria-hidden="true"><span className="spinner"/>Sending…</div>}
           {own === 'sent' && <div className="sticker-overlay" aria-hidden="true"><span className="done"><CheckIcon/></span>Sent</div>}
           {own === 'cancelled' && <div className="sticker-overlay muted" aria-hidden="true">Cancelled</div>}

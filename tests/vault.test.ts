@@ -74,3 +74,29 @@ test.each([false, true])('invalid key rejects without changing stored or session
   expect(() => vault.set('openai', 'invalid-key', persist)).toThrow('valid API key');
   expect(write).not.toHaveBeenCalled(); expect(readFileSync(path, 'utf8')).toBe(before); expect(vault.get('openai')).toBe(key);
 });
+test.each(['write', 'sync', 'replace', 'rename', 'directory-sync', 'directory'])('vault removal failure at %s keeps disk and memory aligned on later writes', checkpoint => {
+  let fail = false;
+  const vault = new Vault(dir, step => { if (fail && step === `vault:${checkpoint}`) throw new Error('IO failure'); });
+  vault.set('openai', key, true); fail = true;
+  const replaced = !['write', 'sync', 'replace'].includes(checkpoint);
+  if (replaced) expect(() => vault.remove('openai')).not.toThrow();
+  else expect(() => vault.remove('openai')).toThrow('IO failure');
+  expect(vault.has('openai')).toBe(!replaced); expect(new Vault(dir).has('openai')).toBe(!replaced);
+  expect(vault.durabilityWarning).toBe(replaced); fail = false;
+  vault.set('anthropic', key, true);
+  expect(new Vault(dir).has('openai')).toBe(!replaced); expect(vault.durabilityWarning).toBe(false);
+});
+test.each([false, true])('vault replacement adopts its session and durable state after directory sync failure (persist: %s)', persist => {
+  let fail = false;
+  const vault = new Vault(dir, step => { if (fail && step.endsWith(':directory-sync')) throw new Error('sync failed'); });
+  vault.set('openai', key, true); fail = true;
+  const replacement = 'sk-synthetic_replacement_never_real';
+  expect(() => vault.set('openai', replacement, persist)).not.toThrow();
+  expect(vault.get('openai')).toBe(replacement); expect(vault.durabilityWarning).toBe(true);
+  const restored = new Vault(dir); expect(restored.has('openai')).toBe(persist);
+  if (persist) expect(restored.get('openai')).toBe(replacement);
+  expect(() => vault.set('anthropic', key, true)).not.toThrow();
+  expect(vault.has('anthropic')).toBe(true); fail = false;
+  vault.set('anthropic', key, true); expect(vault.durabilityWarning).toBe(false);
+  expect(new Vault(dir).has('openai')).toBe(persist);
+});

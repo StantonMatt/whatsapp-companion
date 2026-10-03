@@ -1,3 +1,4 @@
+import { stickerURL } from '../shared/sticker-url';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Status, StickerShield, ViewBounds } from '../shared/model';
 
@@ -16,7 +17,7 @@ export function useShield(status: Status | undefined) {
   const shield = live && live.nonce !== expired ? live : null;
 
   const send = status?.stickerSend;
-  const art = shield && send?.nonce === shield.nonce ? status?.state.stickers.find(s => s.id === send.id)?.image : undefined;
+  const art = shield && send?.nonce === shield.nonce && status?.state.stickers.some(s => s.id === send.id) ? stickerURL(send.id) : undefined;
   const last = useRef<Drawn | null>(null);
   if (shield) last.current = { shield, art: art ?? (last.current?.shield.nonce === shield.nonce ? last.current.art : undefined) };
   // Opacity may finish before the native resize. Keep the inert layer mounted
