@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Ignored labels get unique groups so they cannot displace pending checks.
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.run_id || 'checks' }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    # Ignore draft updates and labels other than ci:full. Ready PR updates are
+    # rechecked; batch fixes before pushing to keep the monthly cost down.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # Unit tests mock Electron; the fast job does not launch it.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Typecheck
+        run: ./node_modules/.bin/tsc --noEmit
+      - name: Check whitespace (no source linter configured)
+        # On PRs HEAD is GitHub's merge commit, so this checks the whole PR.
+        run: git diff --check HEAD^ HEAD
+      - name: Unit and fixture integration tests
+        run: npm test -- --maxWorkers=2
+      - name: Build
+        # npm run build includes the same typecheck already run above.
+        run: npm run build
+
+  full:
+    needs: fast
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_CACHE: ${{ github.workspace }}/.local/ci-cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.local/ci-cache/electron-builder
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Cache Electron and packaging downloads
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            .local/ci-cache/electron
+            .local/ci-cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+      - name: Install dependencies
+        run: npm ci
+      - name: Download the Electron binary
+        # npm ci on the hosted runner doesn't run electron's install script,
+        # so fetch the binary explicitly (cached via ELECTRON_CACHE).
+        run: node node_modules/electron/install.js && test -x node_modules/electron/dist/electron
+      - name: Install desktop dependencies and sandbox helper
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xvfb xauth libgtk-3-0t64 libnss3 libasound2t64 libgbm1
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+      - name: Sandboxed Electron desktop fixture
+        run: xvfb-run -a npm run test:desktop
+      - name: Package Linux AppImage (never publish)
+        run: npm run package:linux -- --publish never
