@@ -524,9 +524,18 @@ try {
   const stickerEditor = stickerPanel.getByRole('region', { name: 'Search terms', exact: true });
   const stickerTerms = stickerEditor.getByRole('textbox', { name: 'Search terms', exact: true });
   const stickerLocation = stickerEditor.getByRole('status');
+  const editTile = async card => {
+    const edit = stickerPanel.getByRole('button', { name: 'Edit', exact: true });
+    if (await edit.count()) await edit.click();
+    await card.locator('.sticker-art').click();
+  };
+  const leaveEditMode = async () => {
+    const done = stickerPanel.getByRole('button', { name: 'Done', exact: true });
+    if (await done.count()) await done.click();
+  };
   const untaggedCard = stickerPanel.getByRole('group', { name: 'Sticker without search terms', exact: true });
-  await untaggedCard.getByRole('button', { name: 'Add search terms', exact: true }).click();
-  await expect(untaggedCard.getByRole('button', { name: 'Add search terms', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  await editTile(untaggedCard);
+  await expect(untaggedCard.locator('.sticker-art')).toHaveAttribute('aria-expanded', 'true');
   await expect(stickerTerms).toBeFocused();
   await expect(stickerTerms).toHaveAttribute('maxlength', '4000');
   await expect(stickerEditor.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
@@ -538,7 +547,7 @@ try {
   await stickerSearch.fill('gracias "good morning"');
   await expect(stickerPanel.getByRole('group', { name: 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo', exact: true })).toBeVisible();
   console.log('PASS sticker indexing, unified editor and bilingual phrase search');
-  await stickerPanel.getByRole('group', { name: 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo', exact: true }).getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  await editTile(stickerPanel.getByRole('group', { name: 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo', exact: true }));
   await stickerTerms.fill('unsaved search terms');
   await stickerSearch.fill('no matching sticker');
   await expect(stickerEditor).toHaveCount(0);
@@ -566,11 +575,9 @@ try {
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Alex', ready: false, canSendSticker: false });
   expect((await local.evaluate(() => window.companion.status())).chat.destinationToken).not.toBe(tokenBeforeHiding);
   await stickerEditor.getByRole('button', { name: 'Locate in WhatsApp', exact: true }).click();
-  await expect(stickerPanel.getByRole('button', { name: 'Open a chat to send', exact: true })).toHaveAttribute('aria-disabled', 'true');
-  await expect(stickerPanel.locator('.hint')).toHaveText('1 stickers indexed · Open a chat to send');
-  // Playwright treats aria-disabled as disabled. Force trusted input to verify
-  // the handler's guard while retaining the button's focusability.
-  await stickerPanel.getByRole('button', { name: 'Open a chat to send', exact: true }).click({ force: true });
+  await expect(stickerPanel.locator('.sticker-art')).not.toHaveAttribute('aria-disabled', 'true');
+  await expect(stickerPanel.locator('.sticker-strip')).toHaveText('Open a chat to send');
+  // Edit mode remains usable without a chat; direct main actions still refuse sends.
   expect((await local.evaluate(() => window.companion.status())).stickerSend).toBeNull();
   const hiddenSend = await local.evaluate(async () => {
     const status = await window.companion.status();
@@ -592,7 +599,7 @@ try {
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(stickerEditor.getByRole('group', { name: 'Discard changes?', exact: true }).getByRole('button', { name: 'Keep editing', exact: true })).toBeFocused();
   await stickerSearch.fill('no matching sticker');
-  await expect(stickerEditor).toHaveCount(0);
+  await expect(stickerEditor).toBeVisible();
   await stickerSearch.fill('');
   await expect(stickerEditor.getByRole('group', { name: 'Discard changes?', exact: true })).toBeVisible();
   await expect(stickerSearch).toBeFocused();
@@ -606,8 +613,8 @@ try {
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
   await stickerEditor.getByRole('group', { name: 'Discard changes?', exact: true }).getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(stickerEditor).toHaveCount(0);
-  await expect(stickerPanel.getByRole('button', { name: 'Edit search terms', exact: true })).toBeFocused();
-  console.log('PASS a hidden conversation disables Send despite stale identity; location feedback stays inside the panel and preserves edits');
+  await expect(stickerPanel.locator('.sticker-art')).toBeFocused();
+  console.log('PASS a hidden conversation blocks sending while editing remains available; location feedback stays inside the panel and preserves edits');
   const stickerCard = stickerPanel.getByRole('group', { name: 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo', exact: true });
   // This live paragraph has no status role; location feedback does.
   const stickerLive = stickerPanel.locator('[aria-live="polite"]');
@@ -634,7 +641,7 @@ try {
   };
   const savedStickerTerms = 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo';
   await stickerSearch.fill('');
-  await stickerCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  await editTile(stickerCard);
   await stickerTerms.fill('submitted terms fixture');
   await holdStickerActionReply('sticker');
   await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click();
@@ -648,7 +655,7 @@ try {
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
   await stickerEditor.getByRole('button', { name: 'Discard', exact: true }).click();
   const submittedCard = stickerPanel.getByRole('group', { name: 'submitted terms fixture', exact: true });
-  await submittedCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  await editTile(submittedCard);
   await expect(stickerTerms).toHaveValue('submitted terms fixture');
   await stickerTerms.fill('second submission fixture');
   await holdStickerActionReply('sticker');
@@ -656,7 +663,7 @@ try {
   await expect.poll(() => app.evaluate(() => typeof globalThis.releaseStickerActionReply)).toBe('function');
   await expect(stickerEditor.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
-  await stickerPanel.getByRole('group', { name: 'second submission fixture', exact: true }).getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  await editTile(stickerPanel.getByRole('group', { name: 'second submission fixture', exact: true }));
   await releaseStickerActionReply();
   await local.waitForTimeout(100); // A stale acknowledgement must leave this new editor visit open.
   await expect(stickerEditor).toBeVisible(); await expect(stickerTerms).toBeFocused();
@@ -725,7 +732,7 @@ try {
     await nativeStickerTrigger.click(); await expect(nativeStickerPicker).toHaveCount(0);
     console.log('PASS sticker picker diagnostic saves redacted owner-only JSON without changing the picker, and no-picker capture creates no file');
   } finally { await app.evaluate(() => globalThis.restorePickerDiagnosticUi()); }
-  const sendCard = () => stickerCard.getByRole('button', { name: 'Send to Alex', exact: true });
+  const sendCard = () => stickerCard.locator('.sticker-art');
   const stickerState = async () => (await local.evaluate(() => window.companion.status())).stickerSend;
   const holdStickerCommand = async type => app.evaluate(({ BrowserWindow }, type) => {
     const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
@@ -763,11 +770,11 @@ try {
     media.onclick = () => { window.fixtureMediaSent++; };
     document.querySelector('#tools').append(media);
   });
-  await stickerCard.locator('img').click();
+  await leaveEditMode();
   await sendCard().evaluate(button => button.click());
   expect(await stickerState()).toBeNull();
   expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(0);
-  await sendCard().click();
+  await stickerCard.locator('img').click();
   await expect.poll(stickerState).toMatchObject({ route: 'picker', animated: true, state: 'sent' });
   await expect(stickerLive).toHaveText('Sent to Alex');
   await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Sent');
@@ -859,62 +866,51 @@ try {
   const frozenOrder = await gridIds();
   console.log('PASS the open grid keeps its order as stickers are indexed and refreshes order when the query changes');
 
-  // A hidden editor's draft belongs to its sticker, even after another editor opens.
-  // Give B searchable terms temporarily so the query can hide A while showing B.
+  // Switching from a filtered dirty editor still prompts before opening another tile.
   const otherDraftCard = stickerPanel.locator(`[data-sticker="${otherStickerId}"]`);
   const discardPrompt = stickerEditor.getByRole('group', { name: 'Discard changes?', exact: true });
-  await otherCard.getByRole('button', { name: 'Add search terms', exact: true }).click();
-  await stickerTerms.fill('draft recovery fixture');
+  await editTile(otherCard); await stickerTerms.fill('draft recovery fixture');
   await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(stickerEditor).toHaveCount(0);
-  await stickerCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
-  await stickerTerms.fill('unsaved draft for sticker A');
+  await editTile(stickerCard); await stickerTerms.fill('unsaved draft for sticker A');
   await stickerSearch.fill('draft recovery fixture');
-  await expect(stickerCard).toHaveCount(0);
-  await expect(stickerEditor).toHaveCount(0);
-  await otherDraftCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
-  await expect(discardPrompt).toHaveCount(0);
+  await expect(stickerCard).toHaveCount(0); await expect(stickerEditor).toHaveCount(0);
+  await editTile(otherDraftCard);
+  await expect(discardPrompt).toBeVisible(); await expect(stickerTerms).toHaveValue('unsaved draft for sticker A');
+  await local.keyboard.press('Escape'); await expect(stickerEditor).toHaveCount(0);
+  await editTile(otherDraftCard); await discardPrompt.getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(stickerTerms).toHaveValue('draft recovery fixture');
-  await expect(stickerEditor.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
-  await stickerSearch.fill('');
-  await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
-  await stickerCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
-  await expect(stickerTerms).toHaveValue('unsaved draft for sticker A');
-  await expect(stickerEditor.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
-  await otherDraftCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
-  await expect(discardPrompt).toBeVisible();
-  await expect(discardPrompt.getByRole('button', { name: 'Keep editing', exact: true })).toBeFocused();
-  await discardPrompt.getByRole('button', { name: 'Keep editing', exact: true }).click();
-  await expect(stickerTerms).toHaveValue('unsaved draft for sticker A');
-  await otherDraftCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  await stickerSearch.fill(''); await stickerTerms.fill('another unsaved draft');
+  await stickerPanel.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(discardPrompt).toBeVisible(); await discardPrompt.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await expect(stickerTerms).toHaveValue('another unsaved draft');
+  await stickerPanel.getByRole('button', { name: 'Done', exact: true }).click();
   await discardPrompt.getByRole('button', { name: 'Discard', exact: true }).click();
-  await expect(stickerTerms).toHaveValue('draft recovery fixture');
-  // Restore B's untagged state for the remaining concurrency and Forget checks.
-  await stickerTerms.fill('');
-  await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(stickerEditor).toHaveCount(0);
-  await stickerCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
-  await expect(stickerTerms).toHaveValue('happy, feliz, thanks, gracias, good morning friend, buenos días amigo');
-  await expect(stickerEditor.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await expect(stickerPanel.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  await expect(stickerSearch).toHaveValue('');
+  await editTile(otherDraftCard); await stickerTerms.fill('');
+  await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click(); await expect(stickerEditor).toHaveCount(0);
+  await editTile(stickerCard); await expect(stickerTerms).toHaveValue(savedStickerTerms);
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect.poll(gridIds).toEqual(frozenOrder);
-  console.log('PASS hidden sticker drafts survive opening another editor; visible switches still prompt and Discard clears only that sticker');
+  await leaveEditMode(); await expect.poll(gridIds).toEqual(frozenOrder);
+  console.log('PASS hidden dirty editors prompt on switching; Done offers Keep editing/Discard and preserves Search');
 
   // Hold the lookup to exercise finding deterministically, without live accounts.
   await holdStickerCommand('prepareSticker');
   await sendCard().click();
-  await expect(stickerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toHaveAttribute('aria-disabled', 'true');
+  await expect(stickerCard.locator('.sticker-art')).toHaveAttribute('data-busy', '');
   await expect(stickerLive).toHaveText('Sending sticker…');
-  await expect(stickerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toBeFocused();
+  await expect(stickerCard.locator('.sticker-art')).toBeFocused();
   await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Sending…');
-  await expect(otherCard.getByRole('button', { name: 'Wait for the current sticker', exact: true })).toHaveAttribute('aria-disabled', 'true');
-  await expect(otherCard.getByRole('button', { name: 'Add search terms', exact: true })).toBeEnabled();
+  await expect(otherCard.locator('.sticker-art')).not.toHaveAttribute('aria-disabled', 'true');
   const findingSend = await stickerState();
-  await otherCard.getByRole('button', { name: 'Wait for the current sticker', exact: true }).click({ force: true });
+  await otherCard.locator('.sticker-art').click({ force: true });
   expect((await stickerState()).nonce).toBe(findingSend.nonce);
-  await otherCard.getByRole('button', { name: 'Add search terms', exact: true }).click();
+  await expect(stickerLive).toHaveText('Wait for the current sticker');
+  await editTile(otherCard);
   await expect(stickerTerms).toBeFocused();
   await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
+  await leaveEditMode();
   await expect.poll(gridIds).toEqual(frozenOrder);
   const duplicateSend = await local.evaluate(id => window.companion.status().then(status => window.companion.action({ type: 'sendSticker', id, nonce: crypto.randomUUID(), destinationToken: status.chat.destinationToken })), findingSend.id);
   expect(duplicateSend.ok).toBe(false);
@@ -934,32 +930,33 @@ try {
   expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(1);
   console.log('PASS finding can be cancelled; other-card clicks and duplicate sends are rejected, edits remain available and search keeps the same ticket');
 
-  // Finding replaces this editor's original focus-return button with Cancel.
-  await stickerCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  // Escape closes the editor, leaves edit mode, then cancels the active send.
   await holdStickerCommand('prepareSticker'); await sendCard().click();
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
-  await stickerTerms.focus(); await local.keyboard.press('Escape');
-  await expect(stickerEditor).toHaveCount(0);
-  await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeFocused();
+  await editTile(stickerCard); await stickerTerms.focus(); await local.keyboard.press('Escape');
+  await expect(stickerEditor).toHaveCount(0); await expect(stickerCard.locator('.sticker-art')).toBeFocused();
+  expect((await stickerState()).state).toBe('finding');
+  await local.keyboard.press('Escape');
+  await expect(stickerPanel.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
   expect((await stickerState()).state).toBe('finding');
   await local.keyboard.press('Escape');
   await expect.poll(async () => (await stickerState()).state).toBe('cancelled');
-  await expect(stickerPanel).toBeVisible();
-  await releaseStickerCommand(); await expect(nativeStickerPicker).toHaveCount(0);
-  console.log('PASS Escape closes the editor to the current Cancel button, then cancels Finding');
+  await expect(stickerPanel).toBeVisible(); await releaseStickerCommand(); await expect(nativeStickerPicker).toHaveCount(0);
+  console.log('PASS Escape closes the editor, leaves edit mode, then cancels Finding');
 
-  await otherCard.getByRole('button', { name: 'Add search terms', exact: true }).click();
+  await editTile(otherCard);
   await stickerTerms.fill('temporary fixture sticker');
   await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click();
   const temporaryCard = stickerPanel.getByRole('group', { name: 'temporary fixture sticker', exact: true });
-  await temporaryCard.getByRole('button', { name: 'Edit search terms', exact: true }).click();
+  await editTile(temporaryCard);
   const forgottenFixtureImage = `data:image/webp;base64,${(await readFile(join(dir, 'stickers', `${otherStickerId}.webp`))).toString('base64')}`;
   await remote.locator('#fixture-extra-sticker').evaluate(image => image.remove());
   await stickerEditor.getByRole('button', { name: 'Forget', exact: true }).click();
   await expect(temporaryCard).toHaveCount(0); await expect(stickerEditor).toHaveCount(0);
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
   await expect(sendCard()).toBeFocused();
-  console.log('PASS Save closes the editor and Forget removes the disposable card and returns focus to the remaining Send');
+  await leaveEditMode();
+  console.log('PASS Save closes the editor and Forget removes the disposable card and returns focus to the remaining tile');
   const observeFixtureImage = async (application, image) => application.evaluate(({ ipcMain, BrowserWindow }, image) => {
     const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
     ipcMain.emit('companion:event', { sender: contents, senderFrame: contents.mainFrame }, { type: 'sticker', image });
@@ -993,7 +990,41 @@ try {
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
   console.log('PASS trusted canvas fingerprints suppress a re-encoding, retain different content and separate animation');
 
-  await holdStickerCommand('prepareSticker'); await sendCard().click();
+  // Populate real fixture library entries so the grid genuinely overflows the panel.
+  const scrollImages = await remote.evaluate(() => Array.from({ length: 40 }, (_, i) => {
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
+    const context = canvas.getContext('2d'); let seed = (i + 1) * 7919;
+    const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return seed >>> 0; };
+    for (let y = 0; y < 64; y += 8) for (let x = 0; x < 64; x += 8) {
+      context.fillStyle = `rgb(${random() % 256}, ${random() % 256}, ${random() % 256})`; context.fillRect(x, y, 8, 8);
+    }
+    return canvas.toDataURL('image/webp');
+  }));
+  await app.evaluate(({ ipcMain, BrowserWindow }, images) => {
+    const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
+    for (const image of images) ipcMain.emit('companion:event', { sender: contents, senderFrame: contents.mainFrame }, { type: 'sticker', image });
+  }, scrollImages);
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length, { timeout: 10000 }).toBe(41);
+  await expect(stickerPanel.locator('.count')).toHaveText('41');
+  const searchBeforeScroll = await stickerSearch.boundingBox();
+  await stickerPanel.evaluate(panel => { panel.scrollTop = panel.scrollHeight; });
+  await expect.poll(() => stickerPanel.evaluate(panel => panel.scrollTop)).toBeGreaterThan(50);
+  const searchAfterScroll = await stickerSearch.boundingBox();
+  expect(Math.abs(searchAfterScroll.y - searchBeforeScroll.y)).toBeLessThan(1);
+  await stickerSearch.click(); await local.keyboard.type('happy');
+  await expect(stickerSearch).toHaveValue('happy'); await expect(stickerPanel.locator('.count')).toHaveText('1 of 41');
+  await stickerSearch.fill(''); await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  const lastTile = stickerPanel.locator('.sticker-art').last();
+  await lastTile.focus(); await lastTile.press('Space'); await expect(stickerTerms).toBeFocused();
+  await local.keyboard.press('Escape'); await expect(stickerEditor).toHaveCount(0);
+  await local.keyboard.press('Escape'); await expect(stickerPanel.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  for (const sticker of (await local.evaluate(() => window.companion.status())).state.stickers.filter(s => s.id !== firstStickerId)) {
+    expect((await local.evaluate(id => window.companion.action({ type: 'forgetSticker', id }), sticker.id)).ok).toBe(true);
+  }
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
+  console.log('PASS header search stays usable after scrolling the real grid, count narrows, and Space opens an editor in edit mode');
+
+  await holdStickerCommand('prepareSticker'); await sendCard().focus(); await sendCard().press('Space');
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
   await stickerSearch.fill('no matching sticker');
   await expect(stickerPanel.getByText('No matching stickers', { exact: true })).toBeVisible();
@@ -1001,11 +1032,11 @@ try {
   await expect.poll(async () => (await stickerState())?.state).toBe('cancelled');
   await expect(stickerPanel).toBeVisible();
   await expect(stickerLive).toHaveText('Cancelled');
-  await expect(stickerPanel.locator('.hint')).toHaveText('1 stickers indexed · Cancelled');
+  await expect(stickerPanel.locator('.sticker-strip')).toHaveText('Cancelled');
   await releaseStickerCommand(); await expect(nativeStickerPicker).toHaveCount(0);
-  await expect(stickerPanel.locator('.hint')).toHaveText('1 stickers indexed');
+  await expect(stickerPanel.locator('.sticker-strip')).toHaveCount(0);
   await stickerSearch.fill('');
-  console.log('PASS Escape cancels finding before closing the panel and announces a filtered card result in the live region and hint');
+  console.log('PASS Escape cancels finding before closing the panel and announces a filtered card result in the live region and header strip');
 
   await holdStickerCommand('prepareSticker'); await sendCard().click();
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
@@ -1039,8 +1070,7 @@ try {
   await holdStickerCommand('sendSticker'); await sendCard().click();
   await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);
   expect((await stickerState()).state).toBe('sending');
-  await expect(stickerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toHaveAttribute('aria-disabled', 'true');
-  await expect(stickerCard.getByRole('button', { name: 'Edit search terms', exact: true })).toHaveAttribute('aria-disabled', 'true');
+  await expect(stickerCard.locator('.sticker-art')).toHaveAttribute('data-busy', '');
   await expect(stickerCard.locator('.sticker-overlay')).toHaveText('Sending…');
   // Both active phases use the same Sending announcement.
   await expect(stickerLive).toHaveText('Sending sticker…');
@@ -1092,7 +1122,7 @@ try {
   await expect.poll(() => remote.evaluate(() => window.fixtureStickerSent.length)).toBe(3);
   await expect(nativeStickerPicker).toBeVisible();
   await nativeStickerTrigger.click(); await expect(nativeStickerPicker).toHaveCount(0);
-  console.log('PASS keyboard Send activates the native sticker once and preserves a user-opened picker');
+  console.log('PASS keyboard tile activation sends the native sticker once and preserves a user-opened picker');
 
   await holdStickerCommand('sendSticker'); await sendCard().click();
   await expect.poll(() => app.evaluate(() => Boolean(globalThis.heldStickerCommand))).toBe(true);
@@ -1212,7 +1242,7 @@ try {
   const staticMakerId = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id !== firstStickerId).id;
   const storedStatic = await readFile(join(dir, 'stickers', `${staticMakerId}.webp`));
   const staticMakerCard = stickerPanel.locator(`[data-sticker="${staticMakerId}"]`);
-  const makerSend = () => staticMakerCard.getByRole('button', { name: 'Send to Alex', exact: true });
+  const makerSend = () => staticMakerCard.locator('.sticker-art');
   const makerReady = async (button = makerSend()) => {
     // These scenarios use a settled composer; emptiness selects maker, drafts
     // select picker. Destination availability alone does not prove readiness.
@@ -1271,7 +1301,7 @@ try {
     await expect(editor).toHaveCount(0);
     await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Alex', ready: false, canSendSticker: true });
     await expect(makerSend()).not.toHaveAttribute('aria-disabled', 'true');
-    await expect(stickerPanel.locator('.hint')).not.toContainText('Open a chat to send');
+    expect(await stickerPanel.locator('.sticker-head').innerText()).not.toContain('Open a chat to send');
     await makerSend().click();
     await expect.poll(stickerState, { timeout: 8000 }).toMatchObject({ id: staticMakerId, route: 'picker', animated: false, state: 'sent', sent: 'confirmed' });
     expect(await remote.evaluate(() => window.fixtureStickerSent.length)).toBe(composerlessSendsBefore + 1);
@@ -1300,11 +1330,11 @@ try {
       window.makerFrames = [];
       const sample = () => {
         const panel = document.querySelector('.app-frame'), shield = document.querySelector('.shield');
-        const sends = [...document.querySelectorAll('.sticker .send')];
+        const sends = [...document.querySelectorAll('.sticker .sticker-art')];
         window.makerFrames.push({ width: innerWidth, left: panel.getBoundingClientRect().left, panelWidth: panel.getBoundingClientRect().width,
-          shield: Boolean(shield), noChat: Boolean(document.querySelector('.hint')?.textContent.includes('Open a chat to send')) || sends.some(button => button.getAttribute('aria-label') === 'Open a chat to send'),
+          shield: Boolean(shield), noChat: Boolean(document.querySelector('.sticker-strip')?.textContent.includes('Open a chat to send')) || sends.some(button => button.getAttribute('aria-disabled') === 'true'),
           leaving: shield?.hasAttribute('data-leaving') ?? false,
-          sending: Boolean([...document.querySelectorAll('.sticker-overlay')].some(overlay => overlay.textContent.includes('Sending…'))) || Boolean(document.querySelector('.hint')?.textContent.includes('Sending…')) });
+          sending: Boolean([...document.querySelectorAll('.sticker-overlay')].some(overlay => overlay.textContent.includes('Sending…'))) || Boolean(document.querySelector('.sticker-strip')?.textContent.includes('Sending…')) });
         window.makerFrameRequest = requestAnimationFrame(sample);
       };
       window.makerFrameRequest = requestAnimationFrame(sample);
@@ -1368,8 +1398,8 @@ try {
   await expect.poll(controlsBounds).toEqual({ x: originalControlsBounds.x, y: 0, width: windowBounds.width - originalControlsBounds.x, height: windowBounds.height });
   await expect(local.locator('.shield')).toBeVisible();
   await expect(stickerPanel).toHaveCSS('width', `${originalControlsBounds.width}px`);
-  await expect(staticMakerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(0);
-  await expect(staticMakerCard.getByRole('button', { name: 'Sending sticker…', exact: true })).toBeFocused();
+  await expect(staticMakerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(1);
+  await expect(staticMakerCard.locator('.sticker-art')).toBeFocused();
   await expect(stickerLive).toHaveText('Sending sticker…');
   const dispatchNativeKey = () => app.evaluate(({ BrowserWindow }) => {
     const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
@@ -1478,10 +1508,10 @@ try {
   await remote.evaluate(() => { window.fixtureStickerEditorDelay = 1500; });
   await makerReady(); await startMakerFrames(); const filteredNonce = await startMaker();
   await stickerPanel.getByRole('textbox', { name: 'Search stickers', exact: true }).fill('no matching sticker');
-  await expect(stickerPanel.locator('.hint')).toContainText('Sending…');
+  await expect(stickerPanel.locator('.sticker-strip')).toContainText('Sending…');
   await expect.poll(stickerState).toMatchObject({ nonce: filteredNonce, state: 'sent' });
-  await expect(stickerPanel.locator('.hint')).toContainText('Sent to Alex');
-  await expect(stickerPanel.locator('.hint')).not.toContainText('Open a chat to send');
+  await expect(stickerPanel.locator('.sticker-strip')).toContainText('Sent to Alex');
+  expect(await stickerPanel.locator('.sticker-head').innerText()).not.toContain('Open a chat to send');
   await assertShieldCleared(); await remote.waitForTimeout(850); await assertMakerFrames();
   await stickerPanel.getByRole('textbox', { name: 'Search stickers', exact: true }).fill('');
   await expect(stickerSearch).toHaveValue('');
@@ -1561,11 +1591,11 @@ try {
   const preparingNonce = await startMaker(); await expect.poll(stickerState).toMatchObject({ nonce: preparingNonce, state: 'preparing' });
   await expect(local.locator('.shield')).toBeVisible();
   await expect.poll(() => remote.evaluate(() => window.fixtureMakerAssignments)).toBe(beforePreparingAssignments + 1);
-  await expect(staticMakerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(0);
+  await expect(staticMakerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toHaveCount(1);
   await local.keyboard.press('Escape');
   await expect.poll(stickerState).toMatchObject({ nonce: preparingNonce, state: 'cancelled' });
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ canSendSticker: false, stickerSendBlockedReason: 'busy' });
-  await expect(staticMakerCard.getByRole('button', { name: 'Wait for the current sticker', exact: true })).toHaveAttribute('aria-disabled', 'true');
+  await expect(staticMakerCard.locator('.sticker-art')).not.toHaveAttribute('aria-disabled', 'true');
   await assertShieldCleared();
   expect(await remote.evaluate(() => window.fixtureMakerSent.length)).toBe(beforePreparingCancel);
   await remote.waitForTimeout(2200); await expect(remote.locator('#fixture-sticker-editor')).toHaveCount(0);
@@ -2110,15 +2140,15 @@ try {
   await rm(join(migrationDir, 'stickers', `${migrationId}.webp`));
   await migrated.reload();
   await migrated.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
-  await expect(migrated.getByRole('button', { name: 'Image unavailable · Retry' })).toBeVisible();
+  await expect(migrated.getByRole('button', { name: 'Image unavailable. Retry' })).toBeVisible();
   expect((await migrated.evaluate(() => window.companion.status())).state.stickers).toHaveLength(1);
   await expect.poll(async () => (await migrated.evaluate(() => window.companion.status())).chat.destinationToken).not.toBeUndefined();
   const missingSend = await migrated.evaluate(id => window.companion.status().then(status => window.companion.action({ type: 'sendSticker', id, nonce: crypto.randomUUID(), destinationToken: status.chat.destinationToken })), migrationId);
   expect(missingSend).toMatchObject({ ok: false, error: expect.stringContaining('missing or damaged') });
   await writeFile(join(migrationDir, 'stickers', `${migrationId}.webp`), migrationBytes, { mode: 0o600 });
-  await migrated.getByRole('button', { name: 'Image unavailable · Retry' }).click();
+  await migrated.getByRole('button', { name: 'Image unavailable. Retry' }).click();
   await expect.poll(() => migrated.locator(`[data-sticker="${migrationId}"] img`).evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
-  await expect(migrated.getByRole('button', { name: 'Image unavailable · Retry' })).toHaveCount(0);
+  await expect(migrated.getByRole('button', { name: 'Image unavailable. Retry' })).toHaveCount(0);
   console.log('PASS missing blobs retain cards, sends fail closed, and restoring the file plus Retry recovers the image');
 
 } catch (error) {

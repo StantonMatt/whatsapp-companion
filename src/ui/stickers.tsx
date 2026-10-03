@@ -27,25 +27,28 @@ const announcement = (send: StickerSend) => inFlight(send) ? 'Sending sticker…
   sent: `Sent to ${send.name}`, missing: 'Animated version not loaded. Send still?', cancelled: 'Cancelled',
   failed: noEditor(send) ? 'WhatsApp didn’t open its sticker editor' : send.sent === 'not-sent' ? 'Nothing was sent' : send.sent === 'confirmed' ? 'Sticker sent' : 'Couldn’t confirm the sticker was sent'
 } as Record<StickerSend['state'], string>)[send.state];
-const COLUMNS = 3;
 const RESULT_MS = 1500;
 const inFlight = (send: StickerSend | null) => send?.state === 'finding' || send?.state === 'preparing' || send?.state === 'sending';
 // Before WhatsApp's own Send is clicked, the send can still be called off.
 const cancellable = (send: StickerSend | null) => send?.state === 'finding' || send?.state === 'preparing';
 
-const SendIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 21.5 12 3.4 3.6v6.5L15.2 12 3.4 13.9z"/></svg>;
-const EditIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" d="M4.5 19.5h3.8L19.1 8.7a2 2 0 0 0 0-2.8l-1-1a2 2 0 0 0-2.8 0L4.5 15.7z"/><path stroke="currentColor" strokeWidth="1.9" d="m13.8 6.4 3.8 3.8"/></svg>;
 const CheckIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" d="m5.5 12.5 4.2 4.2 8.8-9.2"/></svg>;
 
-type Editor = { id: string; prompt?: { next: string | null } };
+type Exit = 'done' | 'panel' | 'settings';
+type Editor = { id: string; prompt?: { next: string | null; exit?: Exit } };
 type Draft = Editor & { text: string };
-type FocusTarget = { id: string; button: 'send' | 'edit' | 'offer' } | 'search'
+type FocusTarget = { id: string; button: 'tile' | 'offer' } | 'search'
   | { id: string; field: 'textarea' | 'keep'; open?: boolean; scroll?: boolean };
 
 export function Stickers({ status, act }: { status: Status; act: Act }) {
   const [broken, setBroken] = useState(() => new Set<string>());
   const [imageRevisions, setImageRevisions] = useState(() => new Map<string, number>());
   const [query, setQuery] = useState('');
+  const [editMode, setEditMode] = useState(false);
+  const [columns, setColumns] = useState(1);
+  const [busyNotice, setBusyNotice] = useState('');
+  const [dismissedStop, setDismissedStop] = useState<number | null>(null);
+  const countId = useId();
   const [editor, setEditor] = useState<Editor | null>(null);
   // Filtering may hide an editor without discarding its sticker's unsaved text.
   // Both states belong to this panel instance, so closing it discards all drafts.
@@ -53,7 +56,6 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const [local, setLocal] = useState<{ id: string; nonce: string; name: string } | null>(null);
   // A result left over from before the panel opened is not shown again.
   const [hidden, setHidden] = useState(() => status.stickerSend && !inFlight(status.stickerSend) ? status.stickerSend.nonce : null);
-  const [flash, setFlash] = useState<string | null>(null);
   // The chat each send from this panel went to. A row offering a new send closes when the chat changes.
   const origin = useRef(new Map<string, Pick<Status['chat'], 'chatId' | 'settingsId' | 'name'>>());
   const grid = useRef<HTMLDivElement>(null);
@@ -78,7 +80,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   // window settles. Main temporarily publishes no settings scope during that
   // window; it is not a chat change. A recovered/different scope still closes
   // the offer, and start() requires a recognized destination and a fresh token.
-  const stale = !!send && !!offer(send) && (!destination ||
+  const stale = !!send && (send.state === 'failed' || send.state === 'missing') && !!destination && (
     destination.chatId !== status.chat.chatId || destination.name !== status.chat.name ||
     ((status.chat.ready || status.chat.settingsId != null) && destination.settingsId !== status.chat.settingsId));
   const shown = send && send.nonce !== hidden && !stale ? send : null;
@@ -87,15 +89,38 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const unavailableLabel = status.chat.stickerSendBlockedReason === 'busy' ? 'Wait for the current sticker'
     : !status.chat.canSendSticker ? 'Open a chat to send' : null;
   const message = shown && (shown.state === 'missing' || shown.state === 'failed') ? shown : null;
-  const editingSticker = editor && visible.current.has(editor.id) ? all.find(s => s.id === editor.id) : null;
+  const editingSticker = editor ? all.find(s => s.id === editor.id) : null;
   const editing: Draft | null = editor && editingSticker ? { ...editor, text: drafts.get(editor.id) ?? editingSticker.searchTerms } : null;
   const latest = useRef({ editor, drafts, all, message }); latest.current = { editor, drafts, all, message };
   // One detail row at a time: an open editor defers a message for another card.
-  const detailId = editing?.id ?? message?.id;
+  const visibleEditing = editing && visible.current.has(editing.id) ? editing : null;
+  const detailId = visibleEditing?.id ?? (editing?.prompt ? null : message?.id);
   const detailIndex = stickers.findIndex(s => s.id === detailId);
+  const lastChat = useRef(status.chat);
+  useEffect(() => {
+    const previous = lastChat.current;
+    if (previous.chatId !== status.chat.chatId || previous.name !== status.chat.name ||
+      ((status.chat.ready || status.chat.settingsId != null) && previous.settingsId !== status.chat.settingsId)) {
+      if (message) setHidden(message.nonce);
+    }
+    // A temporary absent scope during maker cleanup is not a chat change.
+    if (status.chat.ready || status.chat.settingsId != null || previous.chatId !== status.chat.chatId) lastChat.current = status.chat;
+  }, [status.chat.chatId, status.chat.name, status.chat.settingsId, status.chat.ready]);
   // Keep the reason visible until dismissed, even if Search hides its row.
   const filteredMessage = message && !visible.current.has(message.id) ? message : null;
 
+  useLayoutEffect(() => {
+    const element = grid.current; if (!element) return;
+    const measure = () => {
+      const tracks = getComputedStyle(element).gridTemplateColumns.split(/\s+/).filter(track => /^\d+(?:\.\d+)?px$/.test(track));
+      setColumns(Math.max(1, tracks.length));
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(element); window.addEventListener('resize', measure);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
+  }, []);
+  useEffect(() => { if (!busy && status.chat.stickerSendBlockedReason !== 'busy') setBusyNotice(''); }, [busy?.nonce, busy?.state, status.chat.stickerSendBlockedReason]);
   useEffect(() => { if (local && live?.nonce === local.nonce) setLocal(null); }, [local, live?.nonce]);
   useEffect(() => {
     setEditor(current => current && !all.some(s => s.id === current.id) ? null : current);
@@ -111,15 +136,12 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     if (!send || inFlight(send) || send.nonce === hidden || stale) return;
     const timers: ReturnType<typeof setTimeout>[] = [];
     if (send.state === 'sent' || send.state === 'cancelled') timers.push(setTimeout(() => setHidden(send.nonce), RESULT_MS));
-    if (!visible.current.has(send.id)) {
-      if (send.state === 'sent' || send.state === 'cancelled') { setFlash(announcement(send)); timers.push(setTimeout(() => setFlash(null), RESULT_MS)); }
-    }
     // The animated miss moves focus to Send still, unless the user has moved on from this card.
-    else if (send.state === 'missing') {
+    if (visible.current.has(send.id) && send.state === 'missing') {
       const card = grid.current?.querySelector(`[data-sticker="${send.id}"]`), active = document.activeElement;
       if (detailId === send.id && (!active || active === document.body || card?.contains(active))) setFocus({ id: send.id, button: 'offer' });
     }
-    return () => { timers.forEach(clearTimeout); setFlash(null); };
+    return () => { timers.forEach(clearTimeout); };
   }, [send?.nonce, send?.state, send?.reason, send?.detail]);
   useLayoutEffect(() => {
     const target = focus; if (!target) return;
@@ -127,11 +149,11 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     setFocus(null);
     const row = grid.current?.querySelector<HTMLElement>('.sticker-detail');
     const card = target !== 'search' ? grid.current?.querySelector<HTMLElement>(`[data-sticker="${target.id}"]`) : null;
-    const fallback = card?.querySelector<HTMLElement>('.edit:not([aria-disabled="true"]), .cancel') ?? card?.querySelector<HTMLElement>('.send') ?? search.current;
+    const fallback = card?.querySelector<HTMLElement>('.sticker-art') ?? search.current;
     const element = (target === 'search' ? search.current
       : 'field' in target ? editing?.id === target.id ? row?.querySelector<HTMLElement>(target.field === 'textarea' ? 'textarea' : '.discard button') : null
       : target.button === 'offer' ? row?.querySelector<HTMLElement>('.msg button')
-      : card?.querySelector<HTMLElement>(target.button === 'send' ? '.send' : '.edit:not([aria-disabled="true"])')) ?? fallback;
+      : card?.querySelector<HTMLElement>('.sticker-art')) ?? fallback;
     element?.focus({ preventScroll: target !== 'search' && 'field' in target && !!target.open });
     if (element && target !== 'search' && 'field' in target) {
       if (target.open && element instanceof HTMLTextAreaElement) element.setSelectionRange(element.value.length, element.value.length);
@@ -151,8 +173,11 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   }, [status.stickerLocation?.id, status.stickerLocation?.state]);
 
   const start = (event: React.MouseEvent, id: string, still = false) => {
-    // Only a trusted click or key press on Send, Send still or Try again may authorize a send.
-    if (!event.nativeEvent.isTrusted || sendBlocked || !status.chat.destinationToken) return false;
+    // Native button activation handles click, Enter and Space; synthetic events grant no send permission.
+    if (!event.nativeEvent.isTrusted) return false;
+    if (busy || status.chat.stickerSendBlockedReason === 'busy') { setBusyNotice('Wait for the current sticker'); return false; }
+    if (sendBlocked || !status.chat.destinationToken) return false;
+    setBusyNotice('');
     const nonce = crypto.randomUUID();
     if (send) setHidden(send.nonce);
     origin.current.set(nonce, { chatId: status.chat.chatId, settingsId: status.chat.settingsId, name: status.chat.name });
@@ -162,10 +187,10 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   };
   const retry = (event: React.MouseEvent, sent: StickerSend, original = false) => {
     const action = offer(sent);
-    if (action && start(event, sent.id, original ? false : action.still)) setFocus({ id: sent.id, button: 'send' });
+    if (action && start(event, sent.id, original ? false : action.still)) setFocus({ id: sent.id, button: 'tile' });
   };
   const cancel = () => { void act({ type: 'cancelSticker' }); };
-  const dismiss = (id: string) => { if (message) setHidden(message.nonce); setFocus({ id, button: 'send' }); };
+  const dismiss = (id: string) => { if (message) setHidden(message.nonce); setFocus({ id, button: 'tile' }); };
   const clearDraft = (id: string) => {
     setDrafts(current => { if (!current.has(id)) return current; const next = new Map(current); next.delete(id); return next; });
   };
@@ -177,19 +202,20 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     setEditor({ id });
     setFocus({ id, field: 'textarea', open: true, scroll: true });
   };
-  const finish = (closing: string, next: string | null, returnFocus = true) => {
+  const finish = (closing: string, next: string | null, returnFocus = true, exit?: Exit) => {
     editorSession.current++;
     locating.current = null;
     clearDraft(closing);
     if (latest.current.message?.id === closing) setHidden(latest.current.message.nonce);
+    if (exit) { setEditMode(false); if (exit !== 'done') void act({ type: 'panel', panel: exit === 'panel' ? null : 'settings' }); }
     if (next && all.some(s => s.id === next)) open(next);
-    else { setEditor(current => current?.id === closing ? null : current); if (returnFocus) setFocus({ id: closing, button: 'edit' }); }
+    else { setEditor(current => current?.id === closing ? null : current); if (returnFocus) setFocus({ id: closing, button: 'tile' }); }
   };
-  const requestClose = (next: string | null) => {
-    if (!editing) return;
+  const requestClose = (next: string | null, exit?: Exit) => {
+    if (!editing) { if (exit) { setEditMode(false); if (exit !== 'done') void act({ type: 'panel', panel: exit === 'panel' ? null : 'settings' }); } return; }
     locating.current = null;
-    if (editingSticker && editing.text !== editingSticker.searchTerms) { setEditor({ id: editing.id, prompt: { next } }); setFocus({ id: editing.id, field: 'keep', scroll: true }); }
-    else finish(editing.id, next);
+    if (editingSticker && editing.text !== editingSticker.searchTerms) { setEditor({ id: editing.id, prompt: { next, exit } }); setFocus({ id: editing.id, field: 'keep', scroll: true }); }
+    else finish(editing.id, next, true, exit);
   };
   const keep = () => { setEditor(current => current && { id: current.id }); if (editing) setFocus({ id: editing.id, field: 'textarea' }); };
   const toggle = (id: string) => { if (editing) requestClose(editing.id === id ? null : id); else open(id); };
@@ -198,6 +224,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   escape.current = () => {
     if (editing?.prompt) { keep(); return true; }
     if (editing) { requestClose(null); return true; }
+    if (editMode) { setEditMode(false); return true; }
     if (cancellable(busy)) { cancel(); return true; }
     if (busy) return true;
     if (message) { dismiss(message.id); return true; }
@@ -210,8 +237,8 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   }, []);
 
   const detail = (index: number) => {
-    const col = index % COLUMNS + 1;
-    if (editing && editingSticker) return <StickerEditor key={`editor-${editing.id}`} col={col} sticker={editingSticker} draft={editing} location={status.stickerLocation} message={message?.id === editing.id ? message : null} retry={retry} sendBlocked={sendBlocked}
+    const col = index % columns + 1;
+    if (editing && editingSticker && (visibleEditing || editing.prompt)) return <StickerEditor key={`editor-${editing.id}`} col={col} detached={!visibleEditing} sticker={editingSticker} draft={editing} location={status.stickerLocation} message={message?.id === editing.id ? message : null} retry={retry} sendBlocked={sendBlocked}
       change={text => {
         setDrafts(current => {
           const next = new Map(current);
@@ -219,7 +246,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
           return next;
         });
         setEditor({ id: editing.id });
-      }} close={() => requestClose(null)} keep={keep} discard={() => finish(editing.id, editing.prompt?.next ?? null)}
+      }} close={() => requestClose(null)} keep={keep} discard={() => finish(editing.id, editing.prompt?.next ?? null, true, editing.prompt?.exit)}
       save={async () => {
         const source = document.activeElement;
         const session = editorSession.current, revision = queryRevision.current;
@@ -255,45 +282,68 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
         saving.current.delete(id);
         if (locating.current?.id === id) locating.current = null;
         setEditor(current => current?.id === id ? null : current);
-        if (queryRevision.current === revision && (document.activeElement === source || (!source?.isConnected && document.activeElement === document.body))) setFocus(next ? { id: next.id, button: 'send' } : 'search');
+        if (queryRevision.current === revision && (document.activeElement === source || (!source?.isConnected && document.activeElement === document.body))) setFocus(next ? { id: next.id, button: 'tile' } : 'search');
       }}/>;
-    if (message) return <div key={`message-${message.nonce}`} className="sticker-detail sticker-message" style={{ '--col': col } as React.CSSProperties}>
+    if (message) return <div key={`message-${message.nonce}`} className="sticker-detail sticker-message" role="region" aria-label="Send result" style={{ '--col': col } as React.CSSProperties}>
       <MessageBody message={message} retry={retry} sendBlocked={sendBlocked} dismiss={() => dismiss(message.id)}/>
     </div>;
     return null;
   };
 
+  const stopReason = status.state.global.directStickerDisabledReason;
+  const stopAt = status.state.global.directStickerDisabledAt ?? 0;
+  const stopReasons = { 'logged-out': 'WhatsApp logged out.', 'account-warning': 'WhatsApp showed an account warning.', 'send-error': 'a direct send failed.', 'whatsapp-changed': 'WhatsApp changed.' };
+  const strip = [status.stickerLibraryError, unavailableLabel && !busy ? unavailableLabel : null,
+    busy && !visible.current.has(busy.id) ? 'Sending…' : filteredMessage ? sendMessage(filteredMessage) : shown && !visible.current.has(shown.id) && (shown.state === 'sent' || shown.state === 'cancelled') ? announcement(shown) : null].filter(Boolean).join(' · ');
+  const count = stickers.length < all.length ? `${stickers.length} of ${all.length}` : `${all.length}`;
   return <>
-    <input ref={search} className="search" aria-label="Search stickers" placeholder="Search stickers" value={query} onChange={e => { queryRevision.current++; locating.current = null; setFocus(null); setQuery(e.target.value); }}/>
-    {/* A filtered-out send stays explained here, so the dimmed Send buttons have a visible reason. */}
-    <p className="hint">{status.stickerLibraryError ? `${status.stickerLibraryError} · ` : ''}{all.length} stickers indexed{unavailableLabel && !busy && ` · ${unavailableLabel}`}{busy && !visible.current.has(busy.id) ? ' · Sending…' : filteredMessage ? ` · ${sendMessage(filteredMessage)}` : flash && ` · ${flash}`}</p>
-    <p className="sr-only" aria-live="polite">{shown ? announcement(shown) : ''}</p>
-    {!stickers.length && <div className="empty"><span aria-hidden="true">▧</span><p>{query ? 'No matching stickers' : 'Your stickers will appear here'}</p><small>{query ? 'Try another word or phrase.' : 'Open WhatsApp’s sticker picker and select Favorites. Wait for your stickers to load.'}</small></div>}
-    {!!stickers.length && <div className="sticker-grid" ref={grid}>{stickers.flatMap((sticker, i) => {
-      const own = shown?.id === sticker.id ? shown.state : null;
-      const ownBusy = busy?.id === sticker.id ? busy.state : null;
-      const sendLabel = ownBusy ? 'Sending sticker…' : unavailableLabel ?? (busy ? 'Wait for the current sticker' : `Send to ${status.chat.name}`);
-      const tagged = !!sticker.searchTerms.trim();
-      const editLabel = tagged ? 'Edit search terms' : 'Add search terms';
-      const expanded = editing?.id === sticker.id;
-      const card = <div key={sticker.id} className="sticker" role="group" data-sticker={sticker.id} aria-label={sticker.searchTerms.slice(0, 120) || 'Sticker without search terms'} data-attached={detailId === sticker.id ? '' : undefined}>
-        <div className="sticker-art" title={sticker.searchTerms || undefined} data-busy={own && own !== 'missing' && own !== 'failed' ? '' : undefined}>
-          <img key={`${sticker.id}-${imageRevisions.get(sticker.id) ?? 0}`} src={stickerURL(sticker.id)} loading="lazy" alt="" draggable={false} onError={() => setBroken(previous => previous.has(sticker.id) ? previous : new Set(previous).add(sticker.id))} onLoad={() => setBroken(previous => { if (!previous.has(sticker.id)) return previous; const next = new Set(previous); next.delete(sticker.id); return next; })}/>
-          {broken.has(sticker.id) && <div className="sticker-overlay"><button onClick={() => setImageRevisions(previous => new Map(previous).set(sticker.id, (previous.get(sticker.id) ?? 0) + 1))}>Image unavailable · Retry</button></div>}
-          {ownBusy && <div className="sticker-overlay" aria-hidden="true"><span className="spinner"/>Sending…</div>}
-          {own === 'sent' && <div className="sticker-overlay" aria-hidden="true"><span className="done"><CheckIcon/></span>Sent</div>}
-          {own === 'cancelled' && <div className="sticker-overlay muted" aria-hidden="true">Cancelled</div>}
+    <header className="sticker-head">
+      <div className="sticker-head-row">
+        <button className="back" data-preserve-auto="" aria-label="Close panel" onClick={() => requestClose(null, 'panel')}>←</button>
+        <h1>Stickers</h1>
+        <div className="sticker-search" style={{ '--count-width': `${count.length}ch` } as React.CSSProperties}>
+          <input ref={search} className="search" aria-label="Search stickers" aria-describedby={countId} placeholder="Search" value={query} onChange={e => { queryRevision.current++; locating.current = null; setFocus(null); setQuery(e.target.value); }}/>
+          <span className="count" aria-hidden="true">{count}</span><span className="sr-only" id={countId}>{all.length} stickers indexed</span>
         </div>
-        <div className="sticker-actions">
-          <button className="send" aria-label={sendLabel} title={sendLabel} aria-disabled={sendBlocked || undefined} onClick={e => { if (!sendBlocked) start(e, sticker.id); }}><SendIcon/></button>
-          {ownBusy === 'finding'
-            ? <button className="cancel" aria-label="Cancel sending" title="Cancel sending" onClick={cancel}>×</button>
-            : <button className={tagged ? 'edit' : 'edit untagged'} aria-label={editLabel} title={editLabel} aria-expanded={expanded} aria-disabled={!!ownBusy || undefined} onClick={() => { if (!ownBusy) toggle(sticker.id); }}><EditIcon/></button>}
-        </div>
-      </div>;
-      const rowEnd = Math.min(detailIndex - detailIndex % COLUMNS + COLUMNS - 1, stickers.length - 1);
-      return detailIndex >= 0 && i === rowEnd ? [card, detail(detailIndex)] : [card];
-    })}</div>}
+        <button className={`sticker-mode${editMode ? ' mode-done' : ''}`} onClick={() => editMode ? requestClose(null, 'done') : setEditMode(true)}>{editMode ? 'Done' : 'Edit'}</button>
+      </div>
+      {strip && <p className="sticker-strip"><span>{strip}</span></p>}
+      {stopReason && dismissedStop !== stopAt && <p className="sticker-strip warn" role="status"><span>Direct sending turned off: {stopReasons[stopReason]} Stickers go through WhatsApp’s editor again. <a href="#ai-settings" onClick={e => { e.preventDefault(); requestClose(null, 'settings'); }}>AI settings</a></span><button className="icon-close" aria-label="Dismiss direct-send notice" onClick={() => setDismissedStop(stopAt)}>×</button></p>}
+    </header>
+    <div className="panel-body sticker-body" data-mode={editMode ? 'edit' : 'normal'}>
+      {status.pending && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
+      <p className="sr-only" aria-live="polite">{busyNotice || (shown ? announcement(shown) : '')}</p>
+      {!stickers.length && <div className="empty"><span aria-hidden="true">▧</span><p>{query ? 'No matching stickers' : 'Your stickers will appear here'}</p><small>{query ? 'Try another word or phrase.' : 'Open WhatsApp’s sticker picker and select Favorites. Wait for your stickers to load.'}</small></div>}
+      <div className="sticker-grid" ref={grid} style={{ '--cols': columns } as React.CSSProperties}>{stickers.flatMap((sticker, i) => {
+        const own = shown?.id === sticker.id ? shown.state : null;
+        const ownBusy = busy?.id === sticker.id ? busy.state : null;
+        const expanded = visibleEditing?.id === sticker.id;
+        const imageBroken = broken.has(sticker.id);
+        const name = sticker.searchTerms.slice(0, 120) || 'Sticker without search terms';
+        const label = editMode ? name : ownBusy ? 'Sending sticker…' : own === 'sent' ? `Sent to ${shown!.name}` : own === 'cancelled' ? 'Cancelled' : imageBroken ? 'Image unavailable. Retry' : name;
+        const tileDisabled = !imageBroken && !editMode && !busy && (!status.chat.canSendSticker || !status.chat.destinationToken) && status.chat.stickerSendBlockedReason !== 'busy';
+        const card = <div key={sticker.id} className="sticker" role="group" data-sticker={sticker.id} aria-label={sticker.searchTerms.slice(0, 120) || 'Sticker without search terms'} data-attached={detailId === sticker.id ? '' : undefined}>
+          <button className={`sticker-art${!sticker.searchTerms.trim() ? ' untagged' : ''}`} aria-label={label} title={sticker.searchTerms || undefined}
+            aria-expanded={editMode ? expanded : undefined} aria-disabled={tileDisabled || undefined} data-busy={ownBusy ? '' : undefined} data-sent={own === 'sent' ? '' : undefined} data-cancelled={own === 'cancelled' ? '' : undefined} data-broken={imageBroken || undefined}
+            onClick={e => {
+              if (!editMode && (busy || status.chat.stickerSendBlockedReason === 'busy')) { start(e, sticker.id); return; }
+              if (editMode) { toggle(sticker.id); return; }
+              if (imageBroken) { setImageRevisions(previous => new Map(previous).set(sticker.id, (previous.get(sticker.id) ?? 0) + 1)); return; }
+              start(e, sticker.id);
+            }}>
+            <img key={`${sticker.id}-${imageRevisions.get(sticker.id) ?? 0}`} src={stickerURL(sticker.id)} loading="lazy" alt="" draggable={false} onError={() => setBroken(previous => previous.has(sticker.id) ? previous : new Set(previous).add(sticker.id))} onLoad={() => setBroken(previous => { if (!previous.has(sticker.id)) return previous; const next = new Set(previous); next.delete(sticker.id); return next; })}/>
+            {imageBroken && !ownBusy && own !== 'sent' && own !== 'cancelled' && <span className="sticker-overlay broken" aria-hidden="true"><svg viewBox="0 0 24 24"><path fill="none" stroke="currentColor" strokeWidth="1.6" d="M4 5.5h16v13H4zM4 15l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/></svg><b>Retry</b></span>}
+            {ownBusy && <span className="sticker-overlay" aria-hidden="true"><span className="spinner"/>Sending…</span>}
+            {own === 'sent' && <span className="sticker-overlay" aria-hidden="true"><span className="done"><CheckIcon/></span>Sent</span>}
+            {own === 'cancelled' && <span className="sticker-overlay muted" aria-hidden="true">Cancelled</span>}
+            {(own === 'failed' || own === 'missing') && <span className="mark" aria-hidden="true">!</span>}
+          </button>
+          {cancellable(busy) && busy?.id === sticker.id && <button className="cancel-send" aria-label="Cancel sending" title="Cancel sending" onClick={cancel}>×</button>}
+        </div>;
+        const rowEnd = Math.min(detailIndex - detailIndex % columns + columns - 1, stickers.length - 1);
+        return detailIndex >= 0 && i === rowEnd ? [card, detail(detailIndex)] : [card];
+      })}{editing?.prompt && !visibleEditing && detail(0)}</div>
+    </div>
   </>;
 }
 
@@ -310,8 +360,8 @@ function MessageBody({ message, retry, sendBlocked, dismiss }: { message: Sticke
   </>;
 }
 
-function StickerEditor({ col, sticker, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget }: {
-  col: number; sticker: Sticker; draft: Draft; location: Status['stickerLocation']; message: StickerSend | null;
+function StickerEditor({ col, detached, sticker, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget }: {
+  col: number; detached: boolean; sticker: Sticker; draft: Draft; location: Status['stickerLocation']; message: StickerSend | null;
   retry: (event: React.MouseEvent, send: StickerSend, original?: boolean) => void;
   sendBlocked: boolean;
   change: (text: string) => void; close: () => void; keep: () => void; discard: () => void;
@@ -319,7 +369,7 @@ function StickerEditor({ col, sticker, draft, location, message, retry, sendBloc
 }) {
   const id = useId();
   const result = location?.id === sticker.id ? location.state : null;
-  return <div className="sticker-detail" style={{ '--col': col } as React.CSSProperties} role="region" aria-label="Search terms">
+  return <div className="sticker-detail" data-detached={detached || undefined} style={{ '--col': col } as React.CSSProperties} role="region" aria-label="Search terms">
     <div className="detail-head"><label htmlFor={id}>Search terms</label><button className="icon-close" aria-label="Close" title="Close" onClick={close}>×</button></div>
     {/* Closing the editor clears the message, so it has no Dismiss of its own here. */}
     {message && <div className="sticker-message inline"><MessageBody message={message} retry={retry} sendBlocked={sendBlocked}/></div>}

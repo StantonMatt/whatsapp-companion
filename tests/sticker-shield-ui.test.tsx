@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { initialState, type Status, type StickerShield } from '../src/shared/model';
 import { useShield } from '../src/ui/shield';
+import type { Act } from '../src/ui/index';
 import { Stickers } from '../src/ui/stickers';
 
 const shield: StickerShield = {
@@ -176,19 +177,19 @@ test.each(draftFailures.flatMap(failure => (['before', 'after'] as const).map(wh
   draw();
   if (when === 'after') filter('no matching sticker');
   expect(host.querySelector('.sticker-message')).toBeNull();
-  expect(host.querySelector('.hint')?.textContent).toContain(message);
+  expect(host.querySelector('.sticker-strip')?.textContent).toContain(message);
   expect(host.querySelector('[aria-live]')?.textContent).toBe(message);
   act(() => vi.advanceTimersByTime(2000));
-  expect(host.querySelector('.hint')?.textContent).toContain(message);
+  expect(host.querySelector('.sticker-strip')?.textContent).toContain(message);
   filter('');
   expect(host.querySelector('.sticker-message .msg p')?.textContent).toBe(message);
   expect(host.querySelector('.sticker-message .msg button')).toBeNull();
-  expect(host.querySelector('.hint')?.textContent).not.toContain(message);
+  expect((host.querySelector('.sticker-strip')?.textContent ?? '')).not.toContain(message);
   filter('no matching sticker');
   const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
   act(() => window.dispatchEvent(escape));
   expect(escape.defaultPrevented).toBe(true);
-  expect(host.querySelector('.hint')?.textContent).not.toContain(message);
+  expect((host.querySelector('.sticker-strip')?.textContent ?? '')).not.toContain(message);
   expect(host.querySelector('[aria-live]')?.textContent).toBe('');
   expect(action).not.toHaveBeenCalled();
 });
@@ -218,7 +219,7 @@ test.each(['Try again', 'Send still'])('animated missing row %s requires a trust
     await act(async () => handler({ nativeEvent: { isTrusted: true } }));
   };
   draw();
-  await trustedClick(host.querySelector<HTMLButtonElement>('.send')!);
+  await trustedClick(host.querySelector<HTMLButtonElement>('.sticker-art')!);
   const original = action.mock.calls[0][0] as { nonce: string };
   next.stickerSend = { id, nonce: original.nonce, name: 'Alex', route: 'picker', animated: true, state: 'missing' };
   draw();
@@ -243,16 +244,16 @@ test('sticker cards load protocol images lazily and recover after an image error
   expect(image.getAttribute('src')).toBe(`companion-sticker://${id}`);
   expect(image.getAttribute('loading')).toBe('lazy');
   act(() => image.dispatchEvent(new Event('error')));
-  const retry = [...host.querySelectorAll('button')].find(button => button.textContent === 'Image unavailable · Retry')!;
+  const retry = [...host.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Image unavailable. Retry')!;
   expect(retry).toBeDefined(); act(() => retry.click());
   const recovered = host.querySelector('img')!; expect(recovered).not.toBe(image);
   act(() => recovered.dispatchEvent(new Event('load')));
   expect(host.textContent).not.toContain('Image unavailable');
 });
-test.each(['Sticker library is full', "Couldn't save new stickers"])('the existing hint line shows %s', error => {
+test.each(['Sticker library is full', "Couldn't save new stickers"])('the notice strip shows %s', error => {
   const next = status(null); next.stickerLibraryError = error;
   act(() => root.render(<Stickers status={next} act={vi.fn(async () => true)}/>));
-  expect(host.querySelector('.hint')?.textContent).toContain(error);
+  expect(host.querySelector('.sticker-strip')?.textContent).toContain(error);
 });
 
 
@@ -265,4 +266,208 @@ test.each(['not-sent', 'unknown'] as const)('direct storage failure uses accurat
   expect(host.querySelector('.sticker-message .msg p')?.textContent).toBe(sent === 'not-sent' ? 'Couldn’t send the sticker. Nothing was sent.' : 'Couldn’t confirm the sticker was sent. Check the chat before sending it again.');
   expect(host.querySelector('[aria-live]')?.textContent).toBe(sent === 'not-sent' ? 'Nothing was sent' : 'Couldn’t confirm the sticker was sent');
   expect(action).not.toHaveBeenCalled();
+});
+
+const libraryStatus = (count = 6) => {
+  const next = status(null); next.chat.destinationToken = 'destination-1';
+  next.state.stickers = Array.from({ length: count }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), kind: 'static' as const, size: 12, searchTerms: `sticker ${i}`, firstSeen: 1, lastSeen: count - i }));
+  return next;
+};
+const drawLibrary = (next: Status, action: Act = vi.fn(async () => true)) => act(() => root.render(<Stickers status={next} act={action}/>));
+const tile = (index = 0) => host.querySelectorAll<HTMLButtonElement>('.sticker-art')[index];
+const clickText = (label: string) => act(() => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === label)!.click());
+const inputText = (selector: string, value: string) => act(() => {
+  const input = host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
+  Object.getOwnPropertyDescriptor(input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+});
+const pressEscape = () => {
+  const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  act(() => window.dispatchEvent(event)); return event.defaultPrevented;
+};
+const authorizedClick = async (button: HTMLButtonElement, detail = 1) => {
+  // JSDOM has no trusted input or browser keyboard-to-click default action.
+  // Exercise the React handler with the native click emitted by those actions.
+  const key = Object.keys(button).find(key => key.startsWith('__reactProps$'))!;
+  const props = (button as unknown as Record<string, { onClick: (event: unknown) => void }>)[key];
+  await act(async () => props.onClick({ nativeEvent: { isTrusted: true, detail } }));
+};
+
+beforeEach(() => { Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() }); });
+
+test.each([{ label: 'click', detail: 1 }, { label: 'keyboard activation', detail: 0 }])('$label sends from the tile and synthetic clicks cannot send', async ({ detail }) => {
+  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true);
+  drawLibrary(next, action);
+  expect(tile().tagName).toBe('BUTTON'); expect(tile().getAttribute('aria-label')).toBe('sticker 0');
+  expect(host.querySelector('.sticker-actions')).toBeNull();
+  act(() => tile().click()); expect(action).not.toHaveBeenCalled();
+  await authorizedClick(tile(), detail);
+  expect(action).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: 'sendSticker', id: next.state.stickers[0].id, destinationToken: 'destination-1' }));
+  expect(tile().hasAttribute('data-busy')).toBe(true);
+  expect(host.querySelector('.spinner')).not.toBeNull();
+  expect(host.querySelector('.cancel-send')).not.toBeNull();
+  expect(host.querySelector('[aria-live]')?.textContent).toBe('Sending sticker…');
+});
+
+test('busy tile activation does nothing and announces the reason without disabling other tiles', async () => {
+  const next = libraryStatus(2), action = vi.fn(async (_action: unknown) => true);
+  drawLibrary(next, action); await authorizedClick(tile());
+  expect(tile(1).hasAttribute('aria-disabled')).toBe(false);
+  await authorizedClick(tile(1));
+  expect(action).toHaveBeenCalledTimes(1);
+  expect(host.querySelector('[aria-live]')?.textContent).toBe('Wait for the current sticker');
+});
+
+test.each(['sent', 'cancelled'] as const)('%s feedback clears after 1.5 seconds, including a result filtered after arrival', state => {
+  const next = libraryStatus(1); drawLibrary(next);
+  next.stickerSend = { id: next.state.stickers[0].id, nonce: 'result', name: 'Alex', route: 'maker', animated: false, state };
+  drawLibrary(next);
+  expect(host.querySelector('.sticker-overlay')?.textContent).toBe(state === 'sent' ? 'Sent' : 'Cancelled');
+  expect(tile().hasAttribute('data-sent')).toBe(state === 'sent');
+  inputText('.search', 'no match');
+  expect(host.querySelector('.sticker-strip')?.textContent).toBe(state === 'sent' ? 'Sent to Alex' : 'Cancelled');
+  act(() => vi.advanceTimersByTime(1499)); expect(host.querySelector('[aria-live]')?.textContent).not.toBe('');
+  act(() => vi.advanceTimersByTime(1)); expect(host.querySelector('[aria-live]')?.textContent).toBe('');
+  expect(host.querySelector('.sticker-strip')).toBeNull();
+});
+
+test('no chat dims the tile, explains why in the header, and cannot send', async () => {
+  const next = libraryStatus(1), action = vi.fn(async () => true); next.chat.canSendSticker = false; delete next.chat.destinationToken;
+  drawLibrary(next, action); expect(tile().getAttribute('aria-disabled')).toBe('true');
+  expect(host.querySelector('.sticker-head .sticker-strip')?.textContent).toBe('Open a chat to send');
+  await authorizedClick(tile()); expect(action).not.toHaveBeenCalled();
+  clickText('Edit'); expect(tile().hasAttribute('aria-disabled')).toBe(false);
+});
+
+test('count inside Search uses N or M of N and a separate accessible description', () => {
+  drawLibrary(libraryStatus());
+  expect(host.querySelector('.sticker-search .count')?.textContent).toBe('6');
+  const input = host.querySelector('.search')!;
+  expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toBe('6 stickers indexed');
+  inputText('.search', 'sticker 2'); expect(host.querySelector('.count')?.textContent).toBe('1 of 6');
+  inputText('.search', 'sticker'); expect(host.querySelector('.count')?.textContent).toBe('6');
+  inputText('.search', 'no match'); expect(host.querySelector('.count')?.textContent).toBe('0 of 6');
+});
+
+test('failure row and arrow follow the resolved grid columns when resized', () => {
+  let tracks = '90px 90px 90px 90px';
+  vi.stubGlobal('getComputedStyle', () => ({ gridTemplateColumns: tracks }));
+  const next = libraryStatus(); drawLibrary(next);
+  next.stickerSend = { id: next.state.stickers[3].id, nonce: 'failure', name: 'Alex', route: 'direct', animated: false, state: 'failed', sent: 'unknown' }; drawLibrary(next);
+  const grid = host.querySelector<HTMLElement>('.sticker-grid')!, row = grid.querySelector<HTMLElement>('.sticker-message')!;
+  expect(grid.style.getPropertyValue('--cols')).toBe('4'); expect(row.style.getPropertyValue('--col')).toBe('4');
+  expect(row.previousElementSibling?.getAttribute('data-sticker')).toBe(next.state.stickers[3].id);
+  expect(tile(3).querySelector('.mark')?.textContent).toBe('!');
+  expect(tile(3).parentElement?.hasAttribute('data-attached')).toBe(true);
+  tracks = '110px 110px 110px'; act(() => window.dispatchEvent(new Event('resize')));
+  expect(grid.style.getPropertyValue('--cols')).toBe('3'); expect(row.style.getPropertyValue('--col')).toBe('1');
+  expect(row.previousElementSibling?.getAttribute('data-sticker')).toBe(next.state.stickers[5].id);
+  expect(row.querySelector('.msg button')).toBeNull();
+  act(() => row.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!.click());
+  expect(grid.querySelector('.sticker-message')).toBeNull(); expect(document.activeElement).toBe(tile(3));
+});
+
+test('maker failure offers only Try again and another send replaces the attached message', async () => {
+  const next = libraryStatus(2), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action);
+  next.stickerSend = { id: next.state.stickers[0].id, nonce: 'failure', name: 'Alex', route: 'maker', animated: false, state: 'failed', sent: 'not-sent', reason: 'editor-unavailable' }; drawLibrary(next, action);
+  expect(host.querySelector('.sticker-message .msg button')?.textContent).toBe('Try again');
+  await authorizedClick(tile(1)); expect(host.querySelector('.sticker-message')).toBeNull();
+  expect(action).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: next.state.stickers[1].id }));
+});
+
+test('chat change dismisses even an unconfirmed message that has no retry', () => {
+  const next = libraryStatus(1); drawLibrary(next);
+  next.stickerSend = { id: next.state.stickers[0].id, nonce: 'failure', name: 'Alex', route: 'maker', animated: false, state: 'failed', sent: 'unknown' }; drawLibrary(next);
+  expect(host.querySelector('.sticker-message')).not.toBeNull();
+  next.chat = { ...next.chat, name: 'Another chat', chatId: '456@c.us', settingsId: '456@c.us' }; drawLibrary(next);
+  expect(host.querySelector('.sticker-message')).toBeNull(); expect(host.querySelector('[aria-live]')?.textContent).toBe('');
+});
+
+test('edit mode switches editors only after the dirty prompt and Done keeps Search', () => {
+  const next = libraryStatus(2); drawLibrary(next); inputText('.search', 'sticker'); clickText('Edit');
+  act(() => tile().click()); expect(tile().getAttribute('aria-expanded')).toBe('true');
+  inputText('textarea', 'changed terms'); act(() => tile(1).click());
+  expect(host.querySelector('.discard')).not.toBeNull(); expect(host.querySelector('textarea')?.value).toBe('changed terms');
+  expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).toBeNull();
+  act(() => tile(1).click()); clickText('Discard');
+  expect(host.querySelector('textarea')?.value).toBe('sticker 1');
+  inputText('textarea', 'another draft'); clickText('Done'); clickText('Keep editing');
+  expect(host.querySelector('textarea')?.value).toBe('another draft'); expect(host.querySelector('.sticker-mode')?.textContent).toBe('Done');
+  clickText('Done'); clickText('Discard'); expect(host.querySelector('.sticker-detail')).toBeNull();
+  expect(host.querySelector('.sticker-mode')?.textContent).toBe('Edit'); expect(host.querySelector<HTMLInputElement>('.search')?.value).toBe('sticker');
+});
+
+test('Escape keeps editing a prompt, requests close, leaves edit mode, cancels, dismisses, then permits panel close', () => {
+  const next = libraryStatus(1), action = vi.fn(async () => true); drawLibrary(next, action); clickText('Edit'); act(() => tile().click()); inputText('textarea', 'dirty');
+  expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).not.toBeNull();
+  expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).toBeNull();
+  expect(host.querySelector('textarea')?.value).toBe('dirty');
+  expect(pressEscape()).toBe(true); clickText('Discard');
+  next.stickerSend = { id: next.state.stickers[0].id, nonce: 'finding', name: 'Alex', route: 'picker', animated: true, state: 'finding' }; drawLibrary(next, action);
+  expect(pressEscape()).toBe(true); expect(action).not.toHaveBeenCalled(); expect(host.querySelector('.sticker-mode')?.textContent).toBe('Edit');
+  expect(pressEscape()).toBe(true); expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'cancelSticker' });
+  next.stickerSend = { ...next.stickerSend, state: 'failed', sent: 'unknown' }; drawLibrary(next, action);
+  expect(pressEscape()).toBe(true); expect(host.querySelector('.sticker-message')).toBeNull(); expect(pressEscape()).toBe(false);
+});
+
+test('Done and Back prompt for a filtered dirty editor without changing the search', () => {
+  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit'); act(() => tile().click()); inputText('textarea', 'dirty'); inputText('.search', 'no match');
+  expect(host.querySelector('.sticker-detail')).toBeNull(); clickText('Done');
+  expect(host.querySelector('.discard')).not.toBeNull(); expect(host.querySelector<HTMLInputElement>('.search')?.value).toBe('no match');
+  clickText('Keep editing'); inputText('.search', ''); expect(host.querySelector('textarea')?.value).toBe('dirty');
+  act(() => host.querySelector<HTMLButtonElement>('.back')!.click()); expect(action).not.toHaveBeenCalled();
+  clickText('Discard'); expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'panel', panel: null });
+});
+
+test('Save closes the editor and Locate and Forget retain the existing actions', async () => {
+  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit'); act(() => tile().click());
+  clickText('Locate in WhatsApp'); expect(action).toHaveBeenLastCalledWith({ type: 'locateSticker', id: next.state.stickers[0].id, destinationToken: 'destination-1' });
+  inputText('textarea', 'saved terms'); await act(async () => clickText('Save'));
+  expect(action).toHaveBeenLastCalledWith({ type: 'sticker', id: next.state.stickers[0].id, searchTerms: 'saved terms' }); expect(host.querySelector('.sticker-detail')).toBeNull();
+  act(() => tile().click()); await act(async () => clickText('Forget'));
+  expect(action).toHaveBeenLastCalledWith({ type: 'forgetSticker', id: next.state.stickers[0].id }); expect(host.querySelector('.sticker-detail')).toBeNull();
+});
+
+test('direct-send safety notice can be dismissed, links to AI settings, and reappears for a fresh stop', () => {
+  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); next.state.global.directStickerDisabledReason = 'send-error'; next.state.global.directStickerDisabledAt = 10;
+  drawLibrary(next, action); expect(host.querySelector('.warn')?.textContent).toContain('Direct sending turned off: a direct send failed.');
+  act(() => host.querySelector<HTMLAnchorElement>('.warn a')!.click()); expect(action).toHaveBeenLastCalledWith({ type: 'panel', panel: 'settings' });
+  act(() => host.querySelector<HTMLButtonElement>('[aria-label="Dismiss direct-send notice"]')!.click()); expect(host.querySelector('.warn')).toBeNull();
+  drawLibrary(next, action); expect(host.querySelector('.warn')).toBeNull();
+  next.state.global.directStickerDisabledAt = 11; drawLibrary(next, action); expect(host.querySelector('.warn')).not.toBeNull();
+});
+
+test.each(['finding', 'preparing', 'sending'] as const)('tile cancellation is available only before hand-off (%s)', state => {
+  const next = libraryStatus(1), action = vi.fn(async () => true); drawLibrary(next, action);
+  next.stickerSend = { id: next.state.stickers[0].id, nonce: 'busy', name: 'Alex', route: 'maker', animated: false, state }; drawLibrary(next, action);
+  const cancel = host.querySelector<HTMLButtonElement>('.cancel-send');
+  expect(Boolean(cancel)).toBe(state !== 'sending');
+  if (cancel) { act(() => cancel.click()); expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'cancelSticker' }); }
+});
+
+test('a broken image retries in normal mode and remains editable and forgettable in edit mode', () => {
+  const next = libraryStatus(1); drawLibrary(next);
+  act(() => host.querySelector('img')!.dispatchEvent(new Event('error')));
+  expect(tile().getAttribute('aria-label')).toBe('Image unavailable. Retry');
+  clickText('Edit'); act(() => tile().click());
+  expect(host.querySelector('textarea')?.value).toBe('sticker 0');
+  expect([...host.querySelectorAll('button')].some(button => button.textContent === 'Forget')).toBe(true);
+});
+
+test('a filtered dirty prompt defers a send message and renders only one detail without an arrow target', () => {
+  const next = libraryStatus(2); drawLibrary(next); clickText('Edit'); act(() => tile().click());
+  inputText('textarea', 'dirty'); inputText('.search', 'sticker 1');
+  next.stickerSend = { id: next.state.stickers[1].id, nonce: 'failure', name: 'Alex', route: 'direct', animated: false, state: 'failed', sent: 'unknown' }; drawLibrary(next);
+  clickText('Done');
+  expect(host.querySelectorAll('.sticker-detail')).toHaveLength(1);
+  expect(host.querySelector('.sticker-detail')?.hasAttribute('data-detached')).toBe(true);
+  expect(host.querySelector('.discard')).not.toBeNull();
+});
+
+test('missing-image Retry remains usable without a chat because it only reloads the local image', () => {
+  const next = libraryStatus(1); next.chat.canSendSticker = false; delete next.chat.destinationToken;
+  const action = vi.fn(async () => true); drawLibrary(next, action);
+  const image = host.querySelector('img')!; act(() => image.dispatchEvent(new Event('error')));
+  expect(tile().hasAttribute('aria-disabled')).toBe(false);
+  act(() => tile().click()); expect(host.querySelector('img')).not.toBe(image); expect(action).not.toHaveBeenCalled();
 });

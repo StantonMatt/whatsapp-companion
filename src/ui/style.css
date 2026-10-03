@@ -81,14 +81,45 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .empty > span { font-size: 48px; color: var(--green); }
 .empty p { font-size: 16px; color: var(--text); }
 .empty small, .empty-small { font-size: 12px; line-height: 1.7; color: var(--muted); }
-.sticker-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.sticker { padding: 8px; min-width: 0; border-radius: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
-.sticker[data-attached] { background: var(--selected); }
-.sticker-art { position: relative; aspect-ratio: 1; }
+.sticker-head { position: sticky; top: 0; z-index: 2; background: var(--bg); }
+.sticker-head-row { height: 72px; display: flex; align-items: center; gap: 10px; padding: 12px 16px 12px 14px; }
+.sticker-head-row .back { width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; margin-right: 2px; }
+.sticker-head-row .back:hover { background: var(--hover); filter: none; }
+.sticker-head-row h1 { flex-shrink: 0; }
+.sticker-search { position: relative; flex: 1; min-width: 0; }
+.sticker-search input { margin: 0; min-height: 36px; padding: 7px calc(var(--count-width) + 24px) 7px 12px; border-radius: 18px; font-size: 13px; }
+.sticker-search .count { position: absolute; right: 12px; top: 50%; translate: 0 -50%; font-size: 12px; color: var(--muted); pointer-events: none; font-variant-numeric: tabular-nums; }
+.sticker-mode { height: 36px; min-height: 36px; padding: 0 14px; border-radius: 18px; background: transparent; color: var(--green); font-weight: 500; flex-shrink: 0; }
+.sticker-mode:hover { filter: none; background: var(--hover); }
+.sticker-mode.mode-done { background: var(--green); color: var(--bg); }
+.sticker-mode.mode-done:hover { filter: brightness(1.1); }
+.sticker-strip { margin: 0; padding: 0 20px 10px; font-size: 12px; color: var(--muted); line-height: 1.5; display: flex; gap: 8px; align-items: flex-start; }
+.sticker-strip.warn { color: var(--text); }
+.sticker-strip > span { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 2px; }
+.sticker-strip .icon-close { width: 24px; height: 24px; min-height: 24px; font-size: 17px; margin: -4px -6px 0 0; }
+.sticker-strip a { color: var(--green); text-decoration: none; }
+.sticker-body { padding-inline: 20px; }
+.sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.sticker { position: relative; min-width: 0; }
+.sticker-art { display: block; width: 100%; aspect-ratio: 1; padding: 6px; border-radius: 10px; background: var(--surface); min-height: 0; position: relative; transition: scale .1s, background .15s; }
+.sticker-art:hover { filter: none; background: var(--menu-hover); }
+.sticker-art:active { scale: .94; }
 .sticker-art img { display: block; width: 100%; height: 100%; object-fit: contain; transition: opacity .15s; }
-.sticker-art[data-busy] img { opacity: .18; filter: blur(1.5px); }
-.sticker-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; font-size: 11px; font-weight: 500; text-align: center; }
-.sticker-overlay.muted { color: var(--muted); }
+.sticker-art[data-busy] img, .sticker-art[data-sent] img, .sticker-art[data-cancelled] img { opacity: .18; filter: blur(1.5px); }
+.sticker-art[data-broken] img { visibility: hidden; }
+.sticker-art[data-sent] { background: var(--selected); }
+.sticker-art[aria-disabled=true] { cursor: default; opacity: .5; }
+.sticker-art[aria-disabled=true]:hover { background: var(--surface); }
+.sticker-art[aria-disabled=true]:active { scale: 1; }
+.sticker[data-attached] .sticker-art, .sticker-art[aria-expanded=true] { background: var(--selected); }
+.sticker-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 5px; font-size: 11px; font-weight: 500; text-align: center; }
+.sticker-overlay.muted, .sticker-overlay.broken { color: var(--muted); }
+.sticker-overlay.broken { font-weight: 400; }
+.sticker-overlay.broken svg { width: 22px; height: 22px; }
+.sticker-overlay.broken b { color: var(--green); font-weight: 500; }
+.cancel-send { position: absolute; top: 2px; right: 2px; width: 26px; height: 26px; min-height: 26px; padding: 0; border-radius: 50%; background: var(--bg); color: var(--text); font-size: 18px; line-height: 1; box-shadow: 0 1px 4px #0004; }
+.sticker .mark { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--bg); color: var(--muted); box-shadow: 0 1px 4px #0004; }
+.untagged::after { content: ""; position: absolute; bottom: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
 .spinner { width: 24px; height: 24px; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--green); animation: spin .8s linear infinite; }
 @keyframes spin { to { rotate: 1turn; } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
@@ -96,28 +127,14 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 @keyframes pop { from { scale: .6; } }
 @media (prefers-reduced-motion: reduce) { .done { animation: none; } }
 .done svg { width: 18px; height: 18px; }
-.sticker-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-.sticker-actions button { position: relative; min-width: 0; min-height: 32px; height: 32px; padding: 0; border-radius: 16px; background: var(--bg); color: var(--muted); display: grid; place-items: center; }
-.sticker-actions svg { width: 18px; height: 18px; }
-.sticker-actions button:hover { filter: none; background: var(--line); color: var(--text); }
-.sticker-actions .send { color: var(--green); }
-.sticker-actions .send:hover { background: var(--selected); color: var(--green); }
-.sticker[data-attached] .send:not([aria-disabled=true]):hover { background: var(--bg); box-shadow: inset 0 0 0 1.5px var(--green); }
-.sticker-actions .cancel { color: var(--text); font-size: 20px; line-height: 1; }
-.sticker-actions button[aria-disabled=true] { cursor: default; }
-.sticker-actions button[aria-disabled=true]:hover { background: var(--bg); }
-.sticker-actions .edit[aria-disabled=true]:hover { color: var(--muted); }
-.sticker-actions button[aria-disabled=true] > svg { opacity: .35; }
-.sticker-actions button[aria-expanded=true], .sticker-actions button[aria-expanded=true]:hover { background: var(--green); color: var(--bg); }
-.untagged::after { content: ""; position: absolute; top: 6px; right: calc(50% - 14px); width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
-.sticker-actions button[aria-expanded=true].untagged::after { background: var(--bg); }
-.sticker-detail { --col: 1; grid-column: 1 / -1; position: relative; background: var(--surface); border-radius: 12px; padding: 14px 16px 16px; margin-top: -2px; scroll-margin-block: 84px 12px; }
-.sticker-detail::before { content: ""; position: absolute; top: -6px; width: 14px; height: 14px; rotate: 45deg; background: var(--selected); clip-path: polygon(0 0, 100% 0, 0 100%); border-radius: 2px; left: calc((100% - 24px) / 3 * (var(--col) - .5) + 12px * (var(--col) - 1) - 7px); }
+.sticker-detail { --col: 1; grid-column: 1 / -1; position: relative; background: var(--surface); border-radius: 12px; padding: 14px 16px 16px; margin-top: -2px; scroll-margin-block: 130px 12px; }
+.sticker-detail::before { content: ""; position: absolute; top: -6px; width: 14px; height: 14px; rotate: 45deg; background: var(--selected); clip-path: polygon(0 0, 100% 0, 0 100%); border-radius: 2px; left: calc((100% - (var(--cols) - 1) * 8px) / var(--cols) * (var(--col) - .5) + 8px * (var(--col) - 1) - 7px); }
+.sticker-detail[data-detached]::before { display: none; }
 .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -4px -6px 8px 0; }
 .detail-head label { margin: 0; }
 .icon-close { width: 32px; height: 32px; min-height: 32px; padding: 0; border-radius: 50%; background: transparent; font-size: 20px; line-height: 1; color: var(--muted); flex-shrink: 0; }
 .icon-close:hover { filter: none; background: var(--hover); color: var(--text); }
-.sticker-detail textarea { background: var(--bg); margin: 0 0 14px; }
+.sticker-detail textarea { background: var(--bg); margin: 0 0 14px; min-height: 72px; }
 .sticker-detail button:not(.primary):not(.quiet):not(.icon-close) { background: var(--bg); }
 .discard { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .discard span { font-size: 13px; flex-basis: 100%; }

@@ -313,17 +313,22 @@ describe('sticker panel action races', () => {
     if (!button) throw new Error(`Missing button: ${name}`);
     return button;
   }
+  const tileButton = () => document.querySelector<HTMLButtonElement>('.sticker-art')!;
+  async function editTile() {
+    if ([...document.querySelectorAll('button')].some(button => button.textContent === 'Edit')) await click('Edit');
+    await reactAct(() => { tileButton().focus(); tileButton().click(); });
+  }
   async function click(name: string) { await reactAct(() => { button(name).focus(); button(name).click(); }); }
   // jsdom clicks are always synthetic. Invoke React's handler with the trusted
   // event seam here; the desktop suite checks the actual Chromium trust boundary.
   async function trustedClick(name: string) {
-    const target = button(name);
+    const target = name === 'tile' ? tileButton() : button(name);
     const key = Object.keys(target).find(key => key.startsWith('__reactProps$'))!;
     const props = (target as unknown as Record<string, { onClick: (event: unknown) => void }>)[key];
     await reactAct(() => props.onClick({ nativeEvent: { isTrusted: true } }));
   }
   async function trustedSend(act: Act) {
-    await trustedClick('Send to ' + snapshot.name);
+    await trustedClick('tile');
     const action = vi.mocked(act).mock.calls.at(-1)![0];
     if (action.type !== 'sendSticker') throw new Error('Expected a send action');
     return action.nonce;
@@ -347,17 +352,17 @@ describe('sticker panel action races', () => {
   test('a recognized conversation without a composer still permits a trusted picker send', async () => {
     const act: Act = vi.fn(async () => true), status = panelStatus();
     await render({ ...status, chat: { ...status.chat, ready: false, canSendSticker: true } }, act);
-    expect(button('Send to ' + snapshot.name).getAttribute('aria-disabled')).toBeNull();
-    expect(document.querySelector('.hint')?.textContent).not.toContain('Open a chat to send');
+    expect(tileButton().getAttribute('aria-disabled')).toBeNull();
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).not.toContain('Open a chat to send');
     await trustedSend(act);
     expect(act).toHaveBeenCalledOnce();
   });
   test('Send stays unavailable when presentation readiness outlasts an open conversation', async () => {
     const act: Act = vi.fn(async () => true), status = panelStatus();
     await render({ ...status, chat: { ...status.chat, ready: true, canSendSticker: false } }, act);
-    expect(button('Open a chat to send').getAttribute('aria-disabled')).toBe('true');
-    expect(document.querySelector('.hint')?.textContent).toContain('Open a chat to send');
-    await trustedClick('Open a chat to send');
+    expect(tileButton().getAttribute('aria-disabled')).toBe('true');
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).toContain('Open a chat to send');
+    await trustedClick('tile');
     expect(act).not.toHaveBeenCalled();
   });
 
@@ -367,18 +372,17 @@ describe('sticker panel action races', () => {
     const cancelledNonce = await trustedSend(act);
     const cancelled = { id, nonce: cancelledNonce, name: snapshot.name, route: 'maker' as const, animated: false, state: 'cancelled' as const };
     await render({ ...status, chat: { ...status.chat, canSendSticker: false, stickerSendBlockedReason: 'busy' }, stickerSend: cancelled }, act);
-    expect(button('Wait for the current sticker').getAttribute('aria-disabled')).toBe('true');
-    expect(button('Wait for the current sticker').title).toBe('Wait for the current sticker');
-    expect(document.querySelector('.hint')?.textContent).toContain('Wait for the current sticker');
+    expect(tileButton().getAttribute('aria-disabled')).toBeNull();
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).toContain('Wait for the current sticker');
     expect(document.body.textContent).not.toContain('Open a chat to send');
-    await trustedClick('Wait for the current sticker');
+    await trustedClick('tile');
     expect(act).toHaveBeenCalledTimes(1);
     await type('.search', 'no matching sticker');
-    expect(document.querySelector('.hint')?.textContent).toContain('Wait for the current sticker');
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).toContain('Wait for the current sticker');
     await type('.search', '');
     await render({ ...status, stickerSend: cancelled }, act);
-    expect(button('Send to ' + snapshot.name).getAttribute('aria-disabled')).toBeNull();
-    expect(document.querySelector('.hint')?.textContent).not.toContain('Wait for the current sticker');
+    expect(tileButton().getAttribute('aria-disabled')).toBeNull();
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).not.toContain('Wait for the current sticker');
     expect(act).toHaveBeenCalledTimes(1);
     expect(await trustedSend(act)).not.toBe(cancelledNonce);
     expect(act).toHaveBeenCalledTimes(2);
@@ -410,10 +414,10 @@ describe('sticker panel action races', () => {
     await type('.search', 'no matching sticker');
     const sent = { ...preparing, state: 'sent' as const };
     await render({ ...settling, stickerSend: sent }, act);
-    expect(document.querySelector('.hint')?.textContent).toContain('Sent to ' + snapshot.name);
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).toContain('Sent to ' + snapshot.name);
     expect(document.body.textContent).not.toContain('Open a chat to send');
     await type('.search', '');
-    expect(button('Send to ' + snapshot.name).getAttribute('aria-disabled')).toBeNull();
+    expect(tileButton().getAttribute('aria-disabled')).toBeNull();
     expect(await trustedSend(act)).not.toBe(nonce);
     expect(act).toHaveBeenCalledTimes(2);
   });
@@ -440,10 +444,10 @@ describe('sticker panel action races', () => {
     await type('.search', 'no matching sticker');
     const failed = { id, nonce, name: snapshot.name, route: 'maker' as const, animated: false, state: 'failed' as const, reason: 'unconfirmed' as const };
     await render({ ...status, stickerSend: failed }, act);
-    expect(document.querySelector('.hint')?.textContent).toContain('Couldn’t confirm');
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).toContain('Couldn’t confirm');
     await render({ ...status, stickerSend: { ...failed, sent: 'unknown', reason: 'draft', detail: 'draft-appeared' } }, act);
     const message = 'Couldn’t confirm the sticker was sent. Check the chat before sending again.';
-    expect(document.querySelector('.hint')?.textContent).toContain(message);
+    expect((document.querySelector('.sticker-strip')?.textContent ?? '')).toContain(message);
     expect(document.querySelector('[aria-live]')?.textContent).toBe(message);
     expect(document.body.textContent).not.toContain('Send or clear your draft');
   });
@@ -478,7 +482,7 @@ describe('sticker panel action races', () => {
     await reactAct(() => { window.dispatchEvent(escape); });
     expect(escape.defaultPrevented).toBe(true);
     expect(document.body.textContent).not.toContain('Couldn’t confirm');
-    expect(document.activeElement).toBe(button('Send to ' + snapshot.name));
+    expect(document.activeElement).toBe(tileButton());
     expect(act).not.toHaveBeenCalled();
   });
   test('two newcomers retain their appended positions when lastSeen changes, until the query changes', async () => {
@@ -495,7 +499,7 @@ describe('sticker panel action races', () => {
   test.each(['newer draft', 'saved terms'])('a delayed Save preserves newer text %j, including a return to the old saved terms', async newer => {
     const pending = deferred(), act: Act = action => action.type === 'sticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus(), act);
-    await click('Edit search terms'); await type('textarea', 'submitted terms'); await click('Save');
+    await editTile(); await type('textarea', 'submitted terms'); await click('Save');
     await type('textarea', newer);
     await render(panelStatus([sticker(id, 1, 'submitted terms')]), act);
     await reactAct(() => { pending.resolve(true); });
@@ -506,9 +510,9 @@ describe('sticker panel action races', () => {
   test('a delayed Save cannot close a reopened editor even when its text still matches the submission', async () => {
     const pending = deferred(), act: Act = action => action.type === 'sticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus(), act);
-    await click('Edit search terms'); await type('textarea', 'submitted terms'); await click('Save');
+    await editTile(); await type('textarea', 'submitted terms'); await click('Save');
     await render(panelStatus([sticker(id, 1, 'submitted terms')]), act);
-    await click('Close'); await click('Edit search terms');
+    await click('Close'); await editTile();
     await reactAct(() => { pending.resolve(true); });
     expect(document.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('submitted terms');
     expect(document.activeElement).toBe(document.querySelector('textarea'));
@@ -518,7 +522,7 @@ describe('sticker panel action races', () => {
     let submissions = 0;
     const act: Act = action => action.type === 'sticker' ? (++submissions === 1 ? first.promise : second.promise) : Promise.resolve(true);
     await render(panelStatus(), act);
-    await click('Edit search terms'); await type('textarea', 'submitted terms');
+    await editTile(); await type('textarea', 'submitted terms');
     await click('Save'); await click('Save');
     await reactAct(() => { first.resolve(true); });
     expect(document.querySelector('textarea')).not.toBeNull();
@@ -528,39 +532,41 @@ describe('sticker panel action races', () => {
   test('a newer Locate action keeps its editor and focus when an older Save is acknowledged', async () => {
     const pending = deferred(), act: Act = action => action.type === 'sticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus(), act);
-    await click('Edit search terms'); await type('textarea', 'submitted terms'); await click('Save');
+    await editTile(); await type('textarea', 'submitted terms'); await click('Save');
     await render(panelStatus([sticker(id, 1, 'submitted terms')]), act);
     await click('Locate in WhatsApp');
     await reactAct(() => { pending.resolve(true); });
     expect(document.querySelector('textarea')).not.toBeNull();
     expect(document.activeElement).toBe(button('Locate in WhatsApp'));
   });
-  test('Escape closes an editor to its replacement Cancel button before cancelling Finding', async () => {
+  test('Escape closes the editor to its tile, leaves edit mode, then cancels Finding', async () => {
     const act: Act = vi.fn(async () => true), status = panelStatus();
-    await render(status, act); await click('Edit search terms');
+    await render(status, act); await editTile();
     await render({ ...status, stickerSend: { id, nonce, name: snapshot.name, route: 'picker', animated: true, state: 'finding' } }, act);
     const escape = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     await reactAct(() => { escape(); });
     expect(document.querySelector('textarea')).toBeNull();
-    expect(document.activeElement).toBe(button('Cancel sending'));
+    expect(document.activeElement).toBe(tileButton());
     expect(act).not.toHaveBeenCalled();
+    await reactAct(() => { escape(); });
+    expect(button('Edit')).toBeDefined(); expect(act).not.toHaveBeenCalled();
     await reactAct(() => { escape(); });
     expect(act).toHaveBeenCalledWith({ type: 'cancelSticker' });
   });
-  test('closing during Sending returns focus to the card Send when Edit is unavailable', async () => {
+  test('closing the editor during Sending returns focus to its tile', async () => {
     const status = panelStatus();
-    await render(status); await click('Edit search terms');
+    await render(status); await editTile();
     await render({ ...status, stickerSend: { id, nonce, name: snapshot.name, route: 'picker', animated: true, state: 'sending' } });
     await click('Close');
     expect(document.querySelector('textarea')).toBeNull();
-    expect(document.activeElement).toBe(button('Sending sticker…'));
+    expect(document.activeElement).toBe(tileButton());
   });
   test('a delayed Forget cannot steal focus from a newer editor', async () => {
     const b = 'b'.repeat(64), pending = deferred();
     const act: Act = action => action.type === 'forgetSticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus([sticker(id, 2), sticker(b, 1)]), act);
-    await click('Edit search terms'); await click('Forget');
-    await render(panelStatus([sticker(b, 1)]), act); await click('Edit search terms');
+    await editTile(); await click('Forget');
+    await render(panelStatus([sticker(b, 1)]), act); await editTile();
     await type('textarea', 'newer B draft');
     await reactAct(() => { pending.resolve(true); });
     expect(document.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('newer B draft');
@@ -569,9 +575,9 @@ describe('sticker panel action races', () => {
   test('a delayed Forget cannot clear a newer draft after the same sticker is indexed again', async () => {
     const pending = deferred(), act: Act = action => action.type === 'forgetSticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus(), act);
-    await click('Edit search terms'); await click('Forget');
+    await editTile(); await click('Forget');
     await render(panelStatus([]), act); await render(panelStatus(), act);
-    await click('Edit search terms'); await type('textarea', 'newly indexed draft');
+    await editTile(); await type('textarea', 'newly indexed draft');
     await reactAct(() => { pending.resolve(true); });
     expect(document.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('newly indexed draft');
     expect(document.activeElement).toBe(document.querySelector('textarea'));
@@ -580,7 +586,7 @@ describe('sticker panel action races', () => {
     const b = 'b'.repeat(64), pending = deferred();
     const act: Act = action => action.type === 'forgetSticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus([sticker(id, 2), sticker(b, 1)]), act);
-    await click('Edit search terms'); await click('Forget');
+    await editTile(); await click('Forget');
     await render(panelStatus([]), act);
     await reactAct(() => { pending.resolve(true); });
     expect(document.activeElement).toBe(document.querySelector('.search'));
