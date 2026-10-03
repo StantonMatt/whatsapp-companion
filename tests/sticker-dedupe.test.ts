@@ -254,7 +254,7 @@ describe('perceptual sticker intake', () => {
   test('legacy schemas load without new fields and invalid fingerprint/denylist metadata is rejected', () => {
     const saved = store(), legacy = initialState();
     const { forgottenStickers: _ignored, ...old } = legacy;
-    writeFileSync(join(directories.at(-1)!, 'companion.json'), JSON.stringify({ ...old, version: 1, stickers: [sticker('original')] }));
+    writeFileSync(join(directories.at(-1)!, 'companion.json'), JSON.stringify({ ...old, stickerGroups: undefined, version: 1, stickers: [sticker('original')] }));
     expect(new Store(directories.at(-1)!).state.forgottenStickers).toEqual([]);
     expect(stickerSchema.safeParse({ ...sticker('original'), fingerprint: { version: 1, animated: false, hash: 'bad', pixels: fixtures.original.pixels } }).success).toBe(false);
     expect(stateSchema.safeParse({ ...saved.state, forgottenStickers: ['bad'] }).success).toBe(false);

@@ -288,7 +288,7 @@ describe('incremental desktop status', () => {
   });
   test('sticker changes send only new entries and survive updates before the initial read', () => {
     const a = full(1), b = full(2), c = full(3), cache = new StatusCache();
-    const sticker = { id: 'a'.repeat(64), kind: 'static' as const, size: 12, searchTerms: '', firstSeen: 1, lastSeen: 1 };
+    const sticker = { id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, searchTerms: '', firstSeen: 1, lastSeen: 1 };
     a.state.stickers = [sticker]; b.state.stickers = [sticker, { ...sticker, id: 'b'.repeat(64) }]; c.state = { ...b.state, global: { ...b.state.global, tone: 'friendly' } };
     const delta = statusUpdate(b, a.state); expect(delta.stickerChanges?.upsert).toHaveLength(1); expect(delta.state).not.toHaveProperty('stickers');
     cache.accept(delta); cache.accept(statusUpdate(c, b.state)); const result = cache.accept(a);
@@ -297,14 +297,14 @@ describe('incremental desktop status', () => {
   });
 });
 describe('sticker persistence and search', () => {
-  const sticker = { id: 'a'.repeat(64), kind: 'static' as const, size: 12, searchTerms: 'Buenos días, happy, good morning sunshine', firstSeen: 1, lastSeen: 1 };
+  const sticker = { id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, searchTerms: 'Buenos días, happy, good morning sunshine', firstSeen: 1, lastSeen: 1 };
   test('legacy tags and captions migrate losslessly, remain editable and survive restart', () => {
     const dir = directory();
     const image = JSON.parse(readFileSync(new URL('./fixtures/sticker-dedupe/images.json', import.meta.url), 'utf8')).original.image as string;
     const id = createHash('sha256').update(Buffer.from(image.split(',')[1], 'base64')).digest('hex');
     const base = { id, image, firstSeen: 1, lastSeen: 1 };
     const legacy = { ...base, tags: ['happy', 'feliz'], keywords: 'good morning sunshine, buenos días' };
-    writeFileSync(join(dir, 'companion.json'), JSON.stringify({ ...initialState(), version: 1, stickers: [legacy] }));
+    writeFileSync(join(dir, 'companion.json'), JSON.stringify({ ...legacyInitialState(), version: 1, stickers: [legacy] }));
     const store = new Store(dir);
     expect(store.state.stickers[0]).toMatchObject({ id, searchTerms: 'happy, feliz, good morning sunshine, buenos días' });
     expect(store.state.stickers[0]).not.toHaveProperty('image');
@@ -724,3 +724,5 @@ test('resetting chat style restores inheritance without erasing reply settings o
   expect(state.profiles[chat].description).toBe('Own profile');
   setPreferences(state, group, { style: 'off' }); resetStylePreferences(state, group); expect(state.chats[group]).toBeUndefined();
 });
+
+function legacyInitialState() { const { stickerGroups: _groups, ...state } = initialState(); return state; }

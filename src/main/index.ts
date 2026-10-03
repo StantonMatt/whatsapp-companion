@@ -1,3 +1,4 @@
+import { applyStickerGroupAction } from '../core/sticker-groups';
 import { app, BrowserWindow, WebContentsView, ipcMain, session, protocol, dialog, shell, Menu } from 'electron';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -515,6 +516,11 @@ async function start() {
           if (route === 'maker') startMakerInput(ticket.nonce);
           remote.webContents.send('companion:command', route === 'maker' ? { type: 'makeSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route, image: stored.image } : { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route }); break;
         }
+        case 'createStickerGroup':
+        case 'renameStickerGroup':
+        case 'deleteStickerGroup':
+        case 'stickerGroupMembership':
+        case 'bulkStickerGroupMembership': store.update(s => applyStickerGroupAction(s, action, randomUUID)); break;
         case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
         case 'forgetSticker': store.forgetSticker(action.id); stickerInbox.discard(action.id); if (stickerTransfer.send?.id === action.id) cancelSticker(); stickerBlobErrors.delete(action.id); break;
         case 'locateSticker': {

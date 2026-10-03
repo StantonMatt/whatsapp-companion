@@ -79,7 +79,8 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .footer-actions { margin-top: 24px; }
 .empty { text-align: center; padding: 48px 16px; color: var(--muted); }
 .empty > span { font-size: 48px; color: var(--green); }
-.empty p { font-size: 16px; color: var(--text); }
+.empty p { font-size: 16px; color: var(--text); overflow-wrap: anywhere; }
+.empty button { font-size: 13px; min-height: 36px; padding: 8px 16px; color: var(--green); }
 .empty small, .empty-small { font-size: 12px; line-height: 1.7; color: var(--muted); }
 .sticker-head { position: sticky; top: 0; z-index: 2; background: var(--bg); }
 .sticker-head-row { height: 72px; display: flex; align-items: center; gap: 10px; padding: 12px 16px 12px 14px; }
@@ -186,3 +187,52 @@ button.primary { background: var(--green); color: var(--bg); }
 @keyframes fade-out { to { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .shield, .shield[data-leaving] { animation: none; } }
 @media (prefers-reduced-motion: reduce) { .shield[data-leaving] { opacity: 0; } }
+
+/* Sticker groups: second sticky header row and edit-mode selection controls. */
+.sticker-group-chips { --fs: 0px; --fe: 0px; display: flex; gap: 6px; padding: 0 20px 10px; overflow-x: auto; scrollbar-width: none; scroll-padding-inline: 20px; mask-image: linear-gradient(to right, transparent, #000 var(--fs), #000 calc(100% - var(--fe)), transparent); }
+.sticker-group-chips[data-fade-start] { --fs: 24px; }
+.sticker-group-chips[data-fade-end] { --fe: 36px; }
+.sticker-group-chips::-webkit-scrollbar { display: none; }
+.chip { max-width: 280px; height: 30px; min-height: 30px; padding: 0 12px; border-radius: 15px; background: var(--surface); font-size: 13px; line-height: 30px; white-space: nowrap; flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; }
+.chip:hover { filter: none; background: var(--menu-hover); }
+.chip[aria-pressed=true], .chip[aria-pressed=true]:hover { background: var(--selected); color: var(--green); }
+.chip svg { width: 13px; height: 13px; flex-shrink: 0; }
+.chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip.add { color: var(--muted); background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.chip.add:hover { color: var(--text); background: var(--hover); }
+.sticker-group-chips .chip-input { margin: 0; height: 30px; min-height: 30px; width: 150px; flex-shrink: 0; border-radius: 15px; padding: 0 12px; font-size: 13px; background: var(--surface); border-color: var(--green); }
+.sticker-group-edit { display: flex; align-items: center; gap: 8px; padding: 0 20px 10px; }
+.sticker-group-edit input { margin: 0; flex: 1; min-height: 36px; padding: 7px 12px; border-radius: 18px; font-size: 13px; }
+.sticker-group-edit button { font-size: 12px; min-height: 36px; padding: 8px 14px; flex-shrink: 0; }
+.sticker-group-edit .icon-close { padding: 0; }
+.sticker-group-edit span { font-size: 13px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sticker-pick { position: absolute; top: 4px; left: 4px; width: 22px; height: 22px; min-height: 22px; padding: 0; border-radius: 50%; border: 1.5px solid var(--muted); background: var(--bg); color: var(--bg); display: grid; place-items: center; box-shadow: 0 1px 4px #0004; }
+.sticker-pick svg { width: 14px; height: 14px; opacity: 0; }
+.sticker-pick[aria-checked=true] svg { opacity: 1; }
+.sticker-pick:hover { filter: none; border-color: var(--text); }
+.sticker-pick[aria-checked=true] { background: var(--green); border-color: var(--green); }
+.sticker[data-selected] .sticker-art { background: var(--selected); box-shadow: inset 0 0 0 2px var(--green); }
+.panel:has(.sticker-body[data-mode=edit]) { padding-bottom: 0; display: flex; flex-direction: column; }
+.panel:has(.sticker-body[data-mode=edit]) .sticker-head, .sticker-select-bar { flex-shrink: 0; }
+.panel:has(.sticker-body[data-mode=edit]) .sticker-body { padding-bottom: 48px; flex: 1; }
+.panel:has(.sticker-body[data-mode=edit]) .sticker-detail { scroll-margin-block-end: 72px; }
+.sticker-select-bar { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 10px 20px; background: var(--bg); border-top: 1px solid var(--line); margin-top: 8px; }
+.sticker-select-bar > span { flex: 1; font-size: 13px; }
+.sticker-select-bar button { font-size: 13px; min-height: 36px; padding: 8px 14px; }
+.sticker-select-bar .quiet { padding-inline: 6px; }
+.sticker-select-bar .link { background: transparent; color: var(--green); padding-inline: 6px; margin-left: auto; }
+.sticker-groups-popover { position: absolute; right: 20px; bottom: 60px; z-index: 3; width: 224px; max-height: calc(100vh - 190px); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; background: var(--menu); border: 1px solid var(--line); border-radius: 10px; padding: 6px; box-shadow: 0 8px 24px #0004; }
+.sticker-select-bar .pop-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 40px; padding: 0 10px; border-radius: 6px; background: transparent; text-align: left; font-size: 13px; overflow-wrap: anywhere; }
+.pop-row:hover { filter: none; background: var(--menu-hover); }
+.pop-row .box { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--muted); display: grid; place-items: center; flex-shrink: 0; color: var(--bg); }
+.pop-row .box svg { width: 13px; height: 13px; }
+.pop-row .box .dash { width: 8px; height: 2px; background: currentColor; }
+.pop-row[aria-checked=true] .box { background: var(--green); border-color: var(--green); }
+.pop-row[aria-checked=mixed] .box { border-color: var(--green); color: var(--green); }
+.sticker-select-bar .pop-row.new { position: sticky; bottom: -6px; background: var(--menu); color: var(--green); border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; margin-top: 4px; }
+.sticker-select-bar .pop-row.new:hover { background: var(--menu-hover); }
+.pop-row.new:first-child { border-top: 0; margin-top: 0; }
+.sticker-detail-groups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 14px; }
+.sticker-detail-groups > span { font-size: 13px; color: var(--muted); margin-right: 4px; }
+.sticker-detail .sticker-detail-groups .chip { background: var(--bg); height: auto; min-height: 28px; line-height: 18px; padding-block: 5px; font-size: 12px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.sticker-detail .sticker-detail-groups .chip[aria-pressed=true] { background: var(--selected); box-shadow: inset 0 0 0 1px var(--green); }

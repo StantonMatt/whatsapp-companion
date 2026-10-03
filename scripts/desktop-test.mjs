@@ -616,6 +616,45 @@ try {
   await expect(stickerPanel.locator('.sticker-art')).toBeFocused();
   console.log('PASS a hidden conversation blocks sending while editing remains available; location feedback stays inside the panel and preserves edits');
   const stickerCard = stickerPanel.getByRole('group', { name: 'happy, feliz, thanks, gracias, good morning friend, buenos días amigo', exact: true });
+  // Groups persist in main; selection and the active filter belong to this open panel.
+  const groupChips = stickerPanel.getByRole('group', { name: 'Group', exact: true });
+  const selectionBar = stickerPanel.locator('.sticker-select-bar');
+  const assertSelectionBarAtBottom = async () => {
+    await expect(selectionBar).toBeVisible();
+    await expect.poll(async () => {
+      const panel = await stickerPanel.boundingBox(), bar = await selectionBar.boundingBox();
+      return Math.abs((bar.y + bar.height) - (panel.y + panel.height));
+    }).toBeLessThan(1);
+  };
+  await stickerPanel.getByRole('button', { name: '+ New group', exact: true }).click();
+  await stickerPanel.getByRole('textbox', { name: 'New group name', exact: true }).fill('Animals');
+  await stickerPanel.getByRole('textbox', { name: 'New group name', exact: true }).press('Enter');
+  await expect(groupChips.getByRole('button', { name: 'Animals, edit group', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(stickerPanel.locator('.sticker-art')).toHaveCount(0);
+  await assertSelectionBarAtBottom();
+  await groupChips.getByRole('button', { name: 'All', exact: true }).click();
+  await editTile(stickerCard);
+  await stickerEditor.getByRole('group', { name: 'Sticker groups', exact: true }).getByRole('button', { name: 'Animals', exact: true }).click();
+  await expect(stickerEditor.getByRole('group', { name: 'Sticker groups', exact: true }).getByRole('button', { name: 'Animals', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers[0].groups.length).toBe(1);
+  await stickerEditor.getByRole('button', { name: 'Close', exact: true }).click();
+  await groupChips.getByRole('button', { name: 'Animals', exact: true }).click();
+  await expect(stickerCard).toBeVisible();
+  await groupChips.getByRole('button', { name: 'Animals, edit group', exact: true }).click();
+  const groupEditor = stickerPanel.getByRole('group', { name: 'Edit group', exact: true });
+  await groupEditor.getByRole('textbox', { name: 'Group name', exact: true }).fill('Pets');
+  await groupEditor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(groupChips.getByRole('button', { name: 'Pets, edit group', exact: true })).toBeVisible();
+  await groupChips.getByRole('button', { name: 'Pets, edit group', exact: true }).click();
+  await groupEditor.getByRole('button', { name: 'Delete', exact: true }).click();
+  const groupDelete = stickerPanel.getByRole('group', { name: 'Delete group?', exact: true });
+  await expect(groupDelete).toContainText('Its sticker stays in the library.');
+  await groupDelete.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickerGroups.length).toBe(0);
+  await expect(stickerCard).toBeVisible();
+  await assertSelectionBarAtBottom();
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers[0].groups).toEqual([]);
+  console.log('PASS inline group create, editor assignment, chip filter, rename, confirmed delete and bottom bar with a short library');
   // This live paragraph has no status role; location feedback does.
   const stickerLive = stickerPanel.locator('[aria-live="polite"]');
   // Hold only the acknowledgement: the real main handler still saves and publishes.
@@ -840,6 +879,47 @@ try {
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(3);
   const thirdStickerId = (await local.evaluate(() => window.companion.status())).state.stickers.find(sticker => ![firstStickerId, otherStickerId].includes(sticker.id)).id;
   await expect.poll(gridIds).toEqual([firstStickerId, otherStickerId, thirdStickerId]);
+  await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  const firstPick = stickerCard.getByRole('checkbox');
+  await firstPick.focus(); await firstPick.press('Space'); await expect(firstPick).toHaveAttribute('aria-checked', 'true');
+  // Modifier-click selects art without opening a sticker editor.
+  await otherCard.locator('.sticker-art').click({ modifiers: ['Control'] });
+  await expect(stickerEditor).toHaveCount(0); await expect(selectionBar).toContainText('2 selected');
+  await selectionBar.getByRole('button', { name: 'Groups ▾', exact: true }).click();
+  const groupPopover = stickerPanel.getByRole('group', { name: 'Groups for 2 stickers', exact: true });
+  await groupPopover.getByRole('button', { name: 'New group…', exact: true }).click();
+  await stickerPanel.getByRole('textbox', { name: 'New group name', exact: true }).fill('Selected');
+  await stickerPanel.getByRole('textbox', { name: 'New group name', exact: true }).press('Enter');
+  await expect(stickerPanel.locator('.sticker-art')).toHaveCount(2); await expect(stickerPanel.locator('.count')).toHaveText('2 of 3');
+  await selectionBar.getByRole('button', { name: 'Groups ▾', exact: true }).click();
+  await expect(groupPopover.getByRole('checkbox', { name: 'Selected', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await groupPopover.getByRole('checkbox', { name: 'Selected', exact: true }).click();
+  await expect(stickerPanel.locator('.sticker-art')).toHaveCount(0);
+  await expect(groupPopover.getByRole('checkbox', { name: 'Selected', exact: true })).toHaveAttribute('aria-checked', 'false');
+  await groupPopover.getByRole('checkbox', { name: 'Selected', exact: true }).click();
+  await expect(stickerPanel.locator('.sticker-art')).toHaveCount(2);
+  await local.keyboard.press('Escape'); await expect(groupPopover).toHaveCount(0);
+  await selectionBar.getByRole('button', { name: 'Clear', exact: true }).click();
+  await groupChips.getByRole('button', { name: 'All', exact: true }).click();
+  await selectionBar.getByRole('button', { name: 'Select all', exact: true }).click();
+  await expect(selectionBar).toContainText('3 selected');
+  await selectionBar.getByRole('button', { name: 'Groups ▾', exact: true }).click();
+  const allGroupsPopover = stickerPanel.getByRole('group', { name: 'Groups for 3 stickers', exact: true });
+  await expect(allGroupsPopover.getByRole('checkbox', { name: 'Selected', exact: true })).toHaveAttribute('aria-checked', 'mixed');
+  await allGroupsPopover.getByRole('checkbox', { name: 'Selected', exact: true }).click();
+  await expect(allGroupsPopover.getByRole('checkbox', { name: 'Selected', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await stickerPanel.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(selectionBar).toHaveCount(0); await expect(allGroupsPopover).toHaveCount(0);
+  await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(selectionBar.getByRole('button', { name: 'Select all', exact: true })).toBeVisible();
+  await groupChips.getByRole('button', { name: 'Selected', exact: true }).click();
+  await groupChips.getByRole('button', { name: 'Selected, edit group', exact: true }).click();
+  await groupEditor.getByRole('button', { name: 'Delete', exact: true }).click();
+  await groupDelete.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickerGroups.length).toBe(0);
+  await expect.poll(gridIds).toEqual([firstStickerId, otherStickerId, thirdStickerId]);
+  await leaveEditMode();
+  console.log('PASS Space and Ctrl-click select separate checkbox controls, bulk group creation, tri-state add/remove and Done clears selection');
   const otherImage = `data:image/webp;base64,${(await readFile(join(dir, 'stickers', `${otherStickerId}.webp`))).toString('base64')}`;
   // Reindex B through main's fixture IPC with a later clock, bypassing only the
   // one-minute discovery throttle. Both newcomers must retain their own ranks.
@@ -1014,6 +1094,7 @@ try {
   await stickerSearch.click(); await local.keyboard.type('happy');
   await expect(stickerSearch).toHaveValue('happy'); await expect(stickerPanel.locator('.count')).toHaveText('1 of 41');
   await stickerSearch.fill(''); await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  await assertSelectionBarAtBottom();
   const lastTile = stickerPanel.locator('.sticker-art').last();
   await lastTile.focus(); await lastTile.press('Space'); await expect(stickerTerms).toBeFocused();
   await local.keyboard.press('Escape'); await expect(stickerEditor).toHaveCount(0);
@@ -1029,6 +1110,11 @@ try {
   await stickerSearch.fill('no matching sticker');
   await expect(stickerPanel.getByText('No matching stickers', { exact: true })).toBeVisible();
   await local.keyboard.press('Escape');
+  await expect(stickerSearch).toHaveValue('');
+  await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
+  await stickerSearch.fill('no matching sticker');
+  await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).focus();
+  await local.keyboard.press('Escape');
   await expect.poll(async () => (await stickerState())?.state).toBe('cancelled');
   await expect(stickerPanel).toBeVisible();
   await expect(stickerLive).toHaveText('Cancelled');
@@ -1036,7 +1122,7 @@ try {
   await releaseStickerCommand(); await expect(nativeStickerPicker).toHaveCount(0);
   await expect(stickerPanel.locator('.sticker-strip')).toHaveCount(0);
   await stickerSearch.fill('');
-  console.log('PASS Escape cancels finding before closing the panel and announces a filtered card result in the live region and header strip');
+  console.log('PASS Escape clears focused search before cancelling finding and announces a filtered card result in the live region and header strip');
 
   await holdStickerCommand('prepareSticker'); await sendCard().click();
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
@@ -2120,7 +2206,7 @@ try {
   const sample = JSON.parse(await readFile('tests/fixtures/sticker-dedupe/images.json', 'utf8')).animated;
   const migrationBytes = Buffer.from(sample.image.split(',')[1], 'base64');
   const migrationId = createHash('sha256').update(migrationBytes).digest('hex');
-  const legacy = { ...JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')), version: 1,
+  const legacy = { ...JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')), stickerGroups: undefined, version: 1,
     forgottenStickers: JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')).forgottenStickers.filter(id => id !== migrationId),
     stickers: [{ id: migrationId, image: sample.image, searchTerms: 'migration animation', firstSeen: 10, lastSeen: 20 }] };
   const legacyText = JSON.stringify(legacy); await writeFile(join(migrationDir, 'companion.json'), legacyText);
@@ -2133,7 +2219,7 @@ try {
   await expect.poll(() => migratedCard.locator('img').evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
   const migratedState = (await migrated.evaluate(() => window.companion.status())).state;
   expect(migratedState.version).toBe(2);
-  expect(migratedState.stickers).toEqual([{ id: migrationId, searchTerms: 'migration animation', firstSeen: 10, lastSeen: 20, kind: 'animated', size: migrationBytes.length }]);
+  expect(migratedState.stickers).toEqual([{ id: migrationId, searchTerms: 'migration animation', firstSeen: 10, lastSeen: 20, groups: [], kind: 'animated', size: migrationBytes.length }]);
   expect(await readFile(join(migrationDir, 'companion.v1-backup.json'), 'utf8')).toBe(legacyText);
   expect(await readFile(join(migrationDir, 'stickers', `${migrationId}.webp`))).toEqual(migrationBytes);
   console.log('PASS actual startup migrates schema v1, preserves metadata/backup/original animation, and renders from the controls protocol');

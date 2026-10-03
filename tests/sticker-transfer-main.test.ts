@@ -85,12 +85,12 @@ vi.mock('../src/main/sticker-send-diagnostics', () => ({ StickerSendDiagnostics:
   append(send: unknown, diagnostics: unknown) { mocks.diagnostics.push({ send, diagnostics }); }
 } }));
 vi.mock('../src/main/store', () => ({ Store: class {
-  state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), kind: 'static' as const, size: 12, firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
+  state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
   readSticker = (id: string) => { mocks.reads.push(id); if (mocks.readFailure) throw new Error('Sticker file is missing or damaged.'); return { image: 'data:image/webp;base64,UklGRg==', bytes: Buffer.alloc(12), animated: mocks.animated }; };
   update(change: (state: ReturnType<typeof initialState>) => void) { change(this.state); }
   forgetSticker(id: string) { this.state.stickers = this.state.stickers.filter(s => s.id !== id); this.state.forgottenStickers.push(id); }
   stickerFiles = {
-    write: ({ image: _image, ...metadata }: any) => { mocks.readFailure = false; return { ...metadata, size: 12, kind: 'static' as const }; }
+    write: ({ image: _image, ...metadata }: any) => { mocks.readFailure = false; return { ...metadata, size: 12, groups: [], kind: 'static' as const }; }
   };
 } }));
 vi.mock('../src/main/vault', () => ({ Vault: class {
@@ -832,4 +832,44 @@ test('verified recent rediscovery publishes cleared errors even when intake is s
   expect(add).not.toHaveBeenCalled();
   const updates = controls().send.mock.calls.filter(([channel]) => channel === 'companion:status');
   expect(updates).toHaveLength(1); expect(updates[0][1].stickerLibraryError).toBeUndefined();
+});
+
+test('local validated group IPC creates, assigns, renames, removes, and publishes membership-only changes', async () => {
+  const id = status().state.stickers[0].id;
+  expect(await action({ type: 'createStickerGroup', name: ' Animals ', stickerIds: [id] })).toEqual({ ok: true });
+  const group = status().state.stickerGroups[0]; expect(group.name).toBe('Animals'); expect(group.id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(status().state.stickers[0].groups).toEqual([group.id]);
+  expect(await action({ type: 'createStickerGroup', name: 'Favorites' })).toEqual({ ok: true });
+  const second = status().state.stickerGroups[1].id;
+  expect(await action({ type: 'stickerGroupMembership', id, groupId: second, member: true })).toEqual({ ok: true });
+  expect(status().state.stickers[0].groups).toEqual([group.id, second]);
+  expect(await action({ type: 'renameStickerGroup', id: group.id, name: 'Dogs' })).toEqual({ ok: true });
+  expect(status().state.stickerGroups.map(g => g.name)).toEqual(['Dogs', 'Favorites']);
+  expect(await action({ type: 'bulkStickerGroupMembership', stickerIds: [id], groupId: group.id, member: false })).toEqual({ ok: true });
+  expect(status().state.stickers[0].groups).toEqual([second]);
+  expect(await action({ type: 'bulkStickerGroupMembership', stickerIds: [id], groupId: group.id, member: true })).toEqual({ ok: true });
+  expect(await action({ type: 'deleteStickerGroup', id: group.id })).toEqual({ ok: true });
+  expect(status().state.stickerGroups.map(g => g.id)).toEqual([second]); expect(status().state.stickers[0].groups).toEqual([second]);
+  expect(await action({ type: 'stickerGroupMembership', id, groupId: second, member: false })).toEqual({ ok: true });
+  expect(status().state.stickers[0].groups).toEqual([]);
+});
+
+test('main rejects unknown sticker/group ids, duplicate/invalid names and remote group actions', async () => {
+  const id = status().state.stickers[0].id;
+  expect(await action({ type: 'createStickerGroup', name: 'Animals' })).toEqual({ ok: true });
+  const groupId = status().state.stickerGroups[0].id, unknown = '550e8400-e29b-41d4-a716-446655440000';
+  for (const raw of [
+    { type: 'createStickerGroup', name: ' animals ' }, { type: 'createStickerGroup', name: '' },
+    { type: 'createStickerGroup', name: 'x'.repeat(41) }, { type: 'createStickerGroup', name: 'New', stickerIds: ['b'.repeat(64)] },
+    { type: 'renameStickerGroup', id: unknown, name: 'New' }, { type: 'deleteStickerGroup', id: unknown },
+    { type: 'renameStickerGroup', id: groupId, name: ' ' },
+    { type: 'stickerGroupMembership', id, groupId: unknown, member: true },
+    { type: 'stickerGroupMembership', id: 'b'.repeat(64), groupId, member: true },
+    { type: 'bulkStickerGroupMembership', stickerIds: [id, 'b'.repeat(64)], groupId, member: true },
+    { type: 'bulkStickerGroupMembership', stickerIds: [], groupId, member: true }
+  ]) {
+    const before = structuredClone(status().state);
+    expect(await action(raw)).toMatchObject({ ok: false }); expect(status().state).toEqual(before);
+  }
+  expect(await mocks.handlers.get('companion:action')!(eventFor(remote()), { type: 'createStickerGroup', name: 'Remote' })).toEqual({ ok: false, error: 'Denied' });
 });

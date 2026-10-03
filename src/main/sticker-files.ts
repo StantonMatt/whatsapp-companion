@@ -75,7 +75,7 @@ export class StickerFiles {
       this.durabilityWarning = !syncSavedDirectory(this.directory, this.fault, `blob:${sticker.id}`);
     } else this.durabilityWarning = !atomicWrite(path, verified.bytes, this.fault, `blob:${sticker.id}`);
     this.read(sticker.id); this.fault?.(`blob:${sticker.id}:verified`);
-    return { ...metadata, kind: verified.animated ? 'animated' : 'static', size: verified.bytes.length };
+    return { ...metadata, groups: [], kind: verified.animated ? 'animated' : 'static', size: verified.bytes.length };
   }
   remove(id: string) {
     this.retryDirectorySync();

@@ -21,7 +21,7 @@ const manifest = (dir: string) => join(dir, 'companion.json');
 const blob = (dir: string, id = observation().id) => join(dir, 'stickers', `${id}.webp`);
 const load = (dir: string) => JSON.parse(readFileSync(manifest(dir), 'utf8'));
 function seed(dir: string) {
-  const legacy = { ...initialState(), version: 1, stickers: [observation(), observation('animated')], forgottenStickers: ['f'.repeat(64)] };
+  const legacy = { ...legacyInitialState(), version: 1, stickers: [observation(), observation('animated')], forgottenStickers: ['f'.repeat(64)] };
   writeFileSync(manifest(dir), JSON.stringify(legacy)); return legacy;
 }
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })); });
@@ -200,8 +200,8 @@ test('protocol serves only canonical current references with re-verified WebP by
 });
 test('schema v2 strictly rejects inline images, missing size/kind, duplicates and excess bytes; v1 remains explicit', () => {
   const entry = observation(), dir = directory(); const store = new Store(dir), metadata = store.stickerFiles.write(entry);
-  expect(legacyStateSchema.safeParse({ ...initialState(), version: 1, stickers: [entry] }).success).toBe(true);
-  expect(stateSchema.safeParse({ ...initialState(), version: 1, stickers: [entry] }).success).toBe(false);
+  expect(legacyStateSchema.safeParse({ ...legacyInitialState(), version: 1, stickers: [entry] }).success).toBe(true);
+  expect(stateSchema.safeParse({ ...legacyInitialState(), version: 1, stickers: [entry] }).success).toBe(false);
   expect(stickerSchema.safeParse({ ...metadata, image: entry.image }).success).toBe(false);
   const { size: _size, ...missing } = metadata; expect(stickerSchema.safeParse(missing).success).toBe(false);
   expect(stateSchema.safeParse({ ...initialState(), stickers: [metadata, metadata] }).success).toBe(false);
@@ -250,7 +250,7 @@ test('pending intake has its own bound and reports overflow while retaining the 
   const store = new Store(directory()), changed = vi.fn(), failed = vi.fn();
   // Avoid writing 2,000 tiny fixture files; this check exercises intake rather
   // than durability (covered above). The manifest still validates and persists.
-  vi.spyOn(store.stickerFiles, 'write').mockImplementation(({ image, ...metadata }) => ({ ...metadata, size: 24, kind: 'static' }));
+  vi.spyOn(store.stickerFiles, 'write').mockImplementation(({ image, ...metadata }) => ({ ...metadata, groups: [], size: 24, kind: 'static' }));
   const inbox = new StickerInbox(store, changed, failed);
   const bytes = Buffer.alloc(24); bytes.write('RIFF'); bytes.writeUInt32LE(16, 4); bytes.write('WEBP', 8); bytes.write('TEST', 12); bytes.writeUInt32LE(4, 16);
   let refusedId = '';
@@ -560,3 +560,5 @@ test('Forget recomputes a full-library hint from dropped intake after releasing 
   expect(inbox.issue).toBeUndefined(); expect(failed).toHaveBeenLastCalledWith(undefined);
   await inbox.close();
 });
+
+function legacyInitialState() { const { stickerGroups: _groups, ...state } = initialState(); return state; }

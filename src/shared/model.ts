@@ -103,7 +103,12 @@ export const legacyStickerSchema = z.union([
   stickerBaseSchema.extend({ image: stickerImageSchema }).extend({ tags: z.array(z.string().max(60)).max(30), keywords: z.string().max(1000) }).strict()
     .transform(({ tags, keywords, ...sticker }) => ({ ...sticker, searchTerms: [...tags, keywords].filter(Boolean).join(', ') }))
 ]);
+export const stickerGroupIdSchema = z.string().uuid();
+export const stickerGroupNameSchema = z.string().trim().min(1).max(40);
+export const stickerGroupSchema = z.object({ id: stickerGroupIdSchema, name: stickerGroupNameSchema }).strict();
+export type StickerGroup = z.infer<typeof stickerGroupSchema>;
 export const stickerSchema = stickerBaseSchema.extend({
+  groups: z.array(stickerGroupIdSchema).max(50).default([]),
   searchTerms: searchTermsSchema, kind: z.enum(['static', 'animated']), size: z.number().int().min(12).max(MAX_STICKER_BYTES)
 }).strict();
 export const discoveredStickerSchema = stickerBaseSchema.extend({ searchTerms: searchTermsSchema, image: stickerImageSchema }).strict();
@@ -123,8 +128,12 @@ const stateBaseSchema = z.object({
   forgottenStickers: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(5000).default([])
 }).strict();
 export const legacyStateSchema = stateBaseSchema;
-export const stateSchema = stateBaseSchema.extend({ version: z.literal(2), stickers: z.array(stickerSchema).max(MAX_LIBRARY_STICKERS) }).strict()
+export const stateSchema = stateBaseSchema.extend({ version: z.literal(2), stickers: z.array(stickerSchema).max(MAX_LIBRARY_STICKERS), stickerGroups: z.array(stickerGroupSchema).max(50).default([]) }).strict()
   .superRefine((state, context) => {
+    const groupIds = new Set(state.stickerGroups.map(g => g.id));
+    const names = new Set(state.stickerGroups.map(g => g.name.toLowerCase()));
+    if (groupIds.size !== state.stickerGroups.length || names.size !== state.stickerGroups.length) context.addIssue({ code: 'custom', message: 'Duplicate sticker groups.' });
+    if (state.stickers.some(s => new Set(s.groups).size !== s.groups.length || s.groups.some(id => !groupIds.has(id)))) context.addIssue({ code: 'custom', message: 'Invalid sticker group references.' });
     const ids = new Set(state.stickers.map(s => s.id));
     if (ids.size !== state.stickers.length || state.stickers.some(s => state.forgottenStickers.includes(s.id))) context.addIssue({ code: 'custom', message: 'Invalid sticker references.' });
     if (state.stickers.reduce((total, s) => total + s.size, 0) > MAX_LIBRARY_BYTES) context.addIssue({ code: 'custom', message: 'Sticker library is full.' });
@@ -133,7 +142,7 @@ export type State = z.infer<typeof stateSchema>;
 export function initialState(): State {
   return { version: 2, global: { ...defaults }, direct: {}, group: {}, chats: {},
     provider: 'openai', models: { openai: 'gpt-6-luna', anthropic: 'claude-sonnet-5-5' }, reasoning: { openai: {}, anthropic: {} },
-    conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [], forgottenStickers: [] };
+    conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [], stickerGroups: [], forgottenStickers: [] };
 }
 export type ViewBounds = { x: number; y: number; width: number; height: number };
 export type StickerShield = { nonce: string; image: string; bounds: ViewBounds; panel: ViewBounds };
@@ -167,6 +176,11 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('learn'), scope: z.union([z.literal('general'), settingsIdSchema]), examples: z.string().max(20000), sourceChatId: settingsIdSchema.optional() }).strict(),
   z.object({ type: z.literal('resetProfile'), scope: z.union([z.literal('general'), settingsIdSchema]) }).strict(),
   z.object({ type: z.literal('sticker'), id: z.string().regex(/^[a-f0-9]{64}$/), searchTerms: searchTermsSchema }).strict(),
+  z.object({ type: z.literal('createStickerGroup'), name: stickerGroupNameSchema, stickerIds: z.array(stickerBaseSchema.shape.id).max(MAX_LIBRARY_STICKERS).optional() }).strict(),
+  z.object({ type: z.literal('renameStickerGroup'), id: stickerGroupIdSchema, name: stickerGroupNameSchema }).strict(),
+  z.object({ type: z.literal('deleteStickerGroup'), id: stickerGroupIdSchema }).strict(),
+  z.object({ type: z.literal('stickerGroupMembership'), id: stickerBaseSchema.shape.id, groupId: stickerGroupIdSchema, member: z.boolean() }).strict(),
+  z.object({ type: z.literal('bulkStickerGroupMembership'), stickerIds: z.array(stickerBaseSchema.shape.id).min(1).max(MAX_LIBRARY_STICKERS), groupId: stickerGroupIdSchema, member: z.boolean() }).strict(),
   z.object({ type: z.literal('forgetSticker'), id: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ type: z.literal('locateSticker'), id: z.string().max(64), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/) }).strict(),
   z.object({ type: z.literal('sendSticker'), id: z.string().regex(/^[a-f0-9]{64}$/), nonce: z.string().uuid(), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/), still: z.literal(true).optional() }).strict(),

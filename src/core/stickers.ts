@@ -1,9 +1,9 @@
 import type { State, Sticker } from '../shared/model';
 import { MAX_LIBRARY_BYTES, MAX_LIBRARY_STICKERS } from '../shared/sticker-limits';
 const normalize = (s: string) => s.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
-export function searchStickers(stickers: Sticker[], query: string) {
+export function searchStickers(stickers: Sticker[], query: string, groupId: string | null = null) {
   const terms = query.match(/"[^"]+"|\S+/g)?.map(x => normalize(x.replace(/^"|"$/g, ''))) ?? [];
-  return stickers.filter(s => terms.every(term => normalize(s.searchTerms).includes(term))).sort((a, b) => b.lastSeen - a.lastSeen);
+  return stickers.filter(s => (!groupId || s.groups.includes(groupId)) && terms.every(term => normalize(s.searchTerms).includes(term))).sort((a, b) => b.lastSeen - a.lastSeen);
 }
 export function upsertSticker(stickers: Sticker[], sticker: Sticker) {
   const existing = stickers.find(x => x.id === sticker.id);

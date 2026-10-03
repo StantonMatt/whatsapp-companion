@@ -151,7 +151,7 @@ const draftFailures = [
 ] as const;
 test.each(draftFailures)('draft failure $detail ($sent) uses accurate row and live-region text with no send action', ({ detail, sent, route, message }) => {
   const next = status(null), action = vi.fn(async () => true), id = 'a'.repeat(64);
-  next.state.stickers = [{ id, kind: 'static', size: 12, searchTerms: 'draft test', firstSeen: 1, lastSeen: 1 }];
+  next.state.stickers = [{ id, groups: [], kind: 'static', size: 12, searchTerms: 'draft test', firstSeen: 1, lastSeen: 1 }];
   act(() => root.render(<Stickers status={next} act={action}/>));
   // A pre-interaction refusal can arrive without any intermediate preparing state.
   next.stickerSend = { id, nonce: 'draft-1', name: 'Alex', route, animated: false, state: 'failed', sent, reason: 'draft', detail };
@@ -164,7 +164,7 @@ test.each(draftFailures)('draft failure $detail ($sent) uses accurate row and li
 
 test.each(draftFailures.flatMap(failure => (['before', 'after'] as const).map(when => ({ ...failure, when }))))('draft failure $detail ($sent) stays explained when its card is filtered $when the result arrives', ({ detail, sent, route, message, when }) => {
   const next = status(null), action = vi.fn(async () => true), id = 'a'.repeat(64);
-  next.state.stickers = [{ id, kind: 'static', size: 12, searchTerms: 'draft test', firstSeen: 1, lastSeen: 1 }];
+  next.state.stickers = [{ id, groups: [], kind: 'static', size: 12, searchTerms: 'draft test', firstSeen: 1, lastSeen: 1 }];
   const draw = () => act(() => root.render(<Stickers status={next} act={action}/>));
   const filter = (query: string) => act(() => {
     const input = host.querySelector<HTMLInputElement>('.search')!;
@@ -196,7 +196,7 @@ test.each(draftFailures.flatMap(failure => (['before', 'after'] as const).map(wh
 
 test.each(['unknown', 'confirmed', undefined] as const)('editor-unavailable does not imply nothing was sent when outcome is %s', sent => {
   const next = status(null), action = vi.fn(async () => true), id = 'a'.repeat(64);
-  next.state.stickers = [{ id, kind: 'static', size: 12, searchTerms: 'editor test', firstSeen: 1, lastSeen: 1 }];
+  next.state.stickers = [{ id, groups: [], kind: 'static', size: 12, searchTerms: 'editor test', firstSeen: 1, lastSeen: 1 }];
   act(() => root.render(<Stickers status={next} act={action}/>));
   next.stickerSend = { id, nonce: 'editor-1', name: 'Alex', route: 'maker', animated: false, state: 'failed', sent, reason: 'editor-unavailable' };
   act(() => root.render(<Stickers status={next} act={action}/>));
@@ -209,7 +209,7 @@ test.each(['unknown', 'confirmed', undefined] as const)('editor-unavailable does
 test.each(['Try again', 'Send still'])('animated missing row %s requires a trusted event and chooses the explicit route', async label => {
   const next = status(null), action = vi.fn(async (_action: unknown) => true), id = 'a'.repeat(64);
   next.chat.destinationToken = '1';
-  next.state.stickers = [{ id, kind: 'static', size: 12, searchTerms: 'animated', firstSeen: 1, lastSeen: 1 }];
+  next.state.stickers = [{ id, groups: [], kind: 'static', size: 12, searchTerms: 'animated', firstSeen: 1, lastSeen: 1 }];
   const draw = () => act(() => root.render(<Stickers status={next} act={action}/>));
   // JSDOM cannot create trusted native events. Invoke the actual React handler
   // with the trust flag for the authorized half, and DOM click for rejection.
@@ -238,7 +238,7 @@ test.each(['Try again', 'Send still'])('animated missing row %s requires a trust
 
 test('sticker cards load protocol images lazily and recover after an image error', () => {
   const next = status(null), id = 'a'.repeat(64);
-  next.state.stickers = [{ id, searchTerms: 'recovery', firstSeen: 1, lastSeen: 1, kind: 'animated', size: 42 }];
+  next.state.stickers = [{ id, searchTerms: 'recovery', firstSeen: 1, lastSeen: 1, groups: [], kind: 'animated', size: 42 }];
   act(() => root.render(<Stickers status={next} act={vi.fn(async () => true)}/>));
   const image = host.querySelector('img')!;
   expect(image.getAttribute('src')).toBe(`companion-sticker://${id}`);
@@ -259,7 +259,7 @@ test.each(['Sticker library is full', "Couldn't save new stickers"])('the notice
 
 test.each(['not-sent', 'unknown'] as const)('direct storage failure uses accurate wording and announcement (%s)', sent => {
   const next = status(null), action = vi.fn(async () => true), id = 'a'.repeat(64);
-  next.state.stickers = [{ id, kind: 'static', size: 12, searchTerms: 'storage test', firstSeen: 1, lastSeen: 1 }];
+  next.state.stickers = [{ id, groups: [], kind: 'static', size: 12, searchTerms: 'storage test', firstSeen: 1, lastSeen: 1 }];
   act(() => root.render(<Stickers status={next} act={action}/>));
   next.stickerSend = { id, nonce: 'storage-1', name: 'Alex', route: 'direct', animated: false, state: 'failed', sent };
   act(() => root.render(<Stickers status={next} act={action}/>));
@@ -270,7 +270,7 @@ test.each(['not-sent', 'unknown'] as const)('direct storage failure uses accurat
 
 const libraryStatus = (count = 6) => {
   const next = status(null); next.chat.destinationToken = 'destination-1';
-  next.state.stickers = Array.from({ length: count }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), kind: 'static' as const, size: 12, searchTerms: `sticker ${i}`, firstSeen: 1, lastSeen: count - i }));
+  next.state.stickers = Array.from({ length: count }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), groups: [], kind: 'static' as const, size: 12, searchTerms: `sticker ${i}`, firstSeen: 1, lastSeen: count - i }));
   return next;
 };
 const drawLibrary = (next: Status, action: Act = vi.fn(async () => true)) => act(() => root.render(<Stickers status={next} act={action}/>));
