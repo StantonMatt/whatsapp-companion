@@ -1,6 +1,6 @@
 import { readDraft, composerProvablyEmpty } from './draft';
 export { readDraft } from './draft';
-import { messageDirection, ownElements, quoteSelector, peerFromMessageId } from './message-direction';
+import { messageDirection, fallbackDirection, ownElements, quoteSelector, peerFromMessageId } from './message-direction';
 export { peerFromMessageId } from './message-direction';
 import { StickerReadiness } from '../core/sticker-readiness';
 import type { StickerAuthorization } from '../shared/sticker-transfer';
@@ -73,7 +73,13 @@ function attachmentName(node: HTMLElement): string | undefined {
   return ownElements(node, '[data-testid="document-thumb"] span[dir="auto"]')[0]?.textContent?.trim().slice(0, 255) || undefined;
 }
 function messageText(node: HTMLElement) {
-  return ownElements(node, textSelector).filter(n => !n.parentElement?.closest(textSelector)).map(n => readDraft(n)).join('\n').slice(0, 4000);
+  const text = ownElements(node, textSelector).filter(n => !n.parentElement?.closest(textSelector));
+  const emoji = ownElements(node, 'img[alt], [data-plain-text]').filter(n => !n.closest(textSelector) &&
+    !n.parentElement?.closest('[data-plain-text]') && !n.closest('[data-testid="author"], [data-testid*="thumb"], [data-testid="sticker-container"], [data-testid*="reaction"]') &&
+    // Emoji text only: photo/document alt labels are not message bodies.
+    /\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\ufe0f?\u20e3/u.test(n.getAttribute('data-plain-text') || n.getAttribute('alt') || '') &&
+    /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\p{Emoji_Modifier}|[\u200d\ufe0e\ufe0f\u20e3\s0-9#*])+$/u.test(n.getAttribute('data-plain-text') || n.getAttribute('alt') || ''));
+  return [...text, ...emoji].sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1).map(n => readDraft(n)).join('\n').slice(0, 4000);
 }
 function quotedMessage(node: HTMLElement): Message['quoted'] {
   const quote = node.querySelector<HTMLElement>(quoteSelector);
@@ -145,6 +151,8 @@ export class DomConnector {
   private suggestion?: Extract<RemoteCommand, { type: 'suggestion' }>;
   private replacement?: { command: Extract<RemoteCommand, { type: 'suggestion' }>; editor: HTMLElement; originalRange?: Range };
   private dismissedKey?: string;
+  private dismissedIds = new Set<string>();
+  private popupRequest?: { id: string };
   private hiddenPlaceholder?: { element: HTMLElement; visibility: string; priority: string };
   private host!: HTMLElement;
   private ghost!: HTMLElement;
@@ -181,14 +189,26 @@ export class DomConnector {
       this.conversationVisible = conversationVisible;
       this.observedMessages.clear();
     }
+    // WhatsApp replaces offscreen modern bubbles with empty height placeholders when resizing.
+    // Recognise them before inferring direction so geometry never relabels or overwrites them.
+    const placeholder = (node: HTMLElement) => !peerFromMessageId(node.dataset.id!) && !node.querySelector('[data-testid="msg-container"]') &&
+      messageDirection(node) === null && !messageText(node) && !messageAttachment(node) && !senderLabel(node) && !quotedMessage(node);
+    const directions = new Map<HTMLElement, boolean | null>();
+    nodes.forEach((node, index) => {
+      const explicit = messageDirection(node);
+      const previous = nodes[index - 1];
+      const outgoing = explicit ?? (placeholder(node) ? this.observedMessages.get(node.dataset.id!.slice(0, 250))?.outgoing ?? null
+        : main instanceof HTMLElement ? fallbackDirection(node, main, previous && { node: previous, direction: directions.get(previous) ?? null }) : null);
+      directions.set(node, outgoing);
+    });
     const messages: Message[] = nodes.slice(-30).map(node => {
       const attachment = messageAttachment(node), name = attachmentName(node), sender = senderLabel(node), quoted = quotedMessage(node);
+      const explicit = messageDirection(node), outgoing = directions.get(node) ?? null;
       const message: Message = { id: node.dataset.id!.slice(0, 250),
         text: messageText(node),
-        outgoing: messageDirection(node), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}), ...(name ? { attachmentName: name } : {}), ...(quoted ? { quoted } : {}) };
-      // WhatsApp replaces offscreen modern bubbles with empty height placeholders when resizing.
+        outgoing, ...(explicit === null && outgoing !== null ? { directionFallback: true as const } : {}), ...(sender ? { sender } : {}), ...(attachment ? { attachment } : {}), ...(name ? { attachmentName: name } : {}), ...(quoted ? { quoted } : {}) };
       // Keep only previously observed content in this chat; mounted edits/deletions still replace it.
-      if (!peerFromMessageId(message.id) && !node.querySelector('[data-testid="msg-container"]') && !message.text && message.outgoing === null && !attachment && !sender && !quoted) return this.observedMessages.get(message.id) ?? message;
+      if (placeholder(node)) return this.observedMessages.get(message.id) ?? message;
       this.observedMessages.set(message.id, message);
       while (this.observedMessages.size > 100) this.observedMessages.delete(this.observedMessages.keys().next().value!);
       return message;
@@ -242,7 +262,7 @@ export class DomConnector {
     this.doc.addEventListener('compositionend', this.compositionEnd, true);
     this.doc.addEventListener('selectionchange', this.selectionChanged);
     this.observer = new MutationObserver(() => this.refresh());
-    this.observer.observe(this.doc.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-id', 'title', 'contenteditable', 'aria-selected'] });
+    this.observer.observe(this.doc.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-id', 'data-icon', 'data-testid', 'class', 'title', 'contenteditable', 'aria-selected'] });
     this.timer = setInterval(() => { this.refresh(); void this.indexStickers(); }, 350);
     this.refresh();
   }
@@ -290,7 +310,6 @@ export class DomConnector {
     if (!event.isTrusted || event.isComposing || this.composing || event.keyCode === 229) return;
     const editor = this.editor();
     if (event.key === 'Escape' && (editor?.contains(event.target as Node) || event.composedPath().includes(this.host)) && (this.suggestion || !this.popup.hidden)) {
-      this.dismissedKey = suggestionKey(this.read());
       event.preventDefault(); event.stopImmediatePropagation(); this.dismissPopup(); editor?.focus(); return;
     }
     if (event.target !== editor && !editor?.contains(event.target as Node)) {
@@ -383,17 +402,28 @@ export class DomConnector {
     if (!success) this.refresh();
   }
 
-  private hidePopup() { this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); }
+  private hidePopup() { this.popupRequest = undefined; this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); }
   private dismissPopup() {
-    this.dismissedKey = suggestionKey(this.read()); this.takeover(); this.clear(); this.hidePopup(); this.emit({ type: 'dismiss' });
+    const request = !this.popup.hidden ? this.popupRequest : undefined;
+    const offer = request ? undefined : this.suggestion;
+    const id = request?.id ?? offer?.id;
+    if (id) {
+      this.dismissedIds.add(id);
+      if (offer?.requestId) this.dismissedIds.add(offer.requestId);
+      while (this.dismissedIds.size > 50) this.dismissedIds.delete(this.dismissedIds.values().next().value!);
+    } else this.dismissedKey = offer?.key ?? suggestionKey(this.read());
+    // Clear locally before main can synchronously publish a newer item.
+    this.clear(); this.hidePopup();
+    this.emit({ type: 'dismiss', ...(request ? { requestId: request.id } : offer?.id ? { suggestionId: offer.id, key: offer.key } : {}) });
+    this.takeover();
   }
   private popupShell(mode: typeof this.popupMode, title: string) {
-    this.popupMode = mode; this.popup.replaceChildren(); this.popup.className = `popup ${mode}`;
+    this.popupRequest = undefined; this.popupMode = mode; this.popup.replaceChildren(); this.popup.className = `popup ${mode}`;
     this.popup.hidden = false; this.popup.setAttribute('aria-label', title); this.button.setAttribute('aria-expanded', 'true');
     const header = this.doc.createElement('div'); header.className = 'popup-header';
     const label = this.doc.createElement('span'); label.textContent = title;
     const close = this.doc.createElement('button'); close.className = 'close'; close.textContent = '×'; close.setAttribute('aria-label', 'Close reply assistance');
-    close.addEventListener('click', event => { if (!event.isTrusted) return; if (mode === 'refine') this.hidePopup(); else this.dismissPopup(); this.editor()?.focus(); });
+    close.addEventListener('click', event => { if (!event.isTrusted) return; this.dismissPopup(); this.editor()?.focus(); });
     header.append(label, close); this.popup.append(header);
   }
   private clear() {
@@ -487,8 +517,10 @@ export class DomConnector {
     if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
     if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup(); return; }
     if (command.type === 'notice') {
-      if (command.retryKey && command.retryKey !== suggestionKey(this.read())) return;
-      this.popupShell('notice', 'Reply assistance'); const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text);
+      if ((command.requestId && this.dismissedIds.has(command.requestId)) || (command.retryKey && command.retryKey !== suggestionKey(this.read()))) return;
+      this.popupShell('notice', 'Reply assistance');
+      if (command.requestId) this.popupRequest = { id: command.requestId };
+      const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text);
       if (command.retryKey) {
         const retry = this.doc.createElement('button'); retry.className = 'action'; retry.textContent = 'Try again';
         retry.addEventListener('click', event => {
@@ -502,21 +534,29 @@ export class DomConnector {
       }
       return;
     }
-    if (command.type === 'refining') {
-      if (command.key !== suggestionKey(this.read()) || command.key === this.dismissedKey) return;
-      this.clear(); this.popupShell('pending', 'Refining');
+    if (command.type === 'refining' || command.type === 'thinking') {
+      if (command.key !== suggestionKey(this.read()) || this.dismissedIds.has(command.requestId)) return;
+      this.clear(); this.popupShell('pending', command.type === 'refining' ? 'Refining' : 'Thinking');
+      this.popupRequest = { id: command.requestId };
       const progress = this.doc.createElement('div'); progress.className = 'pending-text'; progress.setAttribute('role', 'status');
       const spinner = this.doc.createElement('span'); spinner.className = 'spinner'; spinner.setAttribute('aria-hidden', 'true');
-      progress.append(spinner, 'Working on your text…'); this.popup.append(progress); return;
+      progress.append(spinner, command.type === 'refining' ? 'Working on your text…' : 'Thinking…'); this.popup.append(progress); return;
     }
     if (command.type === 'suggestion') {
       const editor = this.editor(), s = this.read();
-      if (command.key !== suggestionKey(s) || command.key === this.dismissedKey || !s.ready || s.draftIssue || !editor || this.composing) return;
+      const reason = command.key !== suggestionKey(s) ? 'key' : (command.id ? this.dismissedIds.has(command.id) || Boolean(command.requestId && this.dismissedIds.has(command.requestId)) : command.key === this.dismissedKey) ? 'dismissed' : this.composing ? 'composition' : s.draftIssue ? 'draft' : !s.ready || !editor ? 'unready' : 'displayed';
+      if (reason !== 'displayed' || !editor) {
+        if (command.id) this.emit({ type: 'displayAck', suggestionId: command.id, key: command.key, reason });
+        return;
+      }
       this.clear(); this.suggestion = command; this.ghost.replaceChildren();
       if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup();
       // An explicit refinement edits a written draft directly. Empty composers
       // keep the revised reply as ghost text, so Enter can never send it unseen.
-      if (command.replace && s.draft.trim()) { void this.replaceDraft(command); return; }
+      if (command.replace && s.draft.trim()) {
+        if (command.id) this.emit({ type: 'displayAck', suggestionId: command.id, key: command.key, reason: 'displayed' });
+        void this.replaceDraft(command); return;
+      }
       if (!s.draft) {
         const label = editor.getAttribute('aria-placeholder');
         const placeholder = [...(editor.parentElement?.children ?? [])].find(el => el !== editor && el instanceof HTMLElement && el.getAttribute('aria-hidden') === 'true' && label && el.textContent?.trim() === label) as HTMLElement | undefined;
@@ -527,6 +567,7 @@ export class DomConnector {
       }
       if (!command.replace) { const prefix = this.doc.createElement('span'); prefix.textContent = s.draft; prefix.style.visibility = 'hidden'; this.ghost.append(prefix); }
       const suffix = this.doc.createElement('span'); suffix.textContent = command.text; this.ghost.append(suffix); this.syncGhostScroll();
+      if (command.id) this.emit({ type: 'displayAck', suggestionId: command.id, key: command.key, reason: 'displayed' });
       if (!this.popup.hidden && this.popupMode === 'refine' && !this.popup.querySelector('input') && command.id) this.openPopup();
       return;
     }

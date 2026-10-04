@@ -73,3 +73,27 @@ describe('privacy-safe dispatch counts', () => {
     expect(readFileSync(counts.path, 'utf8')).not.toContain('PRIVATE');
   });
 });
+
+
+describe('privacy-safe suggestion decision aggregates', () => {
+  test('persists only allowlisted day/reason/count rows with batching, reload and owner-only permissions', async () => {
+    counts.decision('unknown_direction'); counts.decision('unknown_direction'); counts.decision('display_rejected_key');
+    await vi.advanceTimersByTimeAsync(29999); expect(existsSync(counts.decisionsPath)).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const json = readFileSync(counts.decisionsPath, 'utf8');
+    expect(JSON.parse(json).counts).toEqual([{ day: expect.any(String), reason: 'unknown_direction', count: 2 }, { day: expect.any(String), reason: 'display_rejected_key', count: 1 }]);
+    expect(json).not.toMatch(/PRIVATE|prompt|text|chatId|suggestionId|emptyKey|identity/);
+    expect(statSync(counts.decisionsPath).mode & 0o777).toBe(0o600); expect(existsSync(counts.path)).toBe(false);
+    counts.close(); counts = new RequestCounts(dir); counts.decision('unknown_direction'); counts.close();
+    expect(JSON.parse(readFileSync(counts.decisionsPath, 'utf8')).counts[0].count).toBe(3);
+  });
+  test('rejects content-bearing/unknown reasons and prunes to thirty days', () => {
+    expect(() => counts.decision('PRIVATE_MESSAGE' as never)).toThrow();
+    counts.close(); writeFileSync(counts.decisionsPath, JSON.stringify({ version: 1, counts: [], text: 'PRIVATE_MESSAGE' }));
+    let now = new Date(2026, 8, 1); counts = new RequestCounts(dir, () => new Date(now));
+    counts.decision('capacity_full'); counts.flush();
+    expect(readFileSync(counts.decisionsPath, 'utf8')).not.toContain('PRIVATE');
+    now = new Date(2026, 9, 1); counts.decision('dismissed'); counts.flush();
+    expect(JSON.parse(readFileSync(counts.decisionsPath, 'utf8')).counts).toEqual([{ day: '2026-10-01', reason: 'dismissed', count: 1 }]);
+  });
+});

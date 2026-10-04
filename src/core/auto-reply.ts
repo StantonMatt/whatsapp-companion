@@ -22,7 +22,7 @@ export function autoDecision(rules: AutoRules | undefined, snapshot: Snapshot, l
   if (!snapshot.ready || !snapshot.chatId || !snapshot.atBottom) return 'Conversation not ready at latest messages';
   if (snapshot.draft.length || snapshot.draftIssue || snapshot.composing) return 'User is writing';
   const latest = snapshot.messages.at(-1);
-  if (!latest || latest.outgoing !== false || !latest.text.trim() || latest.id === baselineId) return 'No new incoming text';
+  if (!latest || latest.outgoing !== false || latest.directionFallback || !latest.text.trim() || latest.id === baselineId) return 'No new incoming text';
   if (!inPermittedHours(rules, now)) return 'Outside permitted hours';
   if (ledger.some(x => x.messageId === latest.id)) return 'Already attempted this message';
   if (ledger.filter(x => new Date(x.at).toDateString() === now.toDateString()).length >= rules.dailyLimit) return 'Daily reply limit reached';
