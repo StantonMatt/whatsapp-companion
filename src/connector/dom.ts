@@ -255,7 +255,9 @@ export class DomConnector {
     this.button.setAttribute('aria-haspopup', 'dialog'); this.button.setAttribute('aria-expanded', 'false');
     this.button.addEventListener('click', event => { if (event.isTrusted) {
       if (this.pending?.origin === 'auto') {
+        // Automatic empty-composer work keeps running; return focus so Tab and typing still reach the composer.
         if (this.read().draft.trim()) { this.dismissPopup(); this.openPopup(); }
+        else this.editor()?.focus();
       }
       else if (this.pending) { this.dismissPopup(); this.editor()?.focus(); }
       else if (!this.popup.hidden && this.popupMode === 'refine') { this.hidePopup(); this.editor()?.focus(); }
@@ -587,7 +589,8 @@ export class DomConnector {
       };
       this.ghost.append(prefix, dots); render();
       this.dotsTimer = setInterval(() => { step = step % 3 + 1; render(); }, 400);
-      if (!this.announcedRequests.has(command.requestId)) {
+      // Announce only requests the user asked for; automatic dots after every typing pause would be noisy.
+      if (command.origin === 'user' && !this.announcedRequests.has(command.requestId)) {
         this.announcedRequests.add(command.requestId);
         while (this.announcedRequests.size > 50) this.announcedRequests.delete(this.announcedRequests.values().next().value!);
         this.loadingStatus.textContent = command.type === 'refining' ? 'Refining' : 'Suggesting a reply';

@@ -1176,7 +1176,8 @@ test('Escape during automatic suggestion dots cancels the request and suppresses
   const app = integratedAssistant(generator);
   try {
     app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
-    expect(app.connector['popup'].hidden).toBe(true); expect(app.connector['loadingStatus'].textContent).toBe('Suggesting a reply');
+    // Automatic dots are visual only; screen readers hear only requests the user made.
+    expect(app.connector['popup'].hidden).toBe(true); expect(app.connector['loadingStatus'].textContent).toBe('');
     const requestId = app.connector['pending']!.requestId, context = app.assistant['emptyKey']();
     app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor, composedPath: () => [app.editor],
       preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
@@ -1382,7 +1383,7 @@ describe('composer loading dots', () => {
       const visible = (element: Element) => [...element.children].filter(period => (period as HTMLElement).style.opacity === '1').length;
       expect(visible(dots)).toBe(1); expect(visible(fallback)).toBe(1);
       await vi.advanceTimersByTimeAsync(400); expect(visible(fallback)).toBe(2);
-      expect(connector['loadingStatus'].textContent).toBe('Suggesting a reply');
+      expect(connector['loadingStatus'].textContent).toBe('');
       connector.command({ type: 'clear' }); expect(fallback.isConnected).toBe(false); expect(connector['fallbackDots']).toBeUndefined();
     } finally { connector.stop(); }
   });
@@ -1557,4 +1558,19 @@ describe('composer loading dots', () => {
       expect(app.connector['fallbackDots']).toBeUndefined();
     } finally { app.stop(); clicks.stop(); }
   });
+});
+
+test('automatic dots are not announced and a star click returns focus to the empty composer', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = ''; const clicks = retryClicks();
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+    connector.command({ type: 'thinking', origin: 'auto', key, requestId: '00000000-0000-4000-8000-0000000000a1' });
+    expect(connector['pending']?.origin).toBe('auto'); expect(connector['loadingStatus'].textContent).toBe('');
+    connector['button'].focus(); clicks.trigger(connector);
+    expect(connector['pending']?.requestId).toBe('00000000-0000-4000-8000-0000000000a1');
+    expect(document.activeElement).toBe(editor);
+    connector.command({ type: 'thinking', origin: 'user', key, requestId: '00000000-0000-4000-8000-0000000000a2' });
+    expect(connector['loadingStatus'].textContent).toBe('Suggesting a reply');
+  } finally { connector.stop(); clicks.stop(); }
 });
