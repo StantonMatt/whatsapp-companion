@@ -1,8 +1,9 @@
 import type { Provider, Snapshot, Preferences, State, ReasoningEffort } from '../shared/model';
+import { countedDispatch, type RequestReason } from './request-counts';
 import { styleFor } from '../core/style';
 import { modelEffort, reasoningBudget } from '../core/model-policy';
 
-export type GenerateInput = { provider: Provider; model: string; key: string; system: string; input: string; effort?: ReasoningEffort; signal?: AbortSignal };
+export type GenerateInput = { provider: Provider; model: string; key: string; system: string; input: string; effort?: ReasoningEffort; signal?: AbortSignal; reason?: RequestReason };
 export class ProviderError extends Error {
   constructor(message: string, readonly retryable = false) { super(message); }
 }
@@ -12,25 +13,27 @@ export async function generate(request: GenerateInput, fetcher: typeof fetch = f
   const timeout = effort && !['none', 'low'].includes(effort) ? 120000 : 30000;
   const signal = AbortSignal.any([AbortSignal.timeout(timeout), ...(request.signal ? [request.signal] : [])]);
   try {
-    const response = await fetcher(openai ? 'https://api.openai.com/v1/responses' : 'https://api.anthropic.com/v1/messages', {
-      method: 'POST', redirect: 'error', signal,
-      headers: { 'Content-Type': 'application/json', ...(openai ? { Authorization: `Bearer ${request.key}` } : { 'x-api-key': request.key, 'anthropic-version': '2023-06-01' }) },
-      body: JSON.stringify(openai
-        ? { model: request.model, instructions: request.system, input: request.input, max_output_tokens: reasoningBudget(effort), store: false,
-          ...(effort ? { reasoning: { effort } } : {}) }
-        : { model: request.model, system: request.system, messages: [{ role: 'user', content: request.input }], max_tokens: reasoningBudget(effort),
-          ...(effort ? { output_config: { effort } } : {}) })
+    return await countedDispatch({ provider: request.provider, model: request.model, reason: request.reason ?? 'explicit suggest', method: 'POST' }, signal, async () => {
+      const response = await fetcher(openai ? 'https://api.openai.com/v1/responses' : 'https://api.anthropic.com/v1/messages', {
+        method: 'POST', redirect: 'error', signal,
+        headers: { 'Content-Type': 'application/json', ...(openai ? { Authorization: `Bearer ${request.key}` } : { 'x-api-key': request.key, 'anthropic-version': '2023-06-01' }) },
+        body: JSON.stringify(openai
+          ? { model: request.model, instructions: request.system, input: request.input, max_output_tokens: reasoningBudget(effort), store: false,
+            ...(effort ? { reasoning: { effort } } : {}) }
+          : { model: request.model, system: request.system, messages: [{ role: 'user', content: request.input }], max_tokens: reasoningBudget(effort),
+            ...(effort ? { output_config: { effort } } : {}) })
+      });
+      if (!response.ok) {
+        // Never echo response bodies: providers can include keys or prompt fragments in errors.
+        const reason = response.status === 401 ? 'Key rejected. Add a valid API key.' : response.status === 403 ? 'This key does not have access to the selected model.' : response.status === 429 ? 'Rate limit or quota reached. Check provider usage and billing.' : response.status === 400 || response.status === 404 ? 'Model or request unavailable. Check the model ID and account access.' : 'Provider temporarily unavailable. Try again later.';
+        throw new ProviderError(`${request.provider} (${response.status}): ${reason}`, response.status >= 500 || response.status === 408);
+      }
+      const data = await response.json() as { status?: string; output?: { type: string; content?: { type: string; text?: string }[] }[]; content?: { type: string; text?: string }[]; stop_reason?: string };
+      if (data.status === 'incomplete' || data.stop_reason === 'max_tokens') throw new Error('The provider response was incomplete. Try a shorter request.');
+      const text = openai ? data.output?.flatMap(x => x.type === 'message' ? x.content ?? [] : []).filter(x => x.type === 'output_text').map(x => x.text ?? '').join('') : data.content?.filter(x => x.type === 'text').map(x => x.text ?? '').join('');
+      if (!text?.trim() || text.length > 8000) throw new Error('The provider returned no usable text. Check the selected model.');
+      return text;
     });
-    if (!response.ok) {
-      // Never echo response bodies: providers can include keys or prompt fragments in errors.
-      const reason = response.status === 401 ? 'Key rejected. Add a valid API key.' : response.status === 403 ? 'This key does not have access to the selected model.' : response.status === 429 ? 'Rate limit or quota reached. Check provider usage and billing.' : response.status === 400 || response.status === 404 ? 'Model or request unavailable. Check the model ID and account access.' : 'Provider temporarily unavailable. Try again later.';
-      throw new ProviderError(`${request.provider} (${response.status}): ${reason}`, response.status >= 500 || response.status === 408);
-    }
-    const data = await response.json() as { status?: string; output?: { type: string; content?: { type: string; text?: string }[] }[]; content?: { type: string; text?: string }[]; stop_reason?: string };
-    if (data.status === 'incomplete' || data.stop_reason === 'max_tokens') throw new Error('The provider response was incomplete. Try a shorter request.');
-    const text = openai ? data.output?.flatMap(x => x.type === 'message' ? x.content ?? [] : []).filter(x => x.type === 'output_text').map(x => x.text ?? '').join('') : data.content?.filter(x => x.type === 'text').map(x => x.text ?? '').join('');
-    if (!text?.trim() || text.length > 8000) throw new Error('The provider returned no usable text. Check the selected model.');
-    return text;
   } catch (error) {
     if (request.signal?.aborted) throw new Error('Cancelled');
     if (signal.aborted) throw new ProviderError(`Provider timed out after ${timeout / 1000} seconds. Try again or lower reasoning effort.`, true);

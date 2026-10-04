@@ -267,7 +267,7 @@ export class DomConnector {
   private takeover(editing = false) {
     this.restoreReplacementSelection();
     this.activityGeneration++;
-    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'pending') this.hidePopup(); }
+    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup(); }
     this.emit({ type: 'activity', editing });
   }
   private activity = (event: Event) => { if (event.isTrusted && !this.inserting) this.takeover(); };
@@ -314,7 +314,7 @@ export class DomConnector {
   }
   private insertAtSelection(text: string) {
     this.inserting = true;
-    try { return this.doc.execCommand('insertText', false, text); } finally { this.inserting = false; }
+    try { return this.doc.execCommand('insertText', false, text); } catch { return false; } finally { this.inserting = false; }
   }
   private async replaceDraft(command: Extract<RemoteCommand, { type: 'suggestion' }>) {
     const editor = this.editor();
@@ -336,9 +336,8 @@ export class DomConnector {
       if (this.suggestion === command) this.clear();
       return;
     }
-    this.replacement = undefined;
-    this.takeover(true);
-    this.insertAtSelection(command.text);
+    this.applySuggestion(command, () => this.insertAtSelection(command.text));
+    if (this.replacement === replacement) this.replacement = undefined;
   }
   private wholeDraftSelected(editor: HTMLElement) {
     const selection = this.doc.getSelection();
@@ -363,8 +362,27 @@ export class DomConnector {
     const suggestion = this.suggestion, snapshot = this.read();
     if (!suggestion || suggestion.key !== suggestionKey(snapshot) || !snapshot.ready || snapshot.composing || snapshot.draftIssue) return;
     if (suggestion.replace && snapshot.draft.trim()) { void this.replaceDraft(suggestion); return; }
-    this.takeover(true); this.hidePopup(); this.insert(suggestion.text, suggestion.replace);
+    this.applySuggestion(suggestion, () => this.insert(suggestion.text, suggestion.replace));
   }
+  private applySuggestion(command: Extract<RemoteCommand, { type: 'suggestion' }>, insert: () => boolean) {
+    const selection = this.doc.getSelection();
+    const originalRange = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : undefined;
+    const success = insert();
+    if (!success) {
+      // Stop automatic replacement before notifying main (which may synchronously
+      // publish recovery). Restore the caret before the next native keystroke.
+      this.clear();
+      if (originalRange && !command.replace && originalRange.startContainer.isConnected && originalRange.endContainer.isConnected) {
+        selection?.removeAllRanges(); selection?.addRange(originalRange);
+      }
+    }
+    this.hidePopup();
+    // Acknowledge after the native edit, before activity publishes another snapshot.
+    if (command.id) this.emit({ type: 'applied', key: command.key, suggestionId: command.id, ...(!success ? { success: false } : {}) });
+    this.takeover(success);
+    if (!success) this.refresh();
+  }
+
   private hidePopup() { this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); }
   private dismissPopup() {
     this.dismissedKey = suggestionKey(this.read()); this.takeover(); this.clear(); this.hidePopup(); this.emit({ type: 'dismiss' });
@@ -425,13 +443,13 @@ export class DomConnector {
     const hasText = Boolean(snapshot.draft.trim() || suggested?.id);
     if (suggested?.replace && snapshot.draft.trim()) this.clear();
     this.takeover(); this.popupShell('refine', hasText ? snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion' : 'Reply assistance');
-    const request = (instruction?: string) => {
+    const request = (instruction?: string, operation?: 'translate' | 'retry') => {
       if (suggestionKey(this.read()) !== key) { this.hidePopup(); return; }
       this.dismissedKey = undefined;
       this.hidePopup();
       const editor = this.editor();
       if (editor) { editor.focus(); const range = this.doc.createRange(); range.selectNodeContents(editor); range.collapse(false); const selection = this.doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); }
-      this.refresh(); this.emit({ type: 'request', instruction, key, ...(instruction && !snapshot.draft.trim() && suggested?.id ? { suggestionId: suggested.id } : {}) });
+      this.refresh(); this.emit({ type: 'request', instruction, ...(operation ? { operation } : {}), key, ...(instruction && !snapshot.draft.trim() && suggested?.id ? { suggestionId: suggested.id } : {}) });
     };
     if (!hasText) {
       const suggest = this.doc.createElement('button'); suggest.className = 'action'; suggest.textContent = 'Suggest reply';
@@ -453,20 +471,21 @@ export class DomConnector {
     const icon = this.doc.createElementNS(svgNS, 'svg'); icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('aria-hidden', 'true');
     const path = this.doc.createElementNS(svgNS, 'path'); path.setAttribute('fill', 'currentColor'); path.setAttribute('d', 'M2.01 21 23 12 2.01 3 2 10l15 2-15 2z');
     icon.append(path); apply.append(icon);
-    const submit = () => { const text = instruction.value.trim(); if (text) request(translating ? `Translate the draft to ${text}.` : text); };
+    const submit = () => { const text = instruction.value.trim(); if (text) request(translating ? `Translate the draft to ${text}.` : text, translating ? 'translate' : undefined); };
     instruction.addEventListener('input', () => { apply.disabled = !instruction.value.trim(); });
     apply.addEventListener('click', e => { if (e.isTrusted) submit(); });
     instruction.addEventListener('keydown', e => { if (e.isTrusted && e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); e.stopPropagation(); submit(); } });
     field.append(instruction, apply); this.popup.append(row, field); instruction.focus();
   }
   command(command: RemoteCommand) {
+    if (command.type === 'snapshot') { this.dismissedKey = undefined; this.refresh(); this.emit({ type: 'snapshot', snapshot: this.read(), nonce: command.nonce }); return; }
     if (command.type === 'captureStickerPickerLayout') { this.emit({ type: 'stickerPickerLayout', nonce: command.nonce, result: captureStickerPicker(this.doc) }); return; }
     if (command.type === 'makeSticker') { void this.stickerTransfer?.make(command, command.image); return; }
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
     if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
-    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'pending') this.hidePopup(); return; }
+    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup(); return; }
     if (command.type === 'notice') {
       if (command.retryKey && command.retryKey !== suggestionKey(this.read())) return;
       this.popupShell('notice', 'Reply assistance'); const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text);
@@ -478,7 +497,7 @@ export class DomConnector {
           const editor = this.editor();
           if (editor) { editor.focus(); const range = this.doc.createRange(); range.selectNodeContents(editor); range.collapse(false); const selection = this.doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); }
           this.refresh();
-          this.emit({ type: 'request', key: command.retryKey });
+          this.emit({ type: 'request', operation: 'retry', key: command.retryKey });
         }); this.popup.append(retry);
       }
       return;

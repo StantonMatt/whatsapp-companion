@@ -89,3 +89,15 @@ test('an immediate safety stop during re-enable releases the pending checkbox', 
   expect(checkbox.checked).toBe(false); expect(checkbox.disabled).toBe(false);
   expect(host.textContent).toContain('Turned off automatically: WhatsApp showed an account warning.');
 });
+
+test('opening Providers uses cached discovery and Refresh models requests a bypass', async () => {
+  const current = status(); current.keys.openai = true;
+  const models = vi.fn().mockResolvedValue({ models: [{ id: 'gpt-6-luna', name: 'Luna' }] });
+  vi.stubGlobal('companion', { models });
+  const button = (name: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.getAttribute('aria-label') === name || b.textContent === name)!;
+  await act(async () => root.render(<Settings status={current} act={vi.fn(async () => true)} close={() => {}}/>));
+  await act(async () => button('Providers').click());
+  expect(models).toHaveBeenCalledExactlyOnceWith('openai', false);
+  await act(async () => button('Refresh models').click());
+  expect(models).toHaveBeenLastCalledWith('openai', true); expect(models).toHaveBeenCalledTimes(2);
+});

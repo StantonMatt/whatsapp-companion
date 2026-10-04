@@ -9,7 +9,7 @@ export class ProviderCheck {
     this.invalidate();
     const ticket = new AbortController(); this.active = ticket;
     try {
-      await this.generator({ ...configuration, signal: ticket.signal, system: 'Return only the word Connected.', input: 'Synthetic connection check. No private conversation data.' });
+      await this.generator({ ...configuration, signal: ticket.signal, reason: 'connection test', system: 'Return only the word Connected.', input: 'Synthetic connection check. No private conversation data.' });
       if (this.active === ticket) return 'Connected. Synthetic provider check passed.';
     } catch (error) {
       if (this.active === ticket) throw error;

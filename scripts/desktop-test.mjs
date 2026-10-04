@@ -348,11 +348,21 @@ try {
   await editor.fill('');
   await remote.evaluate(() => window.add('I will let you know.', true));
   await editor.click();
+  await remote.waitForTimeout(1500);
+  await expect(statusText).not.toHaveText(/Thinking|Tab to accept/);
+  // Own-message follow-ups remain available as an explicit user request.
+  let ownBounds = await editor.boundingBox();
+  await remote.mouse.click(ownBounds.x + ownBounds.width - 17, ownBounds.y - 16);
+  await clickAssistant('Suggest reply');
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await editor.press('Tab'); await expect(editor).toHaveText('Sounds good, see you then!');
+  await remote.waitForTimeout(1500);
+  await expect(statusText).not.toHaveText(/Thinking|Tab to accept/);
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
-  console.log('PASS empty composer suggests after the owner sent the latest message');
-  await editor.fill(''); await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
+  console.log('PASS own latest message needs explicit Suggest and acceptance does not start a continuation');
+  await editor.fill('');
+  await remote.evaluate(() => window.add('A fresh incoming question for refinement'));
+  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   let starBounds = await editor.boundingBox();
   await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
   await remote.screenshot({ path: '.local/screenshots/refine-suggestion-menu.png' });
@@ -370,7 +380,9 @@ try {
   await clickAssistant('Translate…'); await remote.keyboard.type('Spanish'); await remote.keyboard.press('Enter');
   await expect(editor).toHaveText('That sounds lovely. See you then!');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
-  console.log('PASS translation replaces the written draft directly without sending');
+  await remote.waitForTimeout(1500);
+  await expect(statusText).not.toHaveText(/Thinking|Tab to accept/);
+  console.log('PASS translation replaces the written draft without sending or another automatic continuation');
   await editor.fill('Keep this text while cancelling');
   starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
   await clickAssistant('Warmer'); await expect(statusText).toHaveText('Thinking…'); await remote.keyboard.press('Escape');

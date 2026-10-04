@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
-import { test, expect, vi, afterEach } from 'vitest';
+import { describe, test, expect, vi, afterEach } from 'vitest';
 import { DomConnector, peerFromMessageId, caretAtEnd, readDraft, accountSafetyReason } from '../src/connector/dom';
 import { stickerImageState } from '../src/connector/sticker-image-state';
-import { snapshotSchema } from '../src/shared/model';
+import { snapshotSchema, initialState, type State } from '../src/shared/model';
+import { Assistant } from '../src/main/assistant';
+import { ProviderError, type generate } from '../src/main/providers';
+import type { Store } from '../src/main/store';
+import type { Vault } from '../src/main/vault';
 import { StickerTransfer, canSendSticker, stickerRoute } from '../src/core/sticker-transfer';
 import { snapshotKey, suggestionKey } from '../src/core/suggestions';
 import type { RemoteEvent } from '../src/shared/connector';
@@ -813,5 +817,239 @@ test('chat text, composer text, hidden notices and ordinary dialogs do not repor
     dialog.innerHTML = 'temporarily banned'; dialog.style.visibility = 'hidden';
     await vi.advanceTimersByTimeAsync(350);
     expect(events.filter(e => e.type === 'accountSafety')).toHaveLength(1);
+  } finally { connector.stop(); }
+});
+
+test('main snapshot refresh reads the current composer and returns the requested nonce', () => {
+  vi.useFakeTimers(); const editor = fixture(), events: RemoteEvent[] = [];
+  const connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    vi.advanceTimersByTime(600); editor.textContent = 'Fresh draft';
+    connector['dismissedKey'] = suggestionKey(connector.read());
+    connector.command({ type: 'snapshot', nonce: 'main-refresh' });
+    expect(events.at(-1)).toMatchObject({ type: 'snapshot', nonce: 'main-refresh', snapshot: { draft: 'Fresh draft', ready: true } });
+    expect(connector['dismissedKey']).toBeUndefined();
+  } finally { connector.stop(); }
+});
+
+test.each([false, true])('accepting/replacing acknowledges only after insertion, before edit activity (replace=%s)', async replace => {
+  vi.useFakeTimers(); const editor = fixture(), events: RemoteEvent[] = [];
+  editor.textContent = replace ? 'Original' : ''; editor.tabIndex = 0;
+  let insertionReturned = false;
+  const connector = new DomConnector(document, event => {
+    if (event.type === 'applied') { expect(insertionReturned).toBe(true); expect(editor.textContent).toBe('Result'); }
+    events.push(event);
+  }); connector.start();
+  const insert = vi.fn(() => { editor.textContent = 'Result'; insertionReturned = true; return true; }); document.execCommand = insert;
+  try {
+    vi.advanceTimersByTime(600); editor.focus();
+    const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
+    document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+    const key = suggestionKey(connector.read()); events.length = 0;
+    connector.command({ type: 'suggestion', key, text: 'Result', replace, id: 'main-owned-id' });
+    if (replace) await vi.advanceTimersByTimeAsync(50); else connector['acceptSuggestion']();
+    const applied = events.findIndex(e => e.type === 'applied');
+    expect(events[applied]).toEqual({ type: 'applied', key, suggestionId: 'main-owned-id' });
+    expect(events[applied + 1]).toEqual({ type: 'activity', editing: true }); expect(insert).toHaveBeenCalledOnce();
+  } finally { connector.stop(); }
+});
+
+describe.each(['returns false', 'throws'])('native insertion %s', outcome => {
+  test.each([false, true])('failed native insertion reports its main-owned application and keeps Try again visible (replace=%s)', async replace => {
+    vi.useFakeTimers(); const editor = fixture(), events: RemoteEvent[] = [];
+    editor.textContent = replace ? 'Original' : ''; editor.tabIndex = 0;
+    const connector = new DomConnector(document, event => events.push(event)); connector.start();
+    document.execCommand = vi.fn(() => { if (outcome === 'throws') throw new Error('Native editor unavailable'); return false; });
+    try {
+      vi.advanceTimersByTime(600); editor.focus();
+      const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
+      document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+      const key = suggestionKey(connector.read()); events.length = 0;
+      connector.command({ type: 'suggestion', key, text: 'Result', replace, id: 'main-owned-id' });
+      if (replace) await vi.advanceTimersByTimeAsync(50); else connector['acceptSuggestion']();
+      expect(events.filter(e => e.type === 'applied')).toEqual([
+        { type: 'applied', key, suggestionId: 'main-owned-id', success: false }
+      ]);
+      expect(editor.textContent).toBe(replace ? 'Original' : '');
+      expect(events.at(-1)).toMatchObject({ type: 'snapshot' });
+      const currentKey = suggestionKey(connector.read()); expect(currentKey).toBe(key);
+      connector.command({ type: 'notice', text: 'Could not insert the suggestion. Try again.', retryKey: currentKey });
+      const popup = connector['popup'];
+      expect(popup.textContent).toContain('Try again');
+      expect([...popup.querySelectorAll('button')].some(button => button.textContent === 'Try again')).toBe(true);
+      await vi.advanceTimersByTimeAsync(350);
+      expect(document.execCommand).toHaveBeenCalledOnce();
+      expect(events.filter(e => e.type === 'applied')).toHaveLength(1);
+      expect(popup.hidden).toBe(false);
+      const selection = document.getSelection()!;
+      expect(selection.isCollapsed).toBe(true); expect(caretAtEnd(editor)).toBe(true);
+      connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+      const typing = selection.getRangeAt(0); typing.insertNode(document.createTextNode('!'));
+      expect(editor.textContent).toBe(replace ? 'Original!' : '!');
+    } finally { connector.stop(); }
+  });
+});
+
+test.each(['Tab', 'accept', 'queued offer'])('exact draft key rejects a cached suffix after trailing whitespace via %s', action => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = 'Thank'; editor.tabIndex = 0;
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  const insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    vi.advanceTimersByTime(600); editor.focus();
+    const command = { type: 'suggestion' as const, key: suggestionKey(connector.read()), text: 's!', replace: false, id: 'cached-suffix' };
+    if (action !== 'queued offer') connector.command(command);
+    editor.textContent = 'Thank ';
+    const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
+    document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+    if (action === 'Tab') connector['keydown']({ isTrusted: true, key: 'Tab', target: editor, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() } as unknown as KeyboardEvent);
+    if (action === 'accept') connector['acceptSuggestion']();
+    if (action === 'queued offer') connector.command(command);
+    expect(insert).not.toHaveBeenCalled(); expect(events.some(e => e.type === 'applied')).toBe(false);
+    expect(editor.textContent).toBe('Thank ');
+  } finally { connector.stop(); }
+});
+
+
+// Capture the listener installed on the actual emitted button, then supply the
+// trusted click shape used by the desktop fixture; jsdom clicks are untrusted.
+function retryClicks() {
+  const listeners = new Map<EventTarget, EventListener>();
+  const add = HTMLButtonElement.prototype.addEventListener;
+  const spy = vi.spyOn(HTMLButtonElement.prototype, 'addEventListener').mockImplementation(function (this: HTMLButtonElement, type, listener, options) {
+    if (type === 'click' && typeof listener === 'function') listeners.set(this, listener as EventListener);
+    return add.call(this, type, listener, options);
+  });
+  return {
+    click(connector: DomConnector) {
+      const button = [...connector['popup'].querySelectorAll('button')].find(b => b.textContent === 'Try again');
+      expect(connector['popup'].hidden).toBe(false); expect(button).toBeDefined();
+      const listener = listeners.get(button!)!; expect(listener).toBeDefined();
+      listener.call(button!, { isTrusted: true } as Event);
+    },
+    stop: () => spy.mockRestore()
+  };
+}
+function integratedAssistant(generator: typeof generate) {
+  const editor = fixture(); editor.tabIndex = 0;
+  const state = initialState(); state.global.suggestions = true; state.global.shareContext = true;
+  const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
+  const events: RemoteEvent[] = [];
+  let assistant!: Assistant;
+  const connector = new DomConnector(document, event => {
+    events.push(event);
+    if (event.type === 'snapshot') assistant.receive(event.snapshot, false, event.nonce);
+    if (event.type === 'activity') assistant.activity(event.editing);
+    if (event.type === 'applied') assistant.applied(event);
+    if (event.type === 'request') void assistant.request(event.instruction, false, event);
+    if (event.type === 'dismiss') assistant.dismiss();
+  });
+  assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => connector.command(c), focus() {} }, () => {}, false, generator);
+  connector.start();
+  return { editor, state, assistant, connector, events, stop() { assistant.cancel(true); connector.stop(); } };
+}
+function focusEnd(editor: HTMLElement) {
+  editor.focus(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
+  document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+}
+
+test.each(['continuation', 'refine', 'translate'] as const)('compatible history republishes the actual %s Try again control (C2/D2)', async operation => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Rejected')).mockResolvedValue(' Recovered');
+  const app = integratedAssistant(generator);
+  document.execCommand = vi.fn(() => true);
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh']();
+    if (operation === 'continuation') await vi.advanceTimersByTimeAsync(1000);
+    else await app.assistant.request('Original instruction', false, operation === 'translate' ? { operation } : undefined);
+    expect(app.connector['popup'].hidden).toBe(false);
+    const old = suggestionKey(app.connector.read());
+    document.querySelector('#main [data-id]')!.insertAdjacentHTML('beforebegin', '<div data-id="false_123@c.us_older"><span class="selectable-text copyable-text">Older history</span></div>');
+    app.connector['refresh'](); expect(suggestionKey(app.connector.read())).not.toBe(old);
+    expect(app.connector['popup'].textContent).toContain('Rejected'); clicks.click(app.connector);
+    await vi.advanceTimersByTimeAsync(operation === 'continuation' ? 0 : 50);
+    expect(generator).toHaveBeenCalledTimes(2);
+    expect(generator.mock.calls[1][0].reason).toBe('retry');
+    expect(generator.mock.calls[1][0].system).toBe(generator.mock.calls[0][0].system);
+    expect(app.connector['popup'].hidden).toBe(true);
+    expect(app.events.filter(e => e.type === 'request').at(-1)).toMatchObject({ operation: 'retry', key: suggestionKey(app.assistant.snapshot) });
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test.each(['Try again', 'backoff'])('activity then whitespace snapshot keeps usable continuation %s (C3)', async recovery => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Interrupted', recovery === 'backoff')).mockResolvedValue('for coming');
+  const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = 'Thanks'; await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh']();
+    await vi.advanceTimersByTimeAsync(1000);
+    app.connector['beforeInput']({ isTrusted: true, target: app.editor } as unknown as Event);
+    expect(app.connector['ghost'].textContent).toBe(''); expect(app.connector['popup'].hidden).toBe(true);
+    app.editor.textContent = 'Thanks '; focusEnd(app.editor); app.connector['refresh']();
+    if (recovery === 'Try again') clicks.click(app.connector);
+    await vi.advanceTimersByTimeAsync(recovery === 'backoff' ? 2000 : 0);
+    expect(generator).toHaveBeenCalledTimes(2); expect(JSON.parse(generator.mock.calls[1][0].input).draft).toBe('Thanks ');
+    expect(app.connector['ghost'].textContent).toBe('Thanks for coming'); expect(app.connector['popup'].hidden).toBe(true);
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test.each(['settings', 'cancel', 'dismiss', 'incompatible draft'] as const)('%s removes request-bound notices with their live replay (D3)', async action => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockRejectedValue(new ProviderError('Rejected'));
+  const app = integratedAssistant(generator);
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh'](); await vi.advanceTimersByTimeAsync(1000);
+    expect(app.connector['popup'].hidden).toBe(false); expect(app.connector['popup'].textContent).toContain('Try again');
+    if (action === 'settings') { app.state.global.tone = 'friendly'; app.assistant.reconfigure(); }
+    else if (action === 'cancel') app.assistant.cancel();
+    else if (action === 'dismiss') app.connector['dismissPopup']();
+    else { app.editor.textContent = 'Different'; focusEnd(app.editor); app.connector['refresh'](); }
+    expect(app.connector['popup'].hidden).toBe(true);
+    if (action !== 'incompatible draft') { await vi.advanceTimersByTimeAsync(3000); expect(generator).toHaveBeenCalledOnce(); }
+  } finally { app.stop(); }
+});
+
+test('a compatible history key republishes the live offer without another request', async () => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValue(' suffix');
+  const app = integratedAssistant(generator);
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh'](); await vi.advanceTimersByTimeAsync(1000);
+    document.querySelector('#main [data-id]')!.insertAdjacentHTML('beforebegin', '<div data-id="false_123@c.us_older"><span class="selectable-text copyable-text">History</span></div>');
+    app.connector['refresh'](); expect(app.connector['ghost'].textContent).toBe('A draft suffix');
+    expect(app.connector['suggestion']?.key).toBe(suggestionKey(app.connector.read())); expect(generator).toHaveBeenCalledOnce();
+  } finally { app.stop(); }
+});
+
+test('failed replacement stops across polling, restores the caret and the actual Try again replays it (D1)', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>().mockResolvedValue('Revised');
+  const app = integratedAssistant(generator); app.state.global.suggestions = false;
+  const insert = vi.fn(() => false); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh']();
+    await app.assistant.request('Make shorter'); await vi.advanceTimersByTimeAsync(400);
+    expect(insert).toHaveBeenCalledOnce(); expect(app.connector['popup'].hidden).toBe(false);
+    expect(document.getSelection()!.isCollapsed).toBe(true); expect(caretAtEnd(app.editor)).toBe(true);
+    insert.mockImplementation(() => { app.editor.textContent = 'Revised'; return true; });
+    clicks.click(app.connector); await vi.advanceTimersByTimeAsync(50);
+    expect(generator).toHaveBeenCalledTimes(2); expect(insert).toHaveBeenCalledTimes(2);
+    expect(app.editor.textContent).toBe('Revised'); expect(app.connector['popup'].hidden).toBe(true);
+  } finally { app.stop(); clicks.stop(); }
+});
+
+
+test.each(['caret', 'selection'])('failed replacement restores the original %s for the next native edit', async mode => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = 'Original'; editor.tabIndex = 0;
+  const connector = new DomConnector(document, () => {}); connector.start();
+  const insert = vi.fn(() => false); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); editor.focus();
+    const original = document.createRange(); original.setStart(editor.firstChild!, 2); original.setEnd(editor.firstChild!, mode === 'caret' ? 2 : 5);
+    const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(original);
+    connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Revised', replace: true, id: 'replacement' });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(insert).toHaveBeenCalledOnce(); expect(selection.anchorOffset).toBe(2);
+    expect(selection.toString()).toBe(mode === 'caret' ? '' : 'igi');
+    connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+    const typing = selection.getRangeAt(0); typing.deleteContents(); typing.insertNode(document.createTextNode('!'));
+    expect(editor.textContent).toBe(mode === 'caret' ? 'Or!iginal' : 'Or!nal');
   } finally { connector.stop(); }
 });

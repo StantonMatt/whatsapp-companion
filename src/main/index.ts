@@ -21,6 +21,7 @@ import { StickerInbox } from './sticker-inbox';
 import { decodeStickerPixels } from './sticker-fingerprint';
 import { STICKER_SCHEME, stickerResponse } from './sticker-protocol';
 import { ProviderCheck } from './provider-check';
+import { RequestCounts, useRequestCounts } from './request-counts';
 import { ModelCatalog } from './models';
 import { currentTextModels, savedEffort, setReasoning } from '../core/model-policy';
 import { MAX_STICKER_BYTES, MAX_LIBRARY_STICKERS, MAX_LIBRARY_BYTES } from '../shared/sticker-limits';
@@ -51,6 +52,8 @@ else void app.whenReady().then(start).catch(() => {
 
 async function start() {
   const store = new Store(app.getPath('userData'));
+  const requestCounts = new RequestCounts(app.getPath('userData'));
+  useRequestCounts(requestCounts);
   const vault = new Vault(app.getPath('userData'));
   const providerCheck = new ProviderCheck();
   const modelCatalog = new ModelCatalog();
@@ -378,8 +381,8 @@ async function start() {
   const requireScope = (scope: string) => {
     if (scope !== 'global' && scope !== 'general' && (scope !== assistant.snapshot.settingsId || !assistant.snapshot.ready)) throw new Error('This conversation changed. Reopen its settings.');
   };
-  const providerChanged = () => {
-    providerCheck.invalidate(); assistant.reconfigure();
+  const providerChanged = (keyProvider?: 'openai' | 'anthropic') => {
+    providerCheck.invalidate(); assistant.reconfigure({ keyProvider });
     assistant.message = 'Provider configuration changed. Use Test connection to check account access.';
   };
   controls.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
@@ -435,15 +438,15 @@ async function start() {
     if (nonce.success && nonce.data === shieldRestoreNonce && !stickerShield) restoreShieldBounds();
   });
   ipcMain.handle('companion:status', event => { if (!isLocal(event)) throw new Error('Denied'); return status(); });
-  ipcMain.handle('companion:models', (event, raw: unknown) => {
+  ipcMain.handle('companion:models', (event, raw: unknown, refresh: unknown = false) => {
     if (!isLocal(event)) return { models: [], error: 'Denied' };
     const parsed = providerSchema.safeParse(raw);
-    if (!parsed.success) return { models: [], error: 'Invalid provider.' };
+    if (!parsed.success || typeof refresh !== 'boolean') return { models: [], error: 'Invalid provider.' };
     const provider = parsed.data;
     if (fixture) return { models: currentTextModels(provider, (provider === 'openai'
       ? ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-sol-2026-09-29', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-luna-2026-05-18', 'gpt-4o', 'text-embedding-3-small', 'gpt-audio']
       : ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-6']).map(id => ({ id, name: id }))) };
-    try { return modelCatalog.load(provider, vault.get(provider)); }
+    try { return modelCatalog.load(provider, vault.get(provider), refresh); }
     catch (error) { return { models: [], error: error instanceof Error ? error.message : 'Unable to unlock the provider key.' }; }
   });
   ipcMain.handle('companion:action', async (event, raw: unknown) => {
@@ -465,11 +468,11 @@ async function start() {
         case 'key': {
           if (keyPromptOpen) throw new Error('A key entry dialog is already open.');
           keyPromptOpen = true;
-          try { vault.set(action.provider, await promptKey(action.provider), action.persist); modelCatalog.invalidate(action.provider); providerChanged(); assistant.message = 'API key configured. Use Test connection to check account access.'; }
+          try { vault.set(action.provider, await promptKey(action.provider), action.persist); modelCatalog.invalidate(action.provider); providerChanged(action.provider); assistant.message = 'API key configured. Use Test connection to check account access.'; }
           finally { keyPromptOpen = false; }
           break;
         }
-        case 'deleteKey': vault.remove(action.provider); modelCatalog.invalidate(action.provider); providerChanged(); break;
+        case 'deleteKey': vault.remove(action.provider); modelCatalog.invalidate(action.provider); providerChanged(action.provider); break;
         case 'testProvider': {
           if (fixture) { assistant.message = 'Demo provider check passed locally. No network request was made.'; break; }
           const p = store.state.provider;
@@ -489,7 +492,7 @@ async function start() {
           const examples = action.examples.trim() ? action.examples.split('\n') : assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text);
           const profile = learnStyle(examples, 'selected');
           if (!profile) throw new Error(action.examples.trim() ? `Add at least ${minimumStyleSamples} messages with three or more characters, one per line.` : `Only ${styleSamples(examples).length} usable sent messages are loaded. Scroll up in WhatsApp to load more; at least ${minimumStyleSamples} are needed.`);
-          store.update(s => { s.profiles[action.scope] = profile; }); assistant.reconfigure(); break;
+          store.update(s => { s.profiles[action.scope] = profile; }); assistant.reconfigure({ learning: true }); break;
         }
         case 'resetProfile': store.update(s => { delete s.profiles[action.scope]; if (action.scope !== 'general') setPreferences(s, action.scope, { learnFromSent: false }); }); assistant.reconfigure(); break;
         case 'cancelSticker': cancelSticker(); break;
@@ -537,7 +540,7 @@ async function start() {
           remote.webContents.send('companion:command', { type: 'locateSticker', id: action.id, nonce }); break;
         }
         case 'panel': openPanel(action.panel); break;
-        case 'reload': cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); await remote.webContents.loadURL(remoteURL); break;
+        case 'reload': cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); await remote.webContents.loadURL(remoteURL); break;
         case 'cancelAuto': assistant.activity(); break;
       }
       publish(); return { ok: true };
@@ -626,18 +629,21 @@ async function start() {
         case 'snapshot': {
           const s = snapshotSchema.safeParse(envelope.data.snapshot);
           if (s.success) {
+            // Parse first so a failed identification still completes a nonce-tagged refresh.
+            const nonce = z.string().uuid().optional().safeParse(envelope.data.nonce);
             let settingsId: string | null;
             try { settingsId = identifyStickerDestination(s.data); }
             catch (error) {
               const unavailable = { ...s.data, settingsId: null, ready: false };
               observeStickerDestination(unavailable);
               presentedSnapshot = unavailable;
-              assistant.receive(unavailable); throw error;
+              if (nonce.success) assistant.receive(unavailable, false, nonce.data);
+              throw error;
             }
             const snapshot = { ...s.data, settingsId };
             presentedSnapshot = stickerReadiness.present(snapshot, stickerTransfer.ownsMaker(snapshot) ? snapshot.stickerPreparation : undefined);
             const revoked = observeStickerDestination(snapshot);
-            assistant.receive(snapshot);
+            if (nonce.success) assistant.receive(snapshot, false, nonce.data);
             if (revoked) publish();
           } break;
         }
@@ -651,8 +657,9 @@ async function start() {
         }
         case 'cancelAuto': assistant.activity(); break;
         case 'activity': { const v = z.object({ type: z.literal('activity'), editing: z.boolean().optional() }).strict().safeParse(raw); if (v.success) assistant.activity(v.data.editing); break; }
+        case 'applied': { const v = z.object({ type: z.literal('applied'), key: z.string().max(1_000_000), suggestionId: z.string().uuid(), success: z.boolean().optional() }).strict().safeParse(raw); if (v.success) assistant.applied(v.data); break; }
         case 'dismiss': assistant.dismiss(); break;
-        case 'request': { const v = z.object({ type: z.literal('request'), instruction: z.string().max(1000).optional(), key: z.string().max(1_000_000).optional(), suggestionId: z.string().uuid().optional() }).strict().safeParse(raw); if (v.success) void assistant.request(v.data.instruction, false, v.data); break; }
+        case 'request': { const v = z.object({ type: z.literal('request'), instruction: z.string().max(1000).optional(), operation: z.enum(['translate', 'retry']).optional(), key: z.string().max(1_000_000).optional(), suggestionId: z.string().uuid().optional() }).strict().safeParse(raw); if (v.success) void assistant.request(v.data.instruction, false, v.data); break; }
         case 'result': { const v = z.object({ type: z.literal('result'), nonce: z.string().uuid(), sent: z.boolean() }).strict().safeParse(raw); if (v.success) assistant.result(v.data.nonce, v.data.sent); break; }
         case 'sticker': {
           const v = z.object({ type: z.literal('sticker'), image: stickerImageSchema }).strict().safeParse(raw);
@@ -696,12 +703,13 @@ async function start() {
   controls.webContents.session.setPermissionCheckHandler(() => false);
   controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
-  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); } });
+  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); } });
   controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); });
-  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.reconfigure(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
+  remote.webContents.on('did-finish-load', () => assistant.refresh(true));
+  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
   win.on('close', event => {
-    cancelSticker(); stopMakerInput(); assistant.cancel(); publish(); clearStickerShield(true);
+    cancelSticker(); stopMakerInput(); assistant.cancel(true); publish(); clearStickerShield(true);
     if (!indexDrained) {
       event.preventDefault();
       if (!closing) {
@@ -710,10 +718,10 @@ async function start() {
       }
     }
   });
-  app.on('before-quit', () => { cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
-  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(); remote.webContents.close(); controls.webContents.close(); app.quit(); });
+  app.on('before-quit', () => { assistant.cancel(true); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); requestCounts.close(); cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
+  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(true); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.reconfigure(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
   await win.loadURL('about:blank');
   await controls.webContents.loadURL(uiURL);

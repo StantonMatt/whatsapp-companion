@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { countedDispatch } from './request-counts';
 import { z } from 'zod';
 import { modelIdSchema, type ModelOption, type ModelsResult, type Provider } from '../shared/model';
 import { currentTextModels } from '../core/model-policy';
@@ -18,24 +20,27 @@ export async function listModels(provider: Provider, key: string, signal?: Abort
     do {
       const url = new URL(openai ? 'https://api.openai.com/v1/models' : 'https://api.anthropic.com/v1/models');
       if (!openai) { url.searchParams.set('limit', '1000'); if (after) url.searchParams.set('after_id', after); }
-      const response = await fetcher(url.toString(), {
-        method: 'GET', redirect: 'error', signal: requestSignal,
-        headers: openai ? { Authorization: `Bearer ${key}` } : { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+      const page = await countedDispatch({ provider, model: '', reason: 'model list', method: 'GET' }, requestSignal, async () => {
+        const response = await fetcher(url.toString(), {
+          method: 'GET', redirect: 'error', signal: requestSignal,
+          headers: openai ? { Authorization: `Bearer ${key}` } : { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+        });
+        if (!response.ok) {
+          // Error bodies can contain secrets. Only report our own status-specific messages.
+          const reason = response.status === 401 ? 'Key rejected or missing model-list access. Check the key and allow read access to Models, then refresh.'
+            : response.status === 403 ? 'This key cannot list models. Allow read access to Models in your provider’s key permissions, then refresh.'
+            : response.status === 429 ? 'Rate limit reached. Try refreshing later.'
+            : 'Unable to load models. Try refreshing later.';
+          throw new ModelsError(`Models (${response.status}): ${reason}`);
+        }
+        const parsed = pageSchema.safeParse(await response.json());
+        if (!parsed.success) throw new ModelsError('Models: The provider returned an invalid model list. Try refreshing later.');
+        return parsed.data;
       });
-      if (!response.ok) {
-        // Error bodies can contain secrets. Only report our own status-specific messages.
-        const reason = response.status === 401 ? 'Key rejected or missing model-list access. Check the key and allow read access to Models, then refresh.'
-          : response.status === 403 ? 'This key cannot list models. Allow read access to Models in your provider’s key permissions, then refresh.'
-          : response.status === 429 ? 'Rate limit reached. Try refreshing later.'
-          : 'Unable to load models. Try refreshing later.';
-        throw new ModelsError(`Models (${response.status}): ${reason}`);
-      }
-      const parsed = pageSchema.safeParse(await response.json());
-      if (!parsed.success) throw new ModelsError('Models: The provider returned an invalid model list. Try refreshing later.');
-      for (const model of parsed.data.data) models.set(model.id, { id: model.id, name: model.display_name ?? model.id, shutdown_date: model.shutdown_date });
+      for (const model of page.data) models.set(model.id, { id: model.id, name: model.display_name ?? model.id, shutdown_date: model.shutdown_date });
       if (models.size > 10000) throw new ModelsError('Models: The provider model list is too large.');
-      if (openai || !parsed.data.has_more) break;
-      after = parsed.data.last_id ?? undefined;
+      if (openai || !page.has_more) break;
+      after = page.last_id ?? undefined;
       if (!after || cursors.has(after) || cursors.size >= 100) throw new ModelsError('Models: The provider returned incomplete pagination. Try refreshing later.');
       cursors.add(after);
     } while (true);
@@ -51,14 +56,22 @@ export async function listModels(provider: Provider, key: string, signal?: Abort
 /** Model lists belong to the exact key/request that loaded them, never a newer key. */
 export class ModelCatalog {
   private active = new Map<Provider, AbortController>();
-  constructor(private loader = listModels) {}
-  invalidate(provider: Provider) { this.active.get(provider)?.abort(); this.active.delete(provider); }
-  async load(provider: Provider, key: string): Promise<ModelsResult> {
-    this.invalidate(provider);
+  private cache = new Map<string, { expires: number; models: ModelOption[] }>();
+  constructor(private loader = listModels, private now = () => Date.now()) {}
+  invalidate(provider: Provider) { this.active.get(provider)?.abort(); this.active.delete(provider); for (const id of this.cache.keys()) if (id.startsWith(`${provider}:`)) this.cache.delete(id); }
+  async load(provider: Provider, key: string, refresh = false): Promise<ModelsResult> {
+    const id = `${provider}:${createHash('sha256').update(key).digest('hex')}`;
+    const cached = this.cache.get(id);
+    this.active.get(provider)?.abort(); this.active.delete(provider);
+    if (!refresh && cached && cached.expires > this.now()) return { models: structuredClone(cached.models) };
+    if (refresh) this.cache.delete(id);
     const ticket = new AbortController(); this.active.set(provider, ticket);
     try {
       const models = await this.loader(provider, key, ticket.signal);
-      return this.active.get(provider) === ticket ? { models } : { models: [], cancelled: true };
+      if (this.active.get(provider) !== ticket) return { models: [], cancelled: true };
+      this.cache.set(id, { models: structuredClone(models), expires: this.now() + 600000 });
+      while (this.cache.size > 10) this.cache.delete(this.cache.keys().next().value!);
+      return { models };
     } catch (error) {
       return this.active.get(provider) === ticket
         ? { models: [], error: error instanceof ModelsError ? error.message : 'Unable to load models. Try refreshing.' }
