@@ -30,6 +30,7 @@ import { PickerDiagnostics } from './picker-diagnostics';
 import { DirectStickerSender } from './direct-sticker-sender';
 import { DirectStickerSafety } from './direct-sticker-safety';
 import { installEditContextMenus } from './context-menu';
+import { installRemotePermissions } from './permissions';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -692,13 +693,9 @@ async function start() {
     });
   }
   const remoteSession = remote.webContents.session;
-  const grantedPermissions = new Set<string>();
-  remoteSession.setPermissionCheckHandler((_wc, permission, origin) => origin === 'https://web.whatsapp.com' && grantedPermissions.has(permission));
-  remoteSession.setPermissionRequestHandler((wc, permission, callback, details) => {
-    if (wc !== remote.webContents || !details.isMainFrame || !details.requestingUrl.startsWith('https://web.whatsapp.com/')) { callback(false); return; }
-    if (!['notifications', 'media'].includes(permission)) { callback(false); return; }
-    if (grantedPermissions.has(permission)) { callback(true); return; }
-    void dialog.showMessageBox(win, { message: `Allow WhatsApp to use ${permission === 'media' ? 'your microphone or camera' : 'desktop notifications'}?`, buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 }).then(r => { if (r.response === 1) grantedPermissions.add(permission); callback(r.response === 1); });
+  installRemotePermissions(remote.webContents, fixture ? remoteURL : undefined, async permission => {
+    const result = await dialog.showMessageBox(win, { message: `Allow WhatsApp to use ${permission === 'media' ? 'your microphone or camera' : 'desktop notifications'}?`, buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 });
+    return result.response === 1;
   });
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   controls.webContents.session.setPermissionCheckHandler(() => false);

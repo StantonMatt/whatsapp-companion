@@ -12,6 +12,59 @@ try {
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const local = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   const remote = await expect.poll(async () => (await app.windows()).find(p => p.url().endsWith('fixture.html'))).not.toBeUndefined().then(async () => (await app.windows()).find(p => p.url().endsWith('fixture.html')));
+  // Exercise the page's native copy APIs with trusted user input. The fixture
+  // has the same scoped permission policy, with no renderer clipboard bridge.
+  try {
+    await remote.evaluate(() => {
+      const button = document.createElement('button');
+      button.id = 'clipboard-copy-test';
+      button.textContent = 'Test copy';
+      button.style.cssText = 'position:fixed;left:520px;top:24px;z-index:2147483647';
+      button.addEventListener('click', async () => {
+        button.dataset.result = 'pending';
+        try {
+          if (button.dataset.kind === 'image') {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = 2;
+            canvas.getContext('2d').fillRect(0, 0, 2, 2);
+            const bytes = Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]), character => character.charCodeAt(0));
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': new Blob([bytes], { type: 'image/png' }) })]);
+          } else if (button.dataset.kind === 'text') {
+            await navigator.clipboard.writeText('Fixture message copy');
+          } else {
+            const field = document.createElement('textarea');
+            field.value = 'Fixture legacy message copy';
+            document.body.append(field);
+            try { field.select(); if (!document.execCommand('copy')) throw new Error('execCommand copy failed'); }
+            finally { field.remove(); }
+          }
+          button.dataset.result = 'copied';
+        } catch (error) { button.dataset.result = `${error.name}: ${error.message}`; }
+      });
+      document.body.append(button);
+    });
+    const copy = remote.locator('#clipboard-copy-test');
+    for (const kind of ['image', 'text', 'legacy-text']) {
+      await app.evaluate(({ clipboard }) => clipboard.clear());
+      await copy.evaluate((button, kind) => { button.dataset.kind = kind; button.dataset.result = ''; }, kind);
+      await copy.click();
+      await expect(copy).toHaveAttribute('data-result', 'copied');
+      if (kind === 'image') {
+        // Electron's clipboard API is asynchronous and item-based (no readImage).
+        expect(await app.evaluate(async ({ clipboard }) => {
+          const item = (await clipboard.read()).find(entry => entry.types.includes('image/png'));
+          const png = item && Buffer.from(await (await item.getType('image/png')).arrayBuffer());
+          return { png: await clipboard.has('image/png'), size: png ? [png.readUInt32BE(16), png.readUInt32BE(20)] : null };
+        })).toEqual({ png: true, size: [2, 2] });
+      } else {
+        expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(kind === 'text' ? 'Fixture message copy' : 'Fixture legacy message copy');
+      }
+    }
+    console.log('PASS trusted fixture clicks copy PNG images, writeText and execCommand text to the system clipboard');
+  } finally {
+    await remote.evaluate(() => document.querySelector('#clipboard-copy-test')?.remove());
+    await app.evaluate(({ clipboard }) => clipboard.clear());
+  }
   const clickAssistant = async (name) => {
     // Closed shadow roots remain discoverable to accessibility tools. Click the
     // actual button with trusted pointer input rather than invoking its handler.
