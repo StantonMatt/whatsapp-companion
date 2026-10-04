@@ -16,7 +16,8 @@ type RequestSource = { key?: string; suggestionId?: string; operation?: 'transla
 type InlineRequest = { operation: 'suggest' | 'continuation' | 'refine' | 'translate'; instruction?: string;
   draft: string; composerDraft: string; contextKey: string | undefined; reason: RequestReason };
 type Offer = { id: string; key: string; text: string; replace: boolean; displayAttempts?: number; displayed?: boolean };
-type Live = { id: string; signature: string; controller: AbortController; request?: InlineRequest; offer?: Offer; error?: string;
+type RequestOrigin = 'user' | 'auto';
+type Live = { origin: RequestOrigin; id: string; signature: string; controller: AbortController; request?: InlineRequest; offer?: Offer; error?: string;
   due?: number; run?: () => void; running?: boolean; awaitingSnapshot?: boolean;
   deferred?: { text: string; replace: boolean } | { error: string } };
 type ConversationRecord = { kind: ChatKind; profile: string | null; generation: number; output: string; configuration: string };
@@ -160,7 +161,7 @@ export class Assistant {
   }
   private sendPending(work: Live) {
     this.rememberDismissalTarget(work.id, work);
-    this.connector.send({ type: work.request?.instruction ? 'refining' : 'thinking', key: suggestionKey(this.snapshot), requestId: work.id });
+    this.connector.send({ type: work.request?.instruction ? 'refining' : 'thinking', key: suggestionKey(this.snapshot), requestId: work.id, origin: work.origin });
   }
   private sendNotice(work: Live, text: string, key = suggestionKey(this.snapshot)) {
     this.rememberDismissalTarget(work.id, work);
@@ -261,7 +262,7 @@ export class Assistant {
   }
   private schedule(run: () => void, signature: string) {
     this.cancel();
-    this.live = { id: randomUUID(), signature, controller: new AbortController(), run, due: Date.now() + 1000 };
+    this.live = { origin: 'auto', id: randomUUID(), signature, controller: new AbortController(), run, due: Date.now() + 1000 };
     this.armTimer();
     this.reconcileLive();
   }
@@ -536,7 +537,7 @@ export class Assistant {
         if (cached && key) {
           this.remember(key, cached);
           if ('text' in cached && last?.outgoing === false) {
-            this.live = { id: randomUUID(), signature: this.inlineSignature(), controller: new AbortController() };
+            this.live = { origin: 'auto', id: randomUUID(), signature: this.inlineSignature(), controller: new AbortController() };
             this.show(this.live, cached.text, false);
           } else if ('dismissed' in cached) decision = 'dismissed';
         } else if (key && last?.outgoing === false && (last.text.trim() || last.attachment)) {
@@ -561,7 +562,7 @@ export class Assistant {
     const preferences = resolveSettings(this.store.state, this.snapshot.kind, this.chatIdentity()).values;
     this.completeSnapshot(this.snapshot, preferences, candidate.reason);
   }
-  async request(instruction?: string, automatic = false, source?: RequestSource, retry = 0, reason?: RequestReason) {
+  async request(instruction?: string, automatic = false, source?: RequestSource, retry = 0, reason?: RequestReason, origin?: RequestOrigin) {
     if (this.suspended || this.refreshNonce) return;
     const snapshot = this.snapshot, previous = this.live;
     if (source?.key && source.key !== suggestionKey(snapshot)) return;
@@ -593,7 +594,7 @@ export class Assistant {
     }
     this.cancel();
     if (this.normalizeDraft(snapshot.draft)) this.requested.set(this.recordIdentity(), this.normalizeDraft(snapshot.draft));
-    const work: Live = { id: randomUUID(), signature: this.inlineSignature(), controller: new AbortController(), request, running: true, offer: suggested !== undefined ? previous?.offer : undefined };
+    const work: Live = { origin: origin ?? (automatic || reason === 'draft continuation' || reason === 'incoming message' || reason === 'open/revisit' ? 'auto' : 'user'), id: randomUUID(), signature: this.inlineSignature(), controller: new AbortController(), request, running: true, offer: suggested !== undefined ? previous?.offer : undefined };
     this.live = automatic ? undefined : work; this.automatic = automatic;
     if (emptyKey) this.inFlight.set(emptyKey, work);
     this.decision(undefined);
@@ -645,7 +646,7 @@ export class Assistant {
             }
             // Continuation retries always use the current exact whitespace boundary.
             if (!emptyKey && request.operation === 'continuation') {
-              void this.request(undefined, false, undefined, 1, 'retry');
+              void this.request(undefined, false, undefined, 1, 'retry', work.origin);
             } else void run(attempt + 1);
           };
           this.armTimer(); return;

@@ -1536,3 +1536,114 @@ describe('silent suggestion recovery', () => {
     await vi.advanceTimersByTimeAsync(1000); expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
   });
 });
+
+
+describe('composer loading command mapping', () => {
+  test.each(['open/revisit', 'incoming message', 'draft continuation'] as const)('%s publishes auto origin', async reason => {
+    const { assistant, generator, commands } = setup(vi.fn<typeof generate>().mockImplementation(() => new Promise(() => {})));
+    assistant.receive(snap({ draft: reason === 'draft continuation' ? 'Thanks' : '' }));
+    if (reason === 'incoming message') {
+      assistant.receive(snap({ messages: [{ id: 'new', text: 'New question', outgoing: false }] }));
+    }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(generator.mock.calls[0][0].reason).toBe(reason);
+    expect(commands.at(-1)).toMatchObject({ type: 'thinking', origin: 'auto', requestId: expect.any(String) });
+    assistant.cancel(true);
+  });
+
+  test.each(['auto', 'user'] as const)('continuation retry and snapshot republication preserve %s origin', async origin => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Transient', true))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const { assistant, commands } = setup(generator);
+    assistant.receive(snap({ draft: 'Thanks' }));
+    if (origin === 'user') void assistant.request();
+    else await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(0);
+    const initial = commands.at(-1)!; expect(initial).toMatchObject({ type: 'thinking', origin });
+    // A fresh whitespace snapshot republishes the existing backoff before retry.
+    assistant.activity(true);
+    assistant.receive({ ...assistant.snapshot, draft: 'Thanks ', editRevision: 1 });
+    expect(commands.at(-1)).toEqual({ ...initial, key: suggestionKey(assistant.snapshot) });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(generator.mock.calls.map(([input]) => input.reason)).toEqual([origin === 'auto' ? 'draft continuation' : 'explicit suggest', 'retry']);
+    const retry = commands.at(-1)!; expect(retry).toMatchObject({ type: 'thinking', origin });
+    expect(assistant['live']?.origin).toBe(origin);
+    assistant.receive({ ...assistant.snapshot, messages: [{ id: 'history', text: 'Older', outgoing: true }, ...assistant.snapshot.messages] });
+    expect(commands.at(-1)).toEqual({ ...retry, key: suggestionKey(assistant.snapshot) });
+    assistant.cancel(true);
+  });
+
+  test.each(['open/revisit', 'incoming message'] as const)('%s backoff and retry keep auto origin when reattached', async reason => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Transient', true))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const { assistant, commands } = setup(generator);
+    assistant.receive(snap());
+    if (reason === 'incoming message') assistant.receive(snap({ messages: [{ id: 'new', text: 'New question', outgoing: false }] }));
+    await vi.advanceTimersByTimeAsync(1000);
+    const saved = assistant.snapshot, pending = commands.at(-1)!;
+    const revisit = () => {
+      assistant.receive(snap({ chatId: b, settingsId: b, revision: 'other', messages: [] }));
+      assistant.receive(saved);
+      expect(commands.at(-1)).toEqual({ ...pending, key: suggestionKey(assistant.snapshot) });
+    };
+    revisit(); // Republish during backoff.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(generator.mock.calls.map(([input]) => input.reason)).toEqual([reason, 'retry']);
+    revisit(); // Republish the running retry.
+    expect(assistant['live']?.origin).toBe('auto'); assistant.cancel(true);
+  });
+
+  test('display rejection recovery republishes pending refinement with its initiating origin', async () => {
+    const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Reply').mockImplementationOnce(() => new Promise(() => {}));
+    const { assistant, commands, offer, fresh } = setup(generator);
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const original = offer();
+    void assistant.request('Shorter', false, { key: original.key, suggestionId: original.id });
+    const pending = commands.at(-1)!; expect(pending).toMatchObject({ type: 'refining', origin: 'user' });
+    assistant.displayAck({ type: 'displayAck', suggestionId: original.id!, key: original.key, reason: 'key' });
+    expect(commands.at(-1)).toMatchObject({ type: 'snapshot' });
+    fresh(); expect(commands.at(-1)).toEqual(pending);
+    expect(generator).toHaveBeenCalledTimes(2); assistant.cancel(true);
+  });
+
+  test('Try again on an automatic failure publishes user origin', async () => {
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network unavailable'))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const { assistant, commands } = setup(generator);
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const failed = commands.at(-1)!; expect(failed.type).toBe('notice');
+    void assistant.request(undefined, false, { operation: 'retry', key: suggestionKey(assistant.snapshot) });
+    expect(commands.at(-1)).toMatchObject({ type: 'thinking', origin: 'user' });
+    expect(generator.mock.calls[1][0].reason).toBe('retry');
+    assistant.cancel(true);
+  });
+
+  test.each(['suggest', 'continuation', 'refine', 'translate'] as const)('%s publishes request-bound loading and reuses its ID after a compatible key change', async operation => {
+    let finish!: (text: string) => void;
+    const generator = vi.fn<typeof generate>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const { assistant, commands, offer } = setup(generator);
+    assistant.receive(snap({ draft: operation === 'suggest' ? '' : 'Thanks', messages: [{ id: 'owner', text: 'My reply', outgoing: true }] }));
+    const work = assistant.request(operation === 'refine' || operation === 'translate' ? 'Change this' : undefined, false,
+      operation === 'translate' ? { operation: 'translate' } : undefined);
+    const pending = commands.at(-1)!;
+    expect(pending).toMatchObject({ type: operation === 'refine' || operation === 'translate' ? 'refining' : 'thinking', origin: 'user', key: suggestionKey(assistant.snapshot), requestId: expect.any(String) });
+    if (pending.type !== 'thinking' && pending.type !== 'refining') throw new Error('Expected composer loading command');
+    expect(generator.mock.calls[0][0].reason).toBe(operation === 'refine' || operation === 'translate' ? operation : 'explicit suggest');
+    assistant.receive({ ...assistant.snapshot, messages: [{ id: 'older', text: 'Earlier', outgoing: false }, ...assistant.snapshot.messages] });
+    expect(commands.at(-1)).toEqual({ ...pending, key: suggestionKey(assistant.snapshot) });
+    expect(generator).toHaveBeenCalledOnce();
+    finish('Revised reply'); await work;
+    expect(offer()).toMatchObject({ requestId: pending.requestId, replace: operation === 'refine' || operation === 'translate', text: 'Revised reply' });
+    assistant.cancel(true);
+  });
+
+  test('returning to a running background suggestion republishes loading with the original request ID', async () => {
+    const { assistant, generator, commands } = setup(vi.fn<typeof generate>().mockImplementation(() => new Promise(() => {})));
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const pending = commands.at(-1)!; expect(pending).toMatchObject({ type: 'thinking', origin: 'auto' });
+    assistant.receive(snap({ chatId: b, settingsId: b, revision: 'other', messages: [] }));
+    assistant.receive(snap({ revision: 'return' }));
+    expect(commands.at(-1)).toEqual({ ...pending, key: suggestionKey(assistant.snapshot) });
+    expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
+  });
+});

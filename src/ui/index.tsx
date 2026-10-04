@@ -50,7 +50,7 @@ function App() {
   const shield = useShield(status);
   return <>
     <div className="app-frame" data-enlarged={shield.frame ? '' : undefined} style={shield.frame}>
-      <div data-testid="assistant-status" className={panel && panel !== 'stickers' ? 'connection-status' : 'sr-only'} role="status">{status?.message ?? 'Starting…'}</div>
+      <div data-testid="assistant-status" className={panel && panel !== 'stickers' ? 'connection-status' : 'sr-only'} role="status">{status?.message === 'Thinking…' ? '' : status?.message ?? 'Starting…'}</div>
       {error && panel && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'AI settings'}>
         {status.pending && panel !== 'stickers' && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
