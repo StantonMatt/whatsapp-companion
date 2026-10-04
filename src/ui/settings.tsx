@@ -4,6 +4,7 @@ import { resolveSettings } from '../core/settings';
 import { minimumStyleSamples, styleSamples } from '../core/style';
 import { reasoningLevels, savedEffort } from '../core/model-policy';
 import type { Act } from './index';
+import { BackIcon, ChevronIcon } from './icons';
 
 export function Settings({ status, act, close }: { status: Status; act: Act; close: () => void }) {
   const [tab, setTab] = useState<string | null>(null);
@@ -12,11 +13,11 @@ export function Settings({ status, act, close }: { status: Status; act: Act; clo
   const sections = chat ? ['Replies', 'Style', 'Auto replies'] : ['Replies', 'Providers', 'Style'];
   const descriptions: Record<string, string> = { Replies: 'Suggestions, tone and language', Providers: 'Model, reasoning and API key', Style: 'Your writing style', 'Auto replies': 'Permission and sending limits' };
   return <>
-    <div className="panel-title"><button data-preserve-auto="" aria-label={tab ? 'Back to settings' : 'Close panel'} onClick={() => tab ? setTab(null) : close()}>←</button><h1>{tab ?? (chat ? 'Chat AI settings' : 'AI settings')}</h1>{tab && <button className="close" data-preserve-auto="" aria-label="Close panel" onClick={close}>×</button>}</div>
+    <div className="panel-title"><button data-preserve-auto="" aria-label={tab ? 'Back to settings' : 'Close panel'} onClick={() => tab ? setTab(null) : close()}><BackIcon/></button><h1>{tab ?? (chat ? 'Chat AI settings' : 'AI settings')}</h1>{tab && <button className="close" data-preserve-auto="" aria-label="Close panel" onClick={close}>×</button>}</div>
     <div className="panel-body">
       {!tab ? <>
-        <div className="scope-summary"><span className="scope-icon" aria-hidden="true">✦</span><div><strong>{chat ? status.chat.name : 'All conversations'}</strong><small>{chat ? (Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings for this chat' : 'Uses global settings') : 'Default AI settings'}</small></div></div>
-        <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><span aria-hidden="true">›</span></button>)}</nav>
+        <p className="scope-line"><strong title={chat ? status.chat.name : undefined}>{chat ? status.chat.name : 'All conversations'}</strong>{chat && <span>{Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings' : 'Uses global settings'}</span>}</p>
+        <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><ChevronIcon/></button>)}</nav>
         {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} reason={status.state.global.directStickerDisabledReason} sequence={status.sequence} act={act}/>}
         {chat && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
       </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}

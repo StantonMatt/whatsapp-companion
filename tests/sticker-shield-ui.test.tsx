@@ -275,7 +275,7 @@ const libraryStatus = (count = 6) => {
 };
 const drawLibrary = (next: Status, action: Act = vi.fn(async () => true)) => act(() => root.render(<Stickers status={next} act={action}/>));
 const tile = (index = 0) => host.querySelectorAll<HTMLButtonElement>('.sticker-art')[index];
-const clickText = (label: string) => act(() => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === label)!.click());
+const clickText = (label: string) => act(() => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === label || button.getAttribute('aria-label') === label)!.click());
 const inputText = (selector: string, value: string) => act(() => {
   const input = host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
   Object.getOwnPropertyDescriptor(input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value')!.set!.call(input, value);
@@ -336,7 +336,7 @@ test('no chat dims the tile, explains why in the header, and cannot send', async
   drawLibrary(next, action); expect(tile().getAttribute('aria-disabled')).toBe('true');
   expect(host.querySelector('.sticker-head .sticker-strip')?.textContent).toBe('Open a chat to send');
   await authorizedClick(tile()); expect(action).not.toHaveBeenCalled();
-  clickText('Edit'); expect(tile().hasAttribute('aria-disabled')).toBe(false);
+  clickText('Edit stickers'); expect(tile().hasAttribute('aria-disabled')).toBe(false);
 });
 
 test('count inside Search uses N or M of N and a separate accessible description', () => {
@@ -384,7 +384,7 @@ test('chat change dismisses even an unconfirmed message that has no retry', () =
 });
 
 test('edit mode switches editors only after the dirty prompt and Done keeps Search', () => {
-  const next = libraryStatus(2); drawLibrary(next); inputText('.search', 'sticker'); clickText('Edit');
+  const next = libraryStatus(2); drawLibrary(next); inputText('.search', 'sticker'); clickText('Edit stickers');
   act(() => tile().click()); expect(tile().getAttribute('aria-expanded')).toBe('true');
   inputText('textarea', 'changed terms'); act(() => tile(1).click());
   expect(host.querySelector('.discard')).not.toBeNull(); expect(host.querySelector('textarea')?.value).toBe('changed terms');
@@ -394,24 +394,24 @@ test('edit mode switches editors only after the dirty prompt and Done keeps Sear
   inputText('textarea', 'another draft'); clickText('Done'); clickText('Keep editing');
   expect(host.querySelector('textarea')?.value).toBe('another draft'); expect(host.querySelector('.sticker-mode')?.textContent).toBe('Done');
   clickText('Done'); clickText('Discard'); expect(host.querySelector('.sticker-detail')).toBeNull();
-  expect(host.querySelector('.sticker-mode')?.textContent).toBe('Edit'); expect(host.querySelector<HTMLInputElement>('.search')?.value).toBe('sticker');
+  expect(host.querySelector('.sticker-mode')?.getAttribute('aria-label')).toBe('Edit stickers'); expect(host.querySelector<HTMLInputElement>('.search')?.value).toBe('sticker');
 });
 
 test('Escape keeps editing a prompt, requests close, leaves edit mode, cancels, dismisses, then permits panel close', () => {
-  const next = libraryStatus(1), action = vi.fn(async () => true); drawLibrary(next, action); clickText('Edit'); act(() => tile().click()); inputText('textarea', 'dirty');
+  const next = libraryStatus(1), action = vi.fn(async () => true); drawLibrary(next, action); clickText('Edit stickers'); act(() => tile().click()); inputText('textarea', 'dirty');
   expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).not.toBeNull();
   expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).toBeNull();
   expect(host.querySelector('textarea')?.value).toBe('dirty');
   expect(pressEscape()).toBe(true); clickText('Discard');
   next.stickerSend = { id: next.state.stickers[0].id, nonce: 'finding', name: 'Alex', route: 'picker', animated: true, state: 'finding' }; drawLibrary(next, action);
-  expect(pressEscape()).toBe(true); expect(action).not.toHaveBeenCalled(); expect(host.querySelector('.sticker-mode')?.textContent).toBe('Edit');
+  expect(pressEscape()).toBe(true); expect(action).not.toHaveBeenCalled(); expect(host.querySelector('.sticker-mode')?.getAttribute('aria-label')).toBe('Edit stickers');
   expect(pressEscape()).toBe(true); expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'cancelSticker' });
   next.stickerSend = { ...next.stickerSend, state: 'failed', sent: 'unknown' }; drawLibrary(next, action);
   expect(pressEscape()).toBe(true); expect(host.querySelector('.sticker-message')).toBeNull(); expect(pressEscape()).toBe(false);
 });
 
 test('Done and Back prompt for a filtered dirty editor without changing the search', () => {
-  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit'); act(() => tile().click()); inputText('textarea', 'dirty'); inputText('.search', 'no match');
+  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit stickers'); act(() => tile().click()); inputText('textarea', 'dirty'); inputText('.search', 'no match');
   expect(host.querySelector('.sticker-detail')).toBeNull(); clickText('Done');
   expect(host.querySelector('.discard')).not.toBeNull(); expect(host.querySelector<HTMLInputElement>('.search')?.value).toBe('no match');
   clickText('Keep editing'); inputText('.search', ''); expect(host.querySelector('textarea')?.value).toBe('dirty');
@@ -420,7 +420,7 @@ test('Done and Back prompt for a filtered dirty editor without changing the sear
 });
 
 test('Save closes the editor and Locate and Forget retain the existing actions', async () => {
-  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit'); act(() => tile().click());
+  const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit stickers'); act(() => tile().click());
   clickText('Locate in WhatsApp'); expect(action).toHaveBeenLastCalledWith({ type: 'locateSticker', id: next.state.stickers[0].id, destinationToken: 'destination-1' });
   inputText('textarea', 'saved terms'); await act(async () => clickText('Save'));
   expect(action).toHaveBeenLastCalledWith({ type: 'sticker', id: next.state.stickers[0].id, searchTerms: 'saved terms' }); expect(host.querySelector('.sticker-detail')).toBeNull();
@@ -449,13 +449,13 @@ test('a broken image retries in normal mode and remains editable and forgettable
   const next = libraryStatus(1); drawLibrary(next);
   act(() => host.querySelector('img')!.dispatchEvent(new Event('error')));
   expect(tile().getAttribute('aria-label')).toBe('Image unavailable. Retry');
-  clickText('Edit'); act(() => tile().click());
+  clickText('Edit stickers'); act(() => tile().click());
   expect(host.querySelector('textarea')?.value).toBe('sticker 0');
   expect([...host.querySelectorAll('button')].some(button => button.textContent === 'Forget')).toBe(true);
 });
 
 test('a filtered dirty prompt defers a send message and renders only one detail without an arrow target', () => {
-  const next = libraryStatus(2); drawLibrary(next); clickText('Edit'); act(() => tile().click());
+  const next = libraryStatus(2); drawLibrary(next); clickText('Edit stickers'); act(() => tile().click());
   inputText('textarea', 'dirty'); inputText('.search', 'sticker 1');
   next.stickerSend = { id: next.state.stickers[1].id, nonce: 'failure', name: 'Alex', route: 'direct', animated: false, state: 'failed', sent: 'unknown' }; drawLibrary(next);
   clickText('Done');

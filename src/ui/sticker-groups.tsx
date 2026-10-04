@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import type { State, Sticker, StickerGroup } from '../shared/model';
 import { groupSelectionState } from '../core/sticker-groups';
 import type { Act } from './index';
+import { EditIcon } from './icons';
 
 type GroupForm = { type: 'new'; name: string; stickerIds: string[] } | { type: 'rename' | 'delete'; id: string; name: string };
 const Check = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" d="m5.5 12.5 4.2 4.2 8.8-9.2"/></svg>;
@@ -112,7 +113,7 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
     <div ref={chipRow} className="sticker-group-chips" role="group" aria-label="Group">
       <button className="chip" aria-pressed={!activeFilter} onClick={() => choose(null)}>All</button>
       {groups.map(group => <button key={group.id} className="chip" aria-pressed={activeFilter === group.id} aria-label={editMode && activeFilter === group.id ? `${group.name}, edit group` : group.name} onClick={() => choose(group)}>
-        <span className="chip-name">{group.name}</span>{editMode && activeFilter === group.id && <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" d="M4.5 19.5h3.8L19.1 8.7a2 2 0 0 0 0-2.8l-1-1a2 2 0 0 0-2.8 0L4.5 15.7z"/></svg>}
+        <span className="chip-name">{group.name}</span>{editMode && activeFilter === group.id && <EditIcon/>}
       </button>)}
       {editMode && (form?.type === 'new'
         ? <input ref={input} className="chip-input" aria-label="New group name" placeholder="Group name" maxLength={40} value={form.name} disabled={submitting} onChange={e => setForm({ ...form, name: e.target.value })} onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); void submit(); } }}/>

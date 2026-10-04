@@ -115,6 +115,12 @@ export function caretAtEnd(editor: HTMLElement): boolean {
   }
   return true;
 }
+const svgNS = 'http://www.w3.org/2000/svg';
+const refinements: Record<string, string> = {
+  Shorter: 'Make the draft shorter.', Longer: 'Make the draft longer.', Warmer: 'Make the draft warmer.', Funnier: 'Make the draft funnier.',
+  'More formal': 'Make the draft more formal.', 'More casual': 'Make the draft more casual.', 'More direct': 'Make the draft more direct.',
+  'Fix spelling': 'Fix spelling, grammar and punctuation in the draft without changing its tone or meaning.', 'Add emoji': 'Add a few fitting emoji to the draft.'
+};
 export class DomConnector {
   private stickerTransfer?: StickerTransferConnector;
   private stickerPickerLayout?: StickerPickerLayout;
@@ -392,7 +398,7 @@ export class DomConnector {
     const snapshot = this.read(), key = snapshotKey(snapshot);
     this.navigation?.refresh(this.stickerReadiness.present(snapshot, snapshot.stickerPreparation).ready);
     const dark = this.navigation?.theme !== 'light';
-    for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', muted: '#9babae', line: '#373b3c', hover: '#2a3942' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', muted: '#667781', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
+    for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', muted: '#9babae', line: '#373b3c', hover: '#2e2f2f' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', muted: '#667781', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
     const contentKey = suggestionKey(snapshot);
     if (key !== this.lastKey && !(this.dispatch && this.dispatchMatches(this.dispatch, snapshot))) {
       this.lastKey = key;
@@ -405,7 +411,7 @@ export class DomConnector {
     this.button.hidden = !snapshot.ready;
     if (rect && editor) {
       this.button.style.left = `${Math.max(12, rect.right - 30)}px`; this.button.style.top = `${rect.top - 29}px`;
-      this.popup.style.left = `${Math.max(8, Math.min(rect.right - 272, this.doc.documentElement.clientWidth - 280))}px`; this.popup.style.bottom = `${this.doc.documentElement.clientHeight - rect.top + 36}px`;
+      this.popup.style.left = `${Math.max(8, Math.min(rect.right - 296, this.doc.documentElement.clientWidth - 304))}px`; this.popup.style.bottom = `${this.doc.documentElement.clientHeight - rect.top + 36}px`;
       this.popup.style.maxHeight = `${Math.max(80, rect.top - 44)}px`;
       const css = getComputedStyle(editor);
       Object.assign(this.ghost.style, { left: `${rect.left + editor.clientLeft}px`, top: `${rect.top + editor.clientTop}px`, width: `${editor.clientWidth}px`, height: `${editor.clientHeight}px`, fontFamily: css.fontFamily, fontSize: css.fontSize, fontWeight: css.fontWeight, fontStyle: css.fontStyle, letterSpacing: css.letterSpacing, lineHeight: css.lineHeight, padding: css.padding, direction: css.direction, textAlign: css.textAlign });
@@ -433,17 +439,20 @@ export class DomConnector {
     }
     const row = this.doc.createElement('div'); row.className = 'actions';
     let translating = false;
-    for (const label of ['Shorter', 'Warmer', 'More direct', 'Translate…']) {
+    for (const label of [...Object.keys(refinements), 'Translate…']) {
       const b = this.doc.createElement('button'); b.className = 'action'; b.textContent = label;
       b.addEventListener('click', e => {
         if (!e.isTrusted) return;
         if (label === 'Translate…') { translating = true; instruction.value = ''; instruction.placeholder = 'Language, e.g. Spanish'; instruction.setAttribute('aria-label', 'Translation language'); apply.disabled = true; instruction.focus(); }
-        else request(`Make the draft ${label.toLowerCase()}.`);
+        else request(refinements[label]);
       }); row.append(b);
     }
     const field = this.doc.createElement('div'); field.className = 'instruction';
     const instruction = this.doc.createElement('input'); instruction.placeholder = 'Ask for a change…'; instruction.setAttribute('aria-label', 'Refinement instruction'); instruction.maxLength = 950;
-    const apply = this.doc.createElement('button'); apply.className = 'apply'; apply.textContent = '↑'; apply.setAttribute('aria-label', 'Apply instruction'); apply.disabled = true;
+    const apply = this.doc.createElement('button'); apply.className = 'apply'; apply.setAttribute('aria-label', 'Apply instruction'); apply.disabled = true;
+    const icon = this.doc.createElementNS(svgNS, 'svg'); icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('aria-hidden', 'true');
+    const path = this.doc.createElementNS(svgNS, 'path'); path.setAttribute('fill', 'currentColor'); path.setAttribute('d', 'M2.01 21 23 12 2.01 3 2 10l15 2-15 2z');
+    icon.append(path); apply.append(icon);
     const submit = () => { const text = instruction.value.trim(); if (text) request(translating ? `Translate the draft to ${text}.` : text); };
     instruction.addEventListener('input', () => { apply.disabled = !instruction.value.trim(); });
     apply.addEventListener('click', e => { if (e.isTrusted) submit(); });

@@ -18,7 +18,7 @@ const actions = vi.fn(async (action: Action) => {
   return true;
 });
 const draw = () => root.render(<Stickers status={status} act={actions}/>);
-const button = (text: string, scope: ParentNode = host) => [...scope.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === text)!;
+const button = (text: string, scope: ParentNode = host) => [...scope.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === text || b.getAttribute('aria-label') === text)!;
 const click = (text: string, scope: ParentNode = host) => act(() => button(text, scope).click());
 const field = (name: string) => host.querySelector<HTMLInputElement>(name === 'Search terms' ? 'textarea' : `input[aria-label="${name}"]`)!;
 const fill = (name: string, text: string) => act(() => {
@@ -49,17 +49,17 @@ test('chip filtering intersects search, counts narrow results, and Search all gr
   fill('Search stickers', 'puppy'); expect(tiles()).toHaveLength(0);
   expect(host.querySelector('.empty p')?.textContent).toBe('No matches in Animals');
   click('Search all groups'); expect(field('Search stickers').value).toBe('puppy'); expect(tiles()).toHaveLength(1);
-  click('Edit'); click('Done'); expect(field('Search stickers').value).toBe('puppy');
+  click('Edit stickers'); click('Done'); expect(field('Search stickers').value).toBe('puppy');
 });
 
 test('groups row is hidden only in normal mode with no groups; group filter survives Done', () => {
-  click('Animals', header()); click('Edit'); click('Done'); expect(tiles()).toHaveLength(2);
+  click('Animals', header()); click('Edit stickers'); click('Done'); expect(tiles()).toHaveLength(2);
   status = { ...status, state: { ...status.state, stickerGroups: [], stickers: status.state.stickers.map(s => ({ ...s, groups: [] })) } }; act(draw);
-  expect(host.querySelector('.sticker-group-chips')).toBeNull(); click('Edit'); expect(header()).not.toBeNull();
+  expect(host.querySelector('.sticker-group-chips')).toBeNull(); click('Edit stickers'); expect(header()).not.toBeNull();
 });
 
 test('selection circles are focusable sibling checkbox buttons; modifier-click selects without opening editor', () => {
-  click('Edit'); const pick = picks()[0];
+  click('Edit stickers'); const pick = picks()[0];
   expect(pick.tagName).toBe('BUTTON'); expect(pick.getAttribute('role')).toBe('checkbox'); expect(pick.parentElement).toBe(tiles()[0].parentElement); expect(pick.closest('.sticker-art')).toBeNull();
   act(() => pick.focus()); expect(document.activeElement).toBe(pick); expect(pick.tabIndex).toBe(0);
   // Native Space activation is exercised in the desktop suite; JSDOM has no default button activation.
@@ -71,7 +71,7 @@ test('selection circles are focusable sibling checkbox buttons; modifier-click s
 });
 
 test('Select all selects only current search and group; popover tri-state adds/removes the whole selection', async () => {
-  click('Edit'); fill('Search stickers', 'dog'); click('Select all'); click('Groups ▾');
+  click('Edit stickers'); fill('Search stickers', 'dog'); click('Select all'); click('Groups ▾');
   let animal = host.querySelector<HTMLButtonElement>('.pop-row[role=checkbox]')!;
   expect(animal.getAttribute('aria-checked')).toBe('mixed');
   await act(async () => animal.click()); animal = host.querySelector<HTMLButtonElement>('.pop-row[role=checkbox]')!;
@@ -82,7 +82,7 @@ test('Select all selects only current search and group; popover tri-state adds/r
 });
 
 test('per-sticker membership saves immediately and leaves unsaved search terms intact', async () => {
-  click('Edit'); act(() => tiles()[0].click()); fill('Search terms', 'unsaved dog');
+  click('Edit stickers'); act(() => tiles()[0].click()); fill('Search terms', 'unsaved dog');
   const toggles = host.querySelector('.sticker-detail-groups')!;
   expect(button('Animals', toggles).getAttribute('aria-pressed')).toBe('true');
   await act(async () => button('Favorites', toggles).click());
@@ -92,7 +92,7 @@ test('per-sticker membership saves immediately and leaves unsaved search terms i
 });
 
 test('inline create rejects blank/duplicate names, Enter creates/filter selects, rename and confirmed delete retain stickers', async () => {
-  click('Edit'); click('+ New group'); expect(document.activeElement).toBe(field('New group name'));
+  click('Edit stickers'); click('+ New group'); expect(document.activeElement).toBe(field('New group name'));
   expect(field('New group name').placeholder).toBe('Group name');
   await enter(); expect(field('New group name')).not.toBeNull();
   fill('New group name', ' animals '); await enter(); expect(actions).not.toHaveBeenCalled();
@@ -107,37 +107,37 @@ test('inline create rejects blank/duplicate names, Enter creates/filter selects,
 });
 
 test('popover New group assigns the selection and Done resets all transient edit state', async () => {
-  click('Edit'); act(() => picks()[0].click()); click('Groups ▾'); click('New group…'); fill('New group name', 'Chosen'); await enter();
+  click('Edit stickers'); act(() => picks()[0].click()); click('Groups ▾'); click('New group…'); fill('New group name', 'Chosen'); await enter();
   expect(status.state.stickers[0].groups).toEqual([group, third]); expect(tiles()).toHaveLength(1);
   click('Groups ▾'); click('Done'); expect(host.querySelector('.sticker-select-bar')).toBeNull(); expect(host.querySelector('.sticker-groups-popover')).toBeNull();
-  expect(tiles()).toHaveLength(1); click('Edit'); expect(picks()[0].getAttribute('aria-checked')).toBe('false'); expect(button('Select all')).toBeDefined();
+  expect(tiles()).toHaveLength(1); click('Edit stickers'); expect(picks()[0].getAttribute('aria-checked')).toBe('false'); expect(button('Select all')).toBeDefined();
 });
 
 test('Escape closes popover, keeps dirty prompt, closes editor, cancels group row, clears selection, leaves edit mode, permits panel close', () => {
-  click('Edit'); act(() => picks()[0].click()); act(() => tiles()[0].click()); fill('Search terms', 'dirty');
+  click('Edit stickers'); act(() => picks()[0].click()); act(() => tiles()[0].click()); fill('Search terms', 'dirty');
   click('Animals', header()); click('Animals', header()); expect(field('Group name')).not.toBeNull();
   click('Done'); expect(host.querySelector('.discard')).not.toBeNull(); click('Groups ▾');
   expect(escape()).toBe(true); expect(host.querySelector('.sticker-groups-popover')).toBeNull(); expect(host.querySelector('.discard')).not.toBeNull();
   expect(escape()).toBe(true); expect(host.querySelector('.discard')).toBeNull(); expect(field('Search terms').value).toBe('dirty');
   expect(escape()).toBe(true); expect(host.querySelector('.discard')).not.toBeNull(); click('Discard'); expect(host.querySelector('.sticker-detail')).toBeNull();
   expect(escape()).toBe(true); expect(host.querySelector('.sticker-group-edit')).toBeNull(); expect(host.querySelector('.sticker-select-bar span')?.textContent).toBe('1 selected');
-  expect(escape()).toBe(true); expect(button('Select all')).toBeDefined(); expect(escape()).toBe(true); expect(button('Edit')).toBeDefined(); expect(escape()).toBe(false);
+  expect(escape()).toBe(true); expect(button('Select all')).toBeDefined(); expect(escape()).toBe(true); expect(button('Edit stickers')).toBeDefined(); expect(escape()).toBe(false);
 });
 
 test('Escape cancels a new field and outside click dismisses the groups popover', () => {
-  click('Edit'); click('+ New group'); fill('New group name', 'Cancelled'); expect(escape()).toBe(true); expect(host.querySelector('.chip-input')).toBeNull();
+  click('Edit stickers'); click('+ New group'); fill('New group name', 'Cancelled'); expect(escape()).toBe(true); expect(host.querySelector('.chip-input')).toBeNull();
   act(() => picks()[0].click()); click('Groups ▾');
   act(() => document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))); expect(host.querySelector('.sticker-groups-popover')).toBeNull();
 });
 
 test('removing the last selected sticker closes the popover without reopening it on a later selection', () => {
-  click('Edit'); act(() => picks()[0].click()); click('Groups ▾');
+  click('Edit stickers'); act(() => picks()[0].click()); click('Groups ▾');
   act(() => picks()[0].click()); expect(host.querySelector('.sticker-groups-popover')).toBeNull();
   act(() => picks()[1].click()); expect(host.querySelector('.sticker-groups-popover')).toBeNull();
 });
 
 test('Delete confirmation uses the saved group name when a rename draft is unsaved', () => {
-  click('Edit'); click('Animals', header()); click('Animals', header()); fill('Group name', 'Proposed rename');
+  click('Edit stickers'); click('Animals', header()); click('Animals', header()); fill('Group name', 'Proposed rename');
   click('Delete', host.querySelector('.sticker-group-edit')!);
   expect(host.querySelector('.sticker-group-edit')?.textContent).toContain('Delete “Animals”?');
 });
@@ -167,12 +167,12 @@ test('vertical wheel scrolls chips, clamps to ends, and passes through at ends, 
 
 test('wheel listeners stay attached in edit mode and detach when the conditional chip row unmounts', () => {
   const row = header() as HTMLDivElement; dimensions(row);
-  click('Edit'); expect(header()).toBe(row); expect(wheel(row, 100)).toBe(true);
+  click('Edit stickers'); expect(header()).toBe(row); expect(wheel(row, 100)).toBe(true);
   click('Done'); expect(wheel(row, 100)).toBe(true); expect(row.scrollLeft).toBe(200);
   status = { ...status, state: { ...status.state, stickerGroups: [] } }; act(draw);
   expect(host.querySelector('.sticker-group-chips')).toBeNull();
   expect(wheel(row, 100)).toBe(false); expect(row.scrollLeft).toBe(200);
-  click('Edit'); const newRow = header() as HTMLDivElement; dimensions(newRow);
+  click('Edit stickers'); const newRow = header() as HTMLDivElement; dimensions(newRow);
   expect(newRow).not.toBe(row); expect(wheel(newRow, 100)).toBe(true); expect(newRow.scrollLeft).toBe(100);
 });
 
@@ -197,7 +197,7 @@ test('chip fades remeasure changed chip contents, edit-mode chips, and observed 
     constructor(public callback: () => void) { observers.push(this); }
   });
   status = { ...status, state: { ...status.state, stickerGroups: [] } }; act(draw);
-  click('Edit'); const row = header() as HTMLDivElement, observer = observers.at(-1)!;
+  click('Edit stickers'); const row = header() as HTMLDivElement, observer = observers.at(-1)!;
   expect(observer.observe).toHaveBeenCalledWith(row);
   dimensions(row); act(() => observer.callback()); expect(row.hasAttribute('data-fade-end')).toBe(true);
   dimensions(row, 900, 900); click('+ New group'); expect(row.hasAttribute('data-fade-end')).toBe(false);
@@ -206,7 +206,7 @@ test('chip fades remeasure changed chip contents, edit-mode chips, and observed 
   await act(async () => button('Save', host.querySelector('.sticker-group-edit')!).click());
   expect(row.hasAttribute('data-fade-end')).toBe(false);
   dimensions(row); click('Done'); expect(row.hasAttribute('data-fade-end')).toBe(true);
-  click('Edit'); click('Short', header()); click('Delete', host.querySelector('.sticker-group-edit')!);
+  click('Edit stickers'); click('Short', header()); click('Delete', host.querySelector('.sticker-group-edit')!);
   dimensions(row, 900, 900); await act(async () => button('Delete', host.querySelector('.sticker-group-edit')!).click());
   expect(row.hasAttribute('data-fade-end')).toBe(false);
   click('Done'); expect(host.querySelector('.sticker-group-chips')).toBeNull();
@@ -221,7 +221,7 @@ test('search, chips, both all-groups buttons, creation and deletion reset the pa
   deepScroll(); click('Animals', header()); expectReset();
   deepScroll(); fill('Search stickers', 'puppy'); expectReset();
   deepScroll(); click('Search all groups'); expectReset(); expect(field('Search stickers').value).toBe('puppy');
-  fill('Search stickers', ''); click('Edit'); click('+ New group'); fill('New group name', 'Empty');
+  fill('Search stickers', ''); click('Edit stickers'); click('+ New group'); fill('New group name', 'Empty');
   deepScroll(); await enter(); expectReset();
   expect(host.querySelector('.empty p')?.textContent).toBe('No stickers in Empty');
   deepScroll(); click('Show all groups'); expectReset();
@@ -235,7 +235,7 @@ test('search, chips, both all-groups buttons, creation and deletion reset the pa
 test('sends, editing, selection, renames and membership changes keep the panel scroll in place', async () => {
   click('Animals', header()); deepScroll();
   status = { ...status, stickerSend: { id: status.state.stickers[0].id, nonce: 'test', name: 'Alex', route: 'maker', animated: false, state: 'finding' } }; act(draw);
-  click('Edit'); act(() => tiles()[0].click()); fill('Search terms', 'dog edited');
+  click('Edit stickers'); act(() => tiles()[0].click()); fill('Search terms', 'dog edited');
   act(() => picks()[0].click());
   await act(async () => button('Animals', host.querySelector('.sticker-detail-groups')!).click());
   expect(tiles()).toHaveLength(1);
@@ -255,7 +255,7 @@ test('empty states name the current group and distinguish an empty group, a fail
 });
 
 test('Escape closes a popover before clearing focused search, then keeps a dirty prompt before other edit state', () => {
-  click('Edit'); act(() => picks()[0].click()); act(() => tiles()[0].click()); fill('Search terms', 'dirty');
+  click('Edit stickers'); act(() => picks()[0].click()); act(() => tiles()[0].click()); fill('Search terms', 'dirty');
   click('Animals', header()); click('Animals', header()); click('Done');
   fill('Search stickers', 'dog'); click('Groups ▾'); act(() => field('Search stickers').focus());
   expect(escape()).toBe(true); expect(host.querySelector('.sticker-groups-popover')).toBeNull(); expect(field('Search stickers').value).toBe('dog');
@@ -266,7 +266,7 @@ test('Escape closes a popover before clearing focused search, then keeps a dirty
 });
 
 test('Escape clears search only while focused, ahead of inline editing, selection, edit mode and sends', () => {
-  click('Edit'); act(() => picks()[0].click()); click('+ New group'); fill('Search stickers', 'dog');
+  click('Edit stickers'); act(() => picks()[0].click()); click('+ New group'); fill('Search stickers', 'dog');
   act(() => field('Search stickers').focus()); expect(escape()).toBe(true);
   expect(host.querySelector('.chip-input')).not.toBeNull(); expect(picks()[0].getAttribute('aria-checked')).toBe('true'); expect(button('Done')).toBeDefined();
   fill('Search stickers', 'dog'); act(() => field('New group name').focus()); expect(escape()).toBe(true);
@@ -281,7 +281,7 @@ test('Escape clears search only while focused, ahead of inline editing, selectio
 
 test.each([0, 1, 2])('Delete confirmation describes %i stickers with the right singular or empty wording', count => {
   status = { ...status, state: { ...status.state, stickers: status.state.stickers.map((s, i) => ({ ...s, groups: i < count ? [group] : [] })) } }; act(draw);
-  click('Edit'); click('Animals', header()); click('Animals', header()); click('Delete', host.querySelector('.sticker-group-edit')!);
+  click('Edit stickers'); click('Animals', header()); click('Animals', header()); click('Delete', host.querySelector('.sticker-group-edit')!);
   expect(host.querySelector('.sticker-group-edit span')?.textContent).toBe('Delete “Animals”?' + (count === 0 ? '' : count === 1 ? ' Its sticker stays in the library.' : ' Its 2 stickers stay in the library.'));
 });
 
@@ -291,7 +291,7 @@ test('New group is the first popover row without a divider when the library has 
   style.textContent = readFileSync('src/ui/style.css', 'utf8').split('\n').filter(line => line.startsWith('.sticker-select-bar .pop-row.new') || line.startsWith('.pop-row.new:first-child')).join('\n');
   document.head.append(style);
   try {
-    click('Edit'); act(() => picks()[0].click()); click('Groups ▾');
+    click('Edit stickers'); act(() => picks()[0].click()); click('Groups ▾');
     expect(getComputedStyle(button('New group…')).marginTop).toBe('4px');
     status = { ...status, state: { ...status.state, stickerGroups: [] } }; act(draw);
     const popover = host.querySelector('.sticker-groups-popover')!;

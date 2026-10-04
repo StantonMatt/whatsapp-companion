@@ -315,7 +315,7 @@ describe('sticker panel action races', () => {
   }
   const tileButton = () => document.querySelector<HTMLButtonElement>('.sticker-art')!;
   async function editTile() {
-    if ([...document.querySelectorAll('button')].some(button => button.textContent === 'Edit')) await click('Edit');
+    if ([...document.querySelectorAll('button')].some(button => button.getAttribute('aria-label') === 'Edit stickers')) await click('Edit stickers');
     await reactAct(() => { tileButton().focus(); tileButton().click(); });
   }
   async function click(name: string) { await reactAct(() => { button(name).focus(); button(name).click(); }); }
@@ -549,7 +549,7 @@ describe('sticker panel action races', () => {
     expect(document.activeElement).toBe(tileButton());
     expect(act).not.toHaveBeenCalled();
     await reactAct(() => { escape(); });
-    expect(button('Edit')).toBeDefined(); expect(act).not.toHaveBeenCalled();
+    expect(button('Edit stickers')).toBeDefined(); expect(act).not.toHaveBeenCalled();
     await reactAct(() => { escape(); });
     expect(act).toHaveBeenCalledWith({ type: 'cancelSticker' });
   });

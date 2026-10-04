@@ -1,11 +1,11 @@
 :root {
   font-family: "Segoe UI", "Noto Sans", system-ui, sans-serif;
   color: var(--text); background: var(--bg); font-synthesis: none; font-size: 14px; line-height: 1.45; color-scheme: dark;
-  --bg: #161717; --surface: #242626; --hover: #ffffff09; --menu: #242626; --menu-hover: #343737;
+  --bg: #161717; --surface: #242626; --hover: #ffffff09; --menu: #242626; --menu-hover: #343737; --row-hover: #2e2f2f;
   --text: #fafafa; --muted: #999e9e; --line: #303333; --green: #21c063; --selected: #103b2b; --chat-bg: #0b141a;
 }
 :root[data-theme=light] {
-  color-scheme: light; --bg: #fff; --surface: #f0f2f5; --hover: #00000006; --menu: #fff; --menu-hover: #f0f2f5;
+  color-scheme: light; --bg: #fff; --surface: #f0f2f5; --hover: #00000006; --menu: #fff; --menu-hover: #f0f2f5; --row-hover: #f5f6f6;
   --text: #111b21; --muted: #667781; --line: #e9edef; --green: #008069; --selected: #d9fdd3; --chat-bg: #efeae2;
 }
 * { box-sizing: border-box; }
@@ -17,22 +17,24 @@ button:disabled, select:disabled { opacity: .45; cursor: default; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 button[aria-pressed=true] { background: var(--selected); color: var(--green); }
 .panel { position: absolute; inset: 0; overflow: auto; background: var(--bg); border-inline: 1px solid var(--line); padding-bottom: 48px; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-.panel-title { height: 72px; display: flex; align-items: center; gap: 16px; padding: 12px 20px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
-.panel-title button { width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; }
+.panel-title { height: 72px; display: flex; align-items: center; gap: 12px; padding: 12px 20px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.panel-title button { display: grid; place-items: center; width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; }
+/* Sits the arrow's shaft on the heading's x-height, as WhatsApp's own header does. */
+.panel-title button svg, .sticker-head-row .back svg { width: 24px; height: 24px; translate: 0 1px; }
 .panel-title button:hover { background: var(--hover); }
 .panel-title .close { margin-left: auto; }
 .panel-body { padding: 4px 24px 24px; }
 h1 { font-size: 17px; font-weight: 500; margin: 0; }
-.scope-summary { display: flex; align-items: center; gap: 16px; margin: 8px 0 24px; }
-.scope-summary > div { min-width: 0; overflow-wrap: anywhere; }
-.scope-summary strong { font-size: 19px; font-weight: 500; }
-.scope-summary small { display: block; color: var(--muted); margin-top: 4px; }
-.scope-icon { display: grid; place-items: center; width: 56px; height: 56px; flex-shrink: 0; border-radius: 50%; font-size: 28px; background: var(--surface); color: var(--green); }
-.settings-list { display: flex; flex-direction: column; }
-.settings-list button { display: flex; align-items: center; justify-content: space-between; gap: 16px; text-align: left; border-radius: 0; padding: 20px 0; background: none; border-bottom: 1px solid var(--line); font-size: 16px; }
-.settings-list button:hover { background: var(--hover); }
+.scope-line { display: flex; align-items: baseline; gap: 6px; margin: 0 0 8px; color: var(--muted); }
+.scope-line strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--text); }
+.scope-line span { flex-shrink: 0; }
+.scope-line span::before { content: "·" / ""; margin-right: 6px; }
+/* List rows: no dividers; an inset rounded highlight like WhatsApp's own lists. */
+.settings-list { display: flex; flex-direction: column; margin: 0 -16px; }
+.settings-list button { display: flex; align-items: center; justify-content: space-between; gap: 16px; text-align: left; border-radius: 10px; padding: 14px 16px; background: none; font-size: 16px; }
+.settings-list button:hover, .settings-list button:active { filter: none; background: var(--row-hover); }
 .settings-list small { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
-.settings-list button > span:last-child { color: var(--muted); font-size: 22px; }
+.settings-list svg { width: 24px; height: 24px; flex-shrink: 0; margin-right: -8px; color: var(--muted); }
 .reset-link { background: none; color: var(--green); padding: 20px 0; text-align: left; }
 label { display: block; margin-bottom: 20px; font-weight: 400; font-size: 14px; }
 label small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
@@ -53,7 +55,10 @@ select option:hover, select option:focus { background: var(--menu-hover); outlin
 select option:checked:focus { background: var(--selected); outline: 1px solid var(--green); outline-offset: -1px; }
 select option::checkmark { order: 1; margin-inline-start: auto; color: var(--green); }
 select option:disabled { color: var(--muted); cursor: default; }
-.choice-setting, .toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 14px 0; border-bottom: 1px solid var(--line); margin: 0; }
+.choice-setting, .toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 14px 16px; margin: 0 -16px; border-radius: 10px; }
+.toggle { cursor: pointer; }
+.toggle:hover, .toggle:active { background: var(--row-hover); }
+.toggle:has(input:disabled) { cursor: default; background: none; }
 .choice-setting > span, .toggle > span { min-width: 0; }
 .choice-setting select { width: auto; min-width: 104px; max-width: 56%; flex-shrink: 0; margin: 0; border-color: transparent; background: transparent; color: var(--muted); }
 .choice-setting select:not(:disabled):hover, .choice-setting select:open { background: var(--surface); border-color: transparent; color: var(--text); }
@@ -84,15 +89,17 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .empty small, .empty-small { font-size: 12px; line-height: 1.7; color: var(--muted); }
 .sticker-head { position: sticky; top: 0; z-index: 2; background: var(--bg); }
 .sticker-head-row { height: 72px; display: flex; align-items: center; gap: 10px; padding: 12px 16px 12px 14px; }
-.sticker-head-row .back { width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; margin-right: 2px; }
+.sticker-head-row .back { display: grid; place-items: center; width: 36px; height: 36px; min-height: 36px; border-radius: 50%; padding: 0; background: transparent; font-size: 23px; flex-shrink: 0; margin-right: 2px; }
 .sticker-head-row .back:hover { background: var(--hover); filter: none; }
 .sticker-head-row h1 { flex-shrink: 0; }
 .sticker-search { position: relative; flex: 1; min-width: 0; }
 .sticker-search input { margin: 0; min-height: 36px; padding: 7px calc(var(--count-width) + 24px) 7px 12px; border-radius: 18px; font-size: 13px; }
 .sticker-search .count { position: absolute; right: 12px; top: 50%; translate: 0 -50%; font-size: 12px; color: var(--muted); pointer-events: none; font-variant-numeric: tabular-nums; }
-.sticker-mode { height: 36px; min-height: 36px; padding: 0 14px; border-radius: 18px; background: transparent; color: var(--green); font-weight: 500; flex-shrink: 0; }
+.sticker-mode { display: grid; place-items: center; width: 36px; height: 36px; min-height: 36px; padding: 0; border-radius: 18px; background: transparent; flex-shrink: 0; overflow: hidden; white-space: nowrap; font-weight: 500; interpolate-size: allow-keywords; transition: width .15s ease, background-color .15s ease; }
+.sticker-mode svg { width: 24px; height: 24px; }
 .sticker-mode:hover { filter: none; background: var(--hover); }
-.sticker-mode.mode-done { background: var(--green); color: var(--bg); }
+.sticker-mode.mode-done { width: auto; padding: 0 14px; background: var(--green); color: var(--bg); }
+@media (prefers-reduced-motion: reduce) { .sticker-mode { transition: none; } }
 .sticker-mode.mode-done:hover { filter: brightness(1.1); }
 .sticker-strip { margin: 0; padding: 0 20px 10px; font-size: 12px; color: var(--muted); line-height: 1.5; display: flex; gap: 8px; align-items: flex-start; }
 .sticker-strip.warn { color: var(--text); }

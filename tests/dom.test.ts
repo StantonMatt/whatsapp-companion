@@ -552,7 +552,7 @@ test('an empty assistance menu becomes suggestion refinement when the ghost repl
     expect(connector['popup'].querySelector('input')).toBeNull();
     connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), id: '00000000-0000-4000-8000-000000000001', text: 'The visible suggestion', replace: false });
     expect(connector['popup'].getAttribute('aria-label')).toBe('Refine suggestion');
-    expect(connector['popup'].querySelectorAll('.action')).toHaveLength(4);
+    expect(connector['popup'].querySelectorAll('.action')).toHaveLength(10);
     expect(connector['ghost'].textContent).toBe('The visible suggestion');
     expect(editor.textContent).toBe('');
   } finally { connector.stop(); }
