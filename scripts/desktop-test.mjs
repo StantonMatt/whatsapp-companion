@@ -98,6 +98,26 @@ try {
     const win = BrowserWindow.getAllWindows()[0];
     return { size: win.getContentSize(), bounds: win.contentView.children[0].getBounds(), controls: win.contentView.children[1].getBounds(), zoom: win.contentView.children[1].webContents.getZoomFactor() };
   });
+  const resize = async (size) => {
+    await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(...size), size);
+    await expect.poll(async () => { const g = await geometry(); return { size: g.size, bounds: g.bounds }; }).toEqual({ size, bounds: { x: 0, y: 0, width: size[0], height: size[1] } });
+    const session = await remote.context().newCDPSession(remote);
+    try {
+      // Chromium holds a new size until the renderer presents a frame at the previous
+      // one, and an idle page under Xvfb may not draw. Force a redraw on every poll
+      // (bounded, retried by the poll) before reading the size. No clip or emulation:
+      // the capture must not set the renderer's size.
+      await expect.poll(async () => {
+        let timer;
+        await Promise.race([
+          session.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }).catch(() => {}),
+          new Promise(resolve => { timer = setTimeout(resolve, 1000); })
+        ]);
+        clearTimeout(timer);
+        return remote.evaluate(() => [innerWidth, innerHeight]);
+      }, { message: `Remote viewport after resize to ${size.join('x')}` }).toEqual(size);
+    } finally { await session.detach(); }
+  };
   const viewRoles = await app.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(item => item.label === 'View').submenu.items.map(item => item.role));
   expect(viewRoles).not.toContain('zoomin'); expect(viewRoles).not.toContain('zoomout');
   // Capture main-process templates/popups without opening a native menu. No
@@ -148,9 +168,7 @@ try {
   for (const panelOpen of [false, true]) {
     if (panelOpen) await openPanel('settings');
     for (const size of [[1000, 700], [1240, 850], originalSize]) {
-      await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(...size), size);
-      await expect.poll(async () => { const g = await geometry(); return { size: g.size, bounds: g.bounds }; }).toEqual({ size, bounds: { x: 0, y: 0, width: size[0], height: size[1] } });
-      await expect.poll(() => remote.evaluate(() => [innerWidth, innerHeight])).toEqual(size);
+      await resize(size);
       if (panelOpen) await expect.poll(() => local.locator('aside').evaluate(el => el.getBoundingClientRect().height)).toBe(size[1]);
       expect(await local.locator('.toolbar').count()).toBe(0);
     }
@@ -1244,14 +1262,14 @@ try {
   await nativeStickerTrigger.click(); await expect(nativeStickerPicker).toBeVisible();
   await assertStickerPickerFits();
   for (const width of [880, 1500, 1280]) {
-    await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setContentSize(width, 832), width);
+    await resize([width, 832]);
     await assertStickerPickerFits();
   }
   await local.evaluate(() => window.companion.action({ type: 'panel', panel: null }));
   await expect.poll(() => nativeStickerPicker.evaluate(el => ({ translate: el.parentElement.style.translate, maxWidth: el.parentElement.style.maxWidth }))).toEqual({ translate: '', maxWidth: '560px' });
   await openPanel('chat');
   for (const width of [880, 1100, 1500, 1280]) {
-    await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setContentSize(width, 832), width);
+    await resize([width, 832]);
     await assertStickerPickerFits('right');
   }
   await openPanel('stickers'); await assertStickerPickerFits();
@@ -1918,8 +1936,7 @@ try {
   // group-to-Alex switch and the automatic-reply scenarios below.
   await remote.getByRole('button', { name: 'Weekend plans', exact: false }).click();
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).chat).toMatchObject({ name: 'Weekend plans', chatId: '999999@g.us', settingsId: '999999@g.us', ready: true, loadedSentSamples: 0 });
-  await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(...size), originalSize);
-  await expect.poll(async () => (await geometry()).size).toEqual(originalSize);
+  await resize(originalSize);
   await local.evaluate(() => {
     window.transientChecks = [];
     window.companion.subscribe(update => window.transientChecks.push({ includesState: Object.hasOwn(update, 'state'), bytes: JSON.stringify(update).length }));
@@ -2000,7 +2017,7 @@ try {
   await section('Auto replies');
   await expect(local.getByLabel('Allow automatic replies in this chat')).not.toBeChecked();
   console.log('PASS automatic replies initially off');
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(880, 620));
+  await resize([880, 620]);
   const untilPicker = local.getByRole('combobox', { name: /^Until hour/ });
   await untilPicker.click(); await local.keyboard.press('End');
   await expect(untilPicker.locator('option[value="23"]')).toBeInViewport();
@@ -2009,7 +2026,7 @@ try {
   await untilPicker.click(); await local.keyboard.press('Tab');
   expect(await untilPicker.evaluate(e => e.matches(':open'))).toBe(false);
   expect(await local.locator('aside').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-  await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(...size), originalSize);
+  await resize(originalSize);
   console.log('PASS long dropdown scrolls to last option, closes on Tab and fits a small window');
   const fixtureCheck = await local.evaluate(() => window.companion.action({ type: 'testProvider' }));
   expect(fixtureCheck.ok).toBe(true);
