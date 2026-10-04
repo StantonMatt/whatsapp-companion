@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission, type DirectStickerDisabledReason } from '../shared/model';
 import { resolveSettings } from '../core/settings';
 import { minimumStyleSamples, styleSamples } from '../core/style';
@@ -116,17 +116,33 @@ function ReasoningSlider({ status, act }: { status: Status; act: Act }) {
   const provider = status.state.provider, model = status.state.models[provider];
   const levels = reasoningLevels(provider, model), saved = savedEffort(status.state);
   const [value, setValue] = useState(saved);
-  useEffect(() => setValue(saved), [saved]);
+  const currentSaved = useRef(saved), local = useRef({ value: saved, revision: 0, committed: 0, acknowledged: 0, pending: 0, dirty: false });
+  currentSaved.current = saved;
+  const sync = () => {
+    const input = local.current;
+    // A previous save's status must not replace newer input, even before keyup.
+    if (input.committed === input.revision && input.value === currentSaved.current) input.acknowledged = input.revision;
+    if (input.committed === input.revision && !input.pending && input.acknowledged === input.revision) input.dirty = false;
+    if (!input.dirty) { input.value = currentSaved.current; setValue(input.value); }
+  };
+  useEffect(sync, [saved]);
   if (!levels.length || !value) return <p className="hint">Reasoning effort is not adjustable for this model.</p>;
   const label = (effort: string) => effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1);
-  const commit = async (index: string) => {
-    const next = levels[Number(index)];
-    if (next && next !== saved && !await act({ type: 'reasoning', provider, model, effort: next })) setValue(saved);
+  const commit = async () => {
+    const input = local.current, next = input.value, revision = input.revision;
+    if (!next || input.committed === revision) return;
+    input.committed = revision;
+    input.pending++;
+    const accepted = await act({ type: 'reasoning', provider, model, effort: next });
+    input.pending--;
+    if (!accepted && input.revision === revision) input.dirty = false;
+    sync();
   };
   return <div className="reasoning-setting">
     <label><span className="range-label">Reasoning effort<output>{label(value)}</output></span>
       <input aria-label="Reasoning effort" type="range" min="0" max={levels.length - 1} step="1" value={levels.indexOf(value)} aria-valuetext={label(value)}
-        onChange={e => setValue(levels[Number(e.target.value)])} onPointerUp={e => void commit(e.currentTarget.value)} onKeyUp={e => void commit(e.currentTarget.value)} onBlur={e => void commit(e.currentTarget.value)}/>
+        onChange={e => { local.current.value = levels[Number(e.target.value)]; local.current.revision++; local.current.dirty = true; setValue(local.current.value); }}
+        onPointerUp={() => void commit()} onKeyUp={() => void commit()} onBlur={() => void commit()}/>
       <span className="range-scale" aria-hidden="true"><span>{label(levels[0])}</span><span>{label(levels.at(-1)!)}</span></span>
     </label>
     <p className="hint">Higher effort can take longer and use more tokens.</p>

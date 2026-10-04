@@ -2,7 +2,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { initialState, type Status } from '../src/shared/model';
+import { initialState, type Status, type ReasoningEffort } from '../src/shared/model';
 import { Settings } from '../src/ui/settings';
 
 let root: Root, host: HTMLDivElement;
@@ -20,6 +20,127 @@ function deferred() {
   const promise = new Promise<boolean>(r => { resolve = r; });
   return { promise, resolve };
 }
+
+function reasoning(action: (action: unknown) => Promise<boolean>) {
+  let current = status(); current.fixture = false;
+  const draw = () => act(() => root.render(<Settings status={current} act={action} close={() => {}}/>));
+  draw(); act(() => host.querySelector<HTMLButtonElement>('[aria-label="Providers"]')!.click());
+  const slider = () => host.querySelector<HTMLInputElement>('input[type="range"]')!;
+  const input = (index: number) => act(() => {
+    // Use the native setter so React observes the browser's range input change.
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(slider(), String(index));
+    slider().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const commit = (event = 'keyup') => act(() => slider().dispatchEvent(event === 'keyup'
+    ? new KeyboardEvent(event, { key: 'ArrowRight', bubbles: true }) : new Event(event, { bubbles: true })));
+  const publish = (effort: ReasoningEffort, provider = current.state.provider, model = current.state.models[provider]) => {
+    current = { ...current, sequence: current.sequence + 1, state: { ...current.state, provider,
+      models: { ...current.state.models, [provider]: model },
+      reasoning: { ...current.state.reasoning, [provider]: { ...current.state.reasoning[provider], [model]: effort } } } }; draw();
+  };
+  return { slider, input, commit, publish };
+}
+
+test.each([false, true])('reasoning preserves the second keypress when the first status arrives (reply first: %s)', async replyFirst => {
+  const first = deferred(), second = deferred();
+  const action = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(1); commit();
+  if (replyFirst) await act(async () => first.resolve(true));
+  input(2); publish('low');
+  expect(slider().getAttribute('aria-valuetext')).toBe('Medium');
+  commit();
+  expect(action).toHaveBeenLastCalledWith({ type: 'reasoning', provider: 'openai', model: 'gpt-6-luna', effort: 'medium' });
+  expect(action).toHaveBeenCalledTimes(2);
+  publish('medium');
+  await act(async () => { second.resolve(true); first.resolve(true); });
+  expect(slider().getAttribute('aria-valuetext')).toBe('Medium');
+  publish('high'); expect(slider().getAttribute('aria-valuetext')).toBe('High');
+});
+
+test('reasoning keeps newer uncommitted input when an older request fails', async () => {
+  const first = deferred(), second = deferred();
+  const action = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(1); commit(); input(2);
+  await act(async () => first.resolve(false));
+  expect(slider().getAttribute('aria-valuetext')).toBe('Medium');
+  commit(); publish('medium'); await act(async () => second.resolve(true));
+  expect(slider().getAttribute('aria-valuetext')).toBe('Medium');
+});
+
+test.each([false, true])('reasoning reverts a failed latest request to current saved state (older reply first: %s)', async replyFirst => {
+  const first = deferred(), second = deferred();
+  const action = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(1); commit(); input(2); commit(); publish('low');
+  if (replyFirst) await act(async () => first.resolve(true));
+  await act(async () => second.resolve(false));
+  expect(slider().getAttribute('aria-valuetext')).toBe('Low');
+  await act(async () => first.resolve(true));
+  publish('high'); expect(slider().getAttribute('aria-valuetext')).toBe('High');
+});
+
+test('an out-of-order failed reply cannot undo a newer successful reasoning save', async () => {
+  const first = deferred(), second = deferred();
+  const action = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(1); commit(); input(2); commit(); publish('medium');
+  await act(async () => second.resolve(true));
+  await act(async () => first.resolve(false));
+  expect(slider().getAttribute('aria-valuetext')).toBe('Medium');
+  publish('high'); expect(slider().getAttribute('aria-valuetext')).toBe('High');
+});
+
+test('reasoning follows an external update after acknowledgement while an older reply is delayed', async () => {
+  const first = deferred(), second = deferred();
+  const action = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(1); commit(); input(2); commit(); publish('medium');
+  await act(async () => second.resolve(true));
+  publish('high'); await act(async () => first.resolve(true));
+  expect(slider().getAttribute('aria-valuetext')).toBe('High');
+});
+
+test.each([false, true])('returning to saved reasoning supersedes an earlier save awaiting status (reply first: %s)', async replyFirst => {
+  const first = deferred(), second = deferred();
+  const action = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(1); commit();
+  if (replyFirst) await act(async () => first.resolve(true));
+  input(0); commit();
+  expect(action).toHaveBeenLastCalledWith({ type: 'reasoning', provider: 'openai', model: 'gpt-6-luna', effort: 'none' });
+  publish('low'); expect(slider().getAttribute('aria-valuetext')).toBe('None');
+  publish('none'); await act(async () => { second.resolve(true); first.resolve(true); });
+  expect(slider().getAttribute('aria-valuetext')).toBe('None');
+});
+
+test.each(['pointerup', 'focusout'])('reasoning retains input through status updates until %s and avoids duplicate blur saves', async event => {
+  const request = deferred(), action = vi.fn(() => request.promise);
+  const { slider, input, commit, publish } = reasoning(action);
+  publish('low'); expect(slider().getAttribute('aria-valuetext')).toBe('Low');
+  input(2); input(3); publish('none');
+  expect(slider().getAttribute('aria-valuetext')).toBe('High');
+  commit(event); commit('focusout');
+  expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'reasoning', provider: 'openai', model: 'gpt-6-luna', effort: 'high' });
+  publish('high'); await act(async () => request.resolve(true));
+  publish('medium'); expect(slider().getAttribute('aria-valuetext')).toBe('Medium');
+});
+
+test.each(['model', 'provider'])('changing %s remounts reasoning even with a request in flight', async change => {
+  const request = deferred(), action = vi.fn().mockReturnValueOnce(request.promise).mockResolvedValue(true);
+  const { slider, input, commit, publish } = reasoning(action);
+  input(2); commit();
+  if (change === 'model') publish('low', 'openai', 'gpt-6-astra');
+  else publish('low', 'anthropic', 'claude-sonnet-5-5');
+  expect(slider().getAttribute('aria-valuetext')).toBe('Low');
+  expect(slider().max).toBe('4');
+  await act(async () => request.resolve(false));
+  expect(slider().getAttribute('aria-valuetext')).toBe('Low');
+  input(1); await act(async () => commit());
+  expect(action).toHaveBeenLastCalledWith({ type: 'reasoning', provider: change === 'model' ? 'openai' : 'anthropic',
+    model: change === 'model' ? 'gpt-6-astra' : 'claude-sonnet-5-5', effort: 'medium' });
+});
 
 test('direct sticker checkbox reflects the click immediately, then follows published on/off state', async () => {
   let current = status(); const request = deferred(), off = deferred();
