@@ -488,7 +488,7 @@ export class DomConnector {
       this.popup.style.left = `${Math.max(8, Math.min(rect.right - 296, this.doc.documentElement.clientWidth - 304))}px`; this.popup.style.bottom = `${this.doc.documentElement.clientHeight - rect.top + 36}px`;
       this.popup.style.maxHeight = `${Math.max(80, rect.top - 44)}px`;
       const css = getComputedStyle(editor);
-      Object.assign(this.ghost.style, { left: `${rect.left + editor.clientLeft}px`, top: `${rect.top + editor.clientTop}px`, width: `${editor.clientWidth}px`, height: `${editor.clientHeight}px`, fontFamily: css.fontFamily, fontSize: css.fontSize, fontWeight: css.fontWeight, fontStyle: css.fontStyle, letterSpacing: css.letterSpacing, lineHeight: css.lineHeight, padding: css.padding, direction: css.direction, textAlign: css.textAlign });
+      Object.assign(this.ghost.style, { left: `${rect.left + editor.clientLeft}px`, top: `${rect.top + editor.clientTop}px`, width: `${editor.clientWidth}px`, height: `${editor.clientHeight}px`, fontFamily: css.fontFamily, fontSize: css.fontSize, fontWeight: css.fontWeight, fontStyle: css.fontStyle, letterSpacing: css.letterSpacing, lineHeight: css.lineHeight, padding: css.padding, clipPath: `inset(0 0 ${css.paddingBottom || '0px'} 0)`, direction: css.direction, textAlign: css.textAlign });
       this.syncGhostScroll();
     }
     if (snapshot.focused && snapshot.draft.trim() && this.suggestion?.replace && !this.replacement) void this.replaceDraft(this.suggestion);
@@ -643,13 +643,18 @@ export class DomConnector {
       placeholder.style.setProperty('visibility', 'hidden', 'important');
     }
   }
+  private ghostViewport() {
+    const rect = this.ghost.getBoundingClientRect();
+    // Keep the top padding visible for scrolled text, but exclude the bottom padding.
+    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom - (parseFloat(this.ghost.style.paddingBottom) || 0) };
+  }
   private syncGhostScroll() {
     const editor = this.editor();
     if (!editor || (!this.suggestion && !this.pending)) return;
     this.ghost.scrollTop = editor.scrollTop; this.ghost.scrollLeft = editor.scrollLeft;
     if (this.pending) { this.positionDots(); return; }
     // If the suffix wraps below the viewport, reveal it in the overlay without moving the actual caret.
-    const suffix = this.ghost.lastElementChild?.getBoundingClientRect(), viewport = this.ghost.getBoundingClientRect();
+    const suffix = this.ghost.lastElementChild?.getBoundingClientRect(), viewport = this.ghostViewport();
     if (suffix && suffix.top >= viewport.bottom) this.ghost.scrollTop += suffix.top - viewport.top - 10;
   }
   private positionDots() {
@@ -657,7 +662,7 @@ export class DomConnector {
     if (!dots || !fallback) return;
     // Measure every period, including the transparent animation steps, so the
     // indicator never changes position while cycling. Visibility preserves layout.
-    const viewport = this.ghost.getBoundingClientRect();
+    const viewport = this.ghostViewport();
     const periods = [...dots.children].map(period => period.getBoundingClientRect());
     const clipped = periods.some(rect => rect.right > viewport.right || rect.left < viewport.left ||
       rect.top < viewport.top || rect.bottom > viewport.bottom);

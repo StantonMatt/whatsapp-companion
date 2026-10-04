@@ -128,6 +128,31 @@ test('ghost text matches individual font properties and temporarily hides the re
     connector.command({ type: 'clear' }); expect(placeholder.style.visibility).toBe('');
   } finally { connector.stop(); }
 });
+test('ghost clips only the editor bottom padding and refreshes the clip when padding changes', () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.style.padding = '7px 16px 11px';
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    const ghost = connector['ghost'];
+    expect(ghost.style.padding).toBe(getComputedStyle(editor).padding); expect(ghost.style.clipPath).toBe('inset(0 0 11px 0)');
+    editor.style.paddingBottom = '18.5px'; connector['refresh']();
+    expect(ghost.style.clipPath).toBe('inset(0 0 18.5px 0)'); expect(ghost.style.paddingTop).toBe('7px');
+    editor.style.paddingBottom = '0px'; connector['refresh']();
+    expect(ghost.style.clipPath).toBe('inset(0 0 0px 0)');
+  } finally { connector.stop(); }
+});
+test('ghost reveals a suffix starting in the clipped bottom padding without scrolling the editor', () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.style.padding = '7px 16px 11px';
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    vi.advanceTimersByTime(600);
+    connector.command({ type: 'suggestion', text: ' A wrapped suffix', replace: false, key: suggestionKey(connector.read()) });
+    const ghost = connector['ghost'];
+    ghost.getBoundingClientRect = () => ({ left: 0, right: 500, top: 200, bottom: 240 } as DOMRect);
+    ghost.lastElementChild!.getBoundingClientRect = () => ({ top: 229 } as DOMRect);
+    editor.dispatchEvent(new Event('scroll'));
+    expect(ghost.scrollTop).toBe(19); expect(editor.scrollTop).toBe(0);
+  } finally { connector.stop(); }
+});
 test('ghost text can arrive unfocused, survives clicks and focus changes, and rejects a stale result after editing begins', () => {
   vi.useFakeTimers(); const editor = modernFixture(); editor.textContent = ''; editor.tabIndex = 0;
   const connector = new DomConnector(document, () => {}); connector.start();
@@ -1362,9 +1387,10 @@ describe('composer loading dots', () => {
     ['full line', 510, 218, true],
     ['no right padding', 520, 218, true],
     ['caret scrolled above', 470, 190, true],
+    ['bottom padding', 470, 224, true],
     ['caret scrolled below', 470, 242, true]
   ] as const)('%s selects visible inline or fallback dots after layout', async (_kind, right, top, clipped) => {
-    vi.useFakeTimers(); const editor = fixture();
+    vi.useFakeTimers(); const editor = fixture(); editor.style.padding = '7px 16px 8px';
     editor.textContent = _kind.startsWith('caret scrolled') ? 'A long draft\n'.repeat(20) + 'Last line' : 'Near the edge';
     const connector = new DomConnector(document, () => {}); connector.start();
     try {
