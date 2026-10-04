@@ -525,7 +525,7 @@ try {
   const stickerTerms = stickerEditor.getByRole('textbox', { name: 'Search terms', exact: true });
   const stickerLocation = stickerEditor.getByRole('status');
   const editTile = async card => {
-    const edit = stickerPanel.getByRole('button', { name: 'Edit', exact: true });
+    const edit = stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true });
     if (await edit.count()) await edit.click();
     await card.locator('.sticker-art').click();
   };
@@ -879,7 +879,7 @@ try {
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(3);
   const thirdStickerId = (await local.evaluate(() => window.companion.status())).state.stickers.find(sticker => ![firstStickerId, otherStickerId].includes(sticker.id)).id;
   await expect.poll(gridIds).toEqual([firstStickerId, otherStickerId, thirdStickerId]);
-  await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  await stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true }).click();
   const firstPick = stickerCard.getByRole('checkbox');
   await firstPick.focus(); await firstPick.press('Space'); await expect(firstPick).toHaveAttribute('aria-checked', 'true');
   // Modifier-click selects art without opening a sticker editor.
@@ -910,7 +910,7 @@ try {
   await expect(allGroupsPopover.getByRole('checkbox', { name: 'Selected', exact: true })).toHaveAttribute('aria-checked', 'true');
   await stickerPanel.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(selectionBar).toHaveCount(0); await expect(allGroupsPopover).toHaveCount(0);
-  await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  await stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true }).click();
   await expect(selectionBar.getByRole('button', { name: 'Select all', exact: true })).toBeVisible();
   await groupChips.getByRole('button', { name: 'Selected', exact: true }).click();
   await groupChips.getByRole('button', { name: 'Selected, edit group', exact: true }).click();
@@ -966,7 +966,7 @@ try {
   await expect(stickerTerms).toHaveValue('another unsaved draft');
   await stickerPanel.getByRole('button', { name: 'Done', exact: true }).click();
   await discardPrompt.getByRole('button', { name: 'Discard', exact: true }).click();
-  await expect(stickerPanel.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  await expect(stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true })).toBeVisible();
   await expect(stickerSearch).toHaveValue('');
   await editTile(otherDraftCard); await stickerTerms.fill('');
   await stickerEditor.getByRole('button', { name: 'Save', exact: true }).click(); await expect(stickerEditor).toHaveCount(0);
@@ -1017,7 +1017,7 @@ try {
   await expect(stickerEditor).toHaveCount(0); await expect(stickerCard.locator('.sticker-art')).toBeFocused();
   expect((await stickerState()).state).toBe('finding');
   await local.keyboard.press('Escape');
-  await expect(stickerPanel.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  await expect(stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true })).toBeVisible();
   expect((await stickerState()).state).toBe('finding');
   await local.keyboard.press('Escape');
   await expect.poll(async () => (await stickerState()).state).toBe('cancelled');
@@ -1093,12 +1093,12 @@ try {
   expect(Math.abs(searchAfterScroll.y - searchBeforeScroll.y)).toBeLessThan(1);
   await stickerSearch.click(); await local.keyboard.type('happy');
   await expect(stickerSearch).toHaveValue('happy'); await expect(stickerPanel.locator('.count')).toHaveText('1 of 41');
-  await stickerSearch.fill(''); await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).click();
+  await stickerSearch.fill(''); await stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true }).click();
   await assertSelectionBarAtBottom();
   const lastTile = stickerPanel.locator('.sticker-art').last();
   await lastTile.focus(); await lastTile.press('Space'); await expect(stickerTerms).toBeFocused();
   await local.keyboard.press('Escape'); await expect(stickerEditor).toHaveCount(0);
-  await local.keyboard.press('Escape'); await expect(stickerPanel.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  await local.keyboard.press('Escape'); await expect(stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true })).toBeVisible();
   for (const sticker of (await local.evaluate(() => window.companion.status())).state.stickers.filter(s => s.id !== firstStickerId)) {
     expect((await local.evaluate(id => window.companion.action({ type: 'forgetSticker', id }), sticker.id)).ok).toBe(true);
   }
@@ -1113,7 +1113,7 @@ try {
   await expect(stickerSearch).toHaveValue('');
   await expect(stickerCard.getByRole('button', { name: 'Cancel sending', exact: true })).toBeVisible();
   await stickerSearch.fill('no matching sticker');
-  await stickerPanel.getByRole('button', { name: 'Edit', exact: true }).focus();
+  await stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true }).focus();
   await local.keyboard.press('Escape');
   await expect.poll(async () => (await stickerState())?.state).toBe('cancelled');
   await expect(stickerPanel).toBeVisible();

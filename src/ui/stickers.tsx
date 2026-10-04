@@ -5,6 +5,7 @@ import type { Status, Sticker } from '../shared/model';
 import type { StickerSend } from '../shared/sticker-transfer';
 import { searchStickers } from '../core/stickers';
 import type { Act } from './index';
+import { BackIcon, EditIcon } from './icons';
 
 const locationMessages = {
   looking: 'Looking in WhatsApp…',
@@ -308,13 +309,13 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   return <>
     <header className="sticker-head">
       <div className="sticker-head-row">
-        <button className="back" data-preserve-auto="" aria-label="Close panel" onClick={() => requestClose(null, 'panel')}>←</button>
+        <button className="back" data-preserve-auto="" aria-label="Close panel" onClick={() => requestClose(null, 'panel')}><BackIcon/></button>
         <h1>Stickers</h1>
         <div className="sticker-search" style={{ '--count-width': `${count.length}ch` } as React.CSSProperties}>
           <input ref={search} className="search" aria-label="Search stickers" aria-describedby={countId} placeholder="Search" value={query} onChange={e => { queryRevision.current++; locating.current = null; setFocus(null); setQuery(e.target.value); }}/>
           <span className="count" aria-hidden="true">{count}</span><span className="sr-only" id={countId}>{all.length} stickers indexed</span>
         </div>
-        <button className={`sticker-mode${editMode ? ' mode-done' : ''}`} onClick={() => editMode ? requestClose(null, 'done') : setEditMode(true)}>{editMode ? 'Done' : 'Edit'}</button>
+        <button className={`sticker-mode${editMode ? ' mode-done' : ''}`} aria-label={editMode ? undefined : 'Edit stickers'} title={editMode ? undefined : 'Edit stickers'} onClick={() => editMode ? requestClose(null, 'done') : setEditMode(true)}>{editMode ? 'Done' : <EditIcon/>}</button>
       </div>
       {groups.header}
       {strip && <p className="sticker-strip"><span>{strip}</span></p>}
