@@ -50,10 +50,12 @@ try {
       await copy.click();
       await expect(copy).toHaveAttribute('data-result', 'copied');
       if (kind === 'image') {
-        expect(await app.evaluate(({ clipboard }) => {
-          const image = clipboard.readImage();
-          return { empty: image.isEmpty(), size: image.getSize() };
-        })).toEqual({ empty: false, size: { width: 2, height: 2 } });
+        // Electron's clipboard API is asynchronous and item-based (no readImage).
+        expect(await app.evaluate(async ({ clipboard }) => {
+          const item = (await clipboard.read()).find(entry => entry.types.includes('image/png'));
+          const png = item && Buffer.from(await (await item.getType('image/png')).arrayBuffer());
+          return { png: await clipboard.has('image/png'), size: png ? [png.readUInt32BE(16), png.readUInt32BE(20)] : null };
+        })).toEqual({ png: true, size: [2, 2] });
       } else {
         expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(kind === 'text' ? 'Fixture message copy' : 'Fixture legacy message copy');
       }
