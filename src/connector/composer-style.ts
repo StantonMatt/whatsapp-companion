@@ -21,7 +21,8 @@ input::placeholder{color:var(--muted)}
 .apply svg{width:20px;height:20px;translate:1px 0}
 .apply:disabled{opacity:.5;color:var(--muted)}
 .notice-text{padding:0 6px 6px;font-size:12px;color:var(--muted)}
-.pending-text{display:flex;align-items:center;gap:8px;padding:6px;color:var(--muted)}
-.spinner{width:12px;height:12px;border:2px solid var(--line);border-top-color:#21c063;border-radius:50%;animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.spinner{animation:none}}
+.ghost.loading{opacity:1}
+.dots{display:inline-block;width:0;white-space:nowrap;letter-spacing:.12em}.dots.gap i:first-child{margin-left:.18em}.dots i{font-style:normal}
+.dots-fallback{position:fixed;width:auto;transform:translate(-100%,-50%);color:#79938b;pointer-events:none}
+.sr-status{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 `;

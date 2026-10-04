@@ -31,11 +31,22 @@ try {
       const visit = node => { nodes.push(node); for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child); };
       visit(root);
       const classes = node => { const index = node.attributes?.indexOf('class'); return index >= 0 ? node.attributes[index + 1].split(' ') : []; };
-      const text = node => node ? node.nodeValue + (node.children ?? []).map(text).join('') : '';
+      const text = node => {
+        if (!node) return '';
+        const styleIndex = node.attributes?.indexOf('style');
+        if (node.nodeName === 'I' && styleIndex >= 0 && /opacity:\s*0(?:;|$)/.test(node.attributes[styleIndex + 1])) return '';
+        return node.nodeValue + (node.children ?? []).map(text).join('');
+      };
       const ghost = nodes.find(node => classes(node).includes('ghost'));
       const popup = nodes.find(node => classes(node).includes('popup'));
       return { ghost: text(ghost), popupHidden: popup?.attributes?.includes('hidden') };
     } finally { await session.detach(); }
+  };
+  const expectDots = async (draft = '') => {
+    await expect.poll(async () => {
+      const ui = await assistantUi();
+      return ui.popupHidden && ui.ghost.startsWith(draft) && /^\.{1,3}$/.test(ui.ghost.slice(draft.length));
+    }, { intervals: [20, 40, 80] }).toBe(true);
   };
   const openPanel = async (panel, page = remote) => {
     // Closing a native view crosses IPC; wait before toggling the same panel again.
@@ -328,8 +339,8 @@ try {
   await local.getByLabel('Close panel').click();
   const emptyComposer = remote.getByRole('textbox', { name: 'Type a message' });
   const emptyBounds = await emptyComposer.boundingBox();
+  // One click on the star requests a suggestion directly; no menu to confirm.
   await remote.mouse.click(emptyBounds.x + emptyBounds.width - 17, emptyBounds.y - 16);
-  await remote.keyboard.press('Enter');
   const accessibility = await remote.context().newCDPSession(remote);
   await expect.poll(async () => (await accessibility.send('Accessibility.getFullAXTree')).nodes.some(node => node.name?.value?.includes('Enable conversation context in AI settings'))).toBe(true);
   await accessibility.detach();
@@ -369,15 +380,15 @@ try {
   await remote.waitForTimeout(1500);
   await expect(statusText).not.toHaveText(/Thinking|Tab to accept/);
   // Own-message follow-ups remain available as an explicit user request.
-  let ownBounds = await editor.boundingBox();
-  await remote.mouse.click(ownBounds.x + ownBounds.width - 17, ownBounds.y - 16);
   await clickAssistant('Suggest reply');
+  await expectDots();
+  await remote.screenshot({ path: '.local/screenshots/suggest-loading-dots.png' });
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await editor.press('Tab'); await expect(editor).toHaveText('Sounds good, see you then!');
   await remote.waitForTimeout(1500);
   await expect(statusText).not.toHaveText(/Thinking|Tab to accept/);
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
-  console.log('PASS own latest message needs explicit Suggest and acceptance does not start a continuation');
+  console.log('PASS one star click after an own message requests immediately with inline dots and no menu; acceptance does not start a continuation');
   await editor.fill('');
   await remote.evaluate(() => window.add('A fresh incoming question for refinement'));
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
@@ -385,6 +396,7 @@ try {
   await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
   await remote.screenshot({ path: '.local/screenshots/refine-suggestion-menu.png' });
   await clickAssistant('Shorter');
+  await expectDots();
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await expect(editor).toHaveText('');
   await expect.poll(assistantUi).toEqual({ ghost: 'That sounds lovely. See you then!', popupHidden: true });
@@ -396,6 +408,7 @@ try {
   await editor.fill('Translate this written message');
   starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
   await clickAssistant('Translate…'); await remote.keyboard.type('Spanish'); await remote.keyboard.press('Enter');
+  await expectDots('Translate this written message');
   await expect(editor).toHaveText('That sounds lovely. See you then!');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
   await remote.waitForTimeout(1500);
@@ -403,12 +416,128 @@ try {
   console.log('PASS translation replaces the written draft without sending or another automatic continuation');
   await editor.fill('Keep this text while cancelling');
   starBounds = await editor.boundingBox(); await remote.mouse.click(starBounds.x + starBounds.width - 17, starBounds.y - 16);
-  await clickAssistant('Warmer'); await expect(statusText).toHaveText('Thinking…'); await remote.keyboard.press('Escape');
+  await clickAssistant('Warmer'); await expectDots('Keep this text while cancelling'); await remote.keyboard.press('Escape');
   await remote.waitForTimeout(400);
   await expect(editor).toHaveText('Keep this text while cancelling');
   await expect(statusText).not.toHaveText('Tab to accept · Esc to dismiss');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
   console.log('PASS Escape cancels pending refinement without a late preview or draft changes');
+  // Hold only the fixture provider delay so this check remains deterministic
+  // even when accessibility traversal takes longer than its usual 200 ms.
+  await app.evaluate(() => {
+    const original = globalThis.setTimeout;
+    globalThis.fixtureContinuationHold = { original, releases: [] };
+    globalThis.setTimeout = function (callback, delay, ...args) {
+      if (delay === 200 && typeof callback === 'function' && callback.length === 1 && /\[native code\]/.test(Function.prototype.toString.call(callback))) {
+        globalThis.fixtureContinuationHold.releases.push(callback);
+        return original(() => {}, 0);
+      }
+      return original.call(this, callback, delay, ...args);
+    };
+  });
+  const edgePadding = await editor.evaluate(el => ({ value: el.style.getPropertyValue('padding-right'), priority: el.style.getPropertyPriority('padding-right') }));
+  try {
+    // Fit the last word within a few pixels of the edge, where nonzero-width
+    // dots used to wrap it onto the next line in the overlay.
+    const edgeDraft = await editor.evaluate(el => {
+      el.style.setProperty('padding-right', '0px');
+      const css = getComputedStyle(el), canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d'); context.font = `${css.fontSize} ${css.fontFamily}`;
+      const width = el.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+      let draft = 'Draft vasos';
+      for (let count = 1; count < 1000; count++) {
+        const next = `Draft ${'i'.repeat(count)} vasos`;
+        if (context.measureText(next).width > width - 2) break;
+        draft = next;
+      }
+      return draft;
+    });
+    await editor.fill(edgeDraft);
+    await expectDots(edgeDraft);
+    await expect(statusText).toHaveText('');
+    const layoutSession = await remote.context().newCDPSession(remote);
+    try {
+      const { root } = await layoutSession.send('DOM.getDocument', { depth: -1, pierce: true });
+      const findGhost = node => {
+        const index = node.attributes?.indexOf('class');
+        if (index >= 0 && node.attributes[index + 1].split(' ').includes('ghost')) return node;
+        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) {
+          const found = findGhost(child); if (found) return found;
+        }
+      };
+      const { object } = await layoutSession.send('DOM.resolveNode', { nodeId: findGhost(root).nodeId });
+      const { result, exceptionDetails } = await layoutSession.send('Runtime.callFunctionOn', {
+        objectId: object.objectId, returnByValue: true,
+        functionDeclaration: (function () {
+          const lastWord = element => {
+            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+            let node, last; while ((node = walker.nextNode())) last = node;
+            const range = document.createRange();
+            range.setStart(last, last.textContent.length - 5); range.setEnd(last, last.textContent.length);
+            return range.getBoundingClientRect();
+          };
+          const editor = document.querySelector('#main footer [contenteditable=true]');
+          const original = lastWord(editor), overlay = lastWord(this.firstElementChild);
+          const inline = this.querySelector('.dots'), fallback = this.getRootNode().querySelector('.dots-fallback');
+          const inlineVisible = getComputedStyle(inline).visibility === 'visible';
+          const indicator = inlineVisible ? inline : fallback;
+          const viewport = inlineVisible ? this.getBoundingClientRect() : { left: 0, right: innerWidth, top: 0, bottom: innerHeight };
+          const rects = [...indicator.children].map(period => period.getBoundingClientRect());
+          const trigger = this.getRootNode().querySelector('.trigger').getBoundingClientRect();
+          const fallbackRect = fallback.getBoundingClientRect();
+          return { original: { top: original.top, left: original.left }, overlay: { top: overlay.top, left: overlay.left },
+            inlineVisible, fallbackVisible: !fallback.hidden,
+            visible: !indicator.hidden && getComputedStyle(indicator).visibility === 'visible' && rects.every(rect =>
+              rect.width > 0 && rect.height > 0 && rect.left >= viewport.left && rect.right <= viewport.right && rect.top >= viewport.top && rect.bottom <= viewport.bottom),
+            dotTop: rects[0].top, fallbackRight: fallbackRect.right, triggerLeft: trigger.left,
+            fallbackCenter: (fallbackRect.top + fallbackRect.bottom) / 2, triggerCenter: (trigger.top + trigger.bottom) / 2 };
+        }).toString()
+      });
+      if (exceptionDetails) throw new Error(exceptionDetails.text);
+      expect(result.value.overlay.top).toBeCloseTo(result.value.original.top, 0);
+      expect(result.value.overlay.left).toBeCloseTo(result.value.original.left, 0);
+      expect(result.value.visible).toBe(true);
+      expect(result.value.fallbackVisible).toBe(true); // The full line has no spare right padding.
+      expect(result.value.fallbackVisible).toBe(!result.value.inlineVisible);
+      if (result.value.inlineVisible) expect(result.value.dotTop).toBeCloseTo(result.value.original.top, 0);
+      else {
+        expect(result.value.fallbackRight).toBeLessThan(result.value.triggerLeft);
+        expect(result.value.fallbackCenter).toBeCloseTo(result.value.triggerCenter, 0);
+      }
+    } finally { await layoutSession.detach(); }
+    await clickAssistant('Refine draft');
+    await expect.poll(async () => (await assistantUi()).popupHidden).toBe(false);
+    await expect.poll(async () => (await assistantUi()).ghost).toBe('');
+    const session = await remote.context().newCDPSession(remote);
+    try {
+      const nodes = (await session.send('Accessibility.getFullAXTree')).nodes;
+      expect(nodes.some(node => node.name?.value === 'Refine draft' && node.role?.value === 'StaticText')).toBe(true);
+    } finally { await session.detach(); }
+    await expect(editor).toHaveText(edgeDraft);
+    // Let the cancelled request complete; its late result must not return.
+    await app.evaluate(() => {
+      const held = globalThis.fixtureContinuationHold;
+      globalThis.setTimeout = held.original;
+      for (const release of held.releases) release();
+      delete globalThis.fixtureContinuationHold;
+    });
+    await remote.waitForTimeout(400);
+    await expect.poll(async () => (await assistantUi()).ghost).toBe('');
+    await remote.keyboard.press('Escape');
+    console.log('PASS one star click during automatic continuation opens Refine draft and cancels the dots, with one loading announcement');
+  } finally {
+    await editor.evaluate((el, padding) => {
+      if (padding.value) el.style.setProperty('padding-right', padding.value, padding.priority);
+      else el.style.removeProperty('padding-right');
+    }, edgePadding);
+    await app.evaluate(() => {
+      const held = globalThis.fixtureContinuationHold;
+      if (!held) return;
+      globalThis.setTimeout = held.original;
+      for (const release of held.releases) release();
+      delete globalThis.fixtureContinuationHold;
+    });
+  }
   await editor.fill('Thanks,');
   await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
   await openPanel('settings');
@@ -449,7 +578,7 @@ try {
   await remote.waitForTimeout(700); // The refinement form must survive snapshot polling while the user thinks.
   await remote.keyboard.type('Make it warmer');
   await remote.keyboard.press('Enter');
-  await expect(statusText).toHaveText('Thinking…');
+  await expectDots('A long draft to make warmer');
   await editor.click(); // Refocusing must not cancel the in-flight edit.
   await expect(editor).toHaveText('That sounds lovely. See you then!');
   await remote.screenshot({ path: '.local/screenshots/refinement.png' });

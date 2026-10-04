@@ -147,7 +147,12 @@ export class DomConnector {
   private lastKey = '';
   private lastContentKey = '';
   private lastAccountSafety: AccountSafetyReason | undefined;
-  private popupMode: 'refine' | 'notice' | 'pending' = 'notice';
+  private popupMode: 'refine' | 'notice' = 'notice';
+  private pending?: Extract<RemoteCommand, { type: 'refining' | 'thinking' }>;
+  private fallbackDots?: HTMLElement;
+  private dotsTimer?: ReturnType<typeof setInterval>;
+  private loadingStatus!: HTMLElement;
+  private announcedRequests = new Set<string>();
   private suggestion?: Extract<RemoteCommand, { type: 'suggestion' }>;
   private replacement?: { command: Extract<RemoteCommand, { type: 'suggestion' }>; editor: HTMLElement; originalRange?: Range };
   private dismissedKey?: string;
@@ -246,14 +251,24 @@ export class DomConnector {
     this.ghost = this.doc.createElement('div'); this.ghost.className = 'ghost'; this.ghost.setAttribute('aria-hidden', 'true');
     this.popup = this.doc.createElement('div'); this.popup.className = 'popup'; this.popup.hidden = true;
     this.popup.setAttribute('role', 'dialog'); this.popup.setAttribute('aria-label', 'Refine reply');
-    this.button = this.doc.createElement('button'); this.button.className = 'trigger'; this.button.textContent = '✦'; this.button.title = 'Suggest or refine reply'; this.button.setAttribute('aria-label', 'Suggest or refine reply');
+    this.button = this.doc.createElement('button'); this.button.className = 'trigger'; this.button.textContent = '✦'; this.button.title = 'Suggest reply'; this.button.setAttribute('aria-label', 'Suggest reply');
     this.button.setAttribute('aria-haspopup', 'dialog'); this.button.setAttribute('aria-expanded', 'false');
     this.button.addEventListener('click', event => { if (event.isTrusted) {
-      if (!this.popup.hidden && this.popupMode === 'pending') { this.dismissPopup(); this.editor()?.focus(); }
+      if (this.pending?.origin === 'auto') {
+        // Automatic empty-composer work keeps running; return focus so Tab and typing still reach the composer.
+        if (this.read().draft.trim()) { this.dismissPopup(); this.openPopup(); }
+        else this.editor()?.focus();
+      }
+      else if (this.pending) { this.dismissPopup(); this.editor()?.focus(); }
       else if (!this.popup.hidden && this.popupMode === 'refine') { this.hidePopup(); this.editor()?.focus(); }
       else this.openPopup();
     } });
-    shadow.append(style, this.ghost, this.popup, this.button); this.doc.documentElement.append(this.host);
+    this.loadingStatus = this.doc.createElement('div'); this.loadingStatus.className = 'sr-status';
+    this.loadingStatus.setAttribute('role', 'status'); this.loadingStatus.setAttribute('aria-live', 'polite');
+    shadow.append(style, this.ghost, this.loadingStatus, this.popup, this.button); this.doc.documentElement.append(this.host);
+    this.doc.addEventListener('scroll', this.scroll, true);
+    this.doc.addEventListener('input', this.scroll, true);
+    this.doc.defaultView?.addEventListener('resize', this.resize);
     this.doc.addEventListener('keydown', this.keydown, true);
     this.doc.addEventListener('beforeinput', this.beforeInput, true);
     this.doc.addEventListener('pointerdown', this.pointer, true);
@@ -273,12 +288,17 @@ export class DomConnector {
     this.clear();
     this.dispatch = undefined;
     this.observer?.disconnect(); clearInterval(this.timer); this.host.remove(); this.navigation?.stop();
+    this.doc.removeEventListener('scroll', this.scroll, true);
+    this.doc.removeEventListener('input', this.scroll, true);
+    this.doc.defaultView?.removeEventListener('resize', this.resize);
     this.doc.removeEventListener('keydown', this.keydown, true); this.doc.removeEventListener('beforeinput', this.beforeInput, true);
     this.doc.removeEventListener('pointerdown', this.pointer, true); this.doc.removeEventListener('compositionstart', this.compositionStart, true);
     this.doc.removeEventListener('wheel', this.activity, true);
     this.doc.removeEventListener('compositionend', this.compositionEnd, true); this.doc.removeEventListener('selectionchange', this.selectionChanged);
   }
   private selectionChanged = () => this.refresh();
+  private scroll = () => this.syncGhostScroll();
+  private resize = () => this.refresh();
   private navigationEvent = (event: RemoteEvent) => {
     // Invalidate queued commands synchronously, before main can return a clear.
     if (event.type === 'cancelAuto' || event.type === 'navigate') this.takeover();
@@ -287,7 +307,7 @@ export class DomConnector {
   private takeover(editing = false) {
     this.restoreReplacementSelection();
     this.activityGeneration++;
-    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup(); }
+    if (editing) { this.editRevision++; this.clear(); if (this.popupMode === 'notice') this.hidePopup(); }
     this.emit({ type: 'activity', editing });
   }
   private activity = (event: Event) => { if (event.isTrusted && !this.inserting) this.takeover(); };
@@ -296,8 +316,10 @@ export class DomConnector {
   };
   private pointer = (event: Event) => {
     if (!event.isTrusted) return;
-    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event) && this.popupMode !== 'pending') this.hidePopup();
-    this.activity(event);
+    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event)) this.hidePopup();
+    const send = event.target instanceof Element ? event.target.closest('#main footer button, #main footer [role="button"]') : null;
+    if (this.pending && send?.querySelector('[data-icon="send"]')) this.takeover(true);
+    else this.activity(event);
   };
   private compositionStart = (event: Event) => {
     const editor = this.editor();
@@ -309,7 +331,7 @@ export class DomConnector {
   private keydown = (event: KeyboardEvent) => {
     if (!event.isTrusted || event.isComposing || this.composing || event.keyCode === 229) return;
     const editor = this.editor();
-    if (event.key === 'Escape' && (editor?.contains(event.target as Node) || event.composedPath().includes(this.host)) && (this.suggestion || !this.popup.hidden)) {
+    if (event.key === 'Escape' && (editor?.contains(event.target as Node) || event.composedPath().includes(this.host)) && (this.pending || this.suggestion || !this.popup.hidden)) {
       event.preventDefault(); event.stopImmediatePropagation(); this.dismissPopup(); editor?.focus(); return;
     }
     if (event.target !== editor && !editor?.contains(event.target as Node)) {
@@ -402,9 +424,9 @@ export class DomConnector {
     if (!success) this.refresh();
   }
 
-  private hidePopup() { this.popupRequest = undefined; this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); }
+  private hidePopup() { this.popupRequest = undefined; this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); this.updateTrigger(); }
   private dismissPopup() {
-    const request = !this.popup.hidden ? this.popupRequest : undefined;
+    const request = this.pending ? { id: this.pending.requestId } : !this.popup.hidden ? this.popupRequest : undefined;
     const offer = request ? undefined : this.suggestion;
     const id = request?.id ?? offer?.id;
     if (id) {
@@ -428,12 +450,16 @@ export class DomConnector {
   }
   private clear() {
     this.restoreReplacementSelection();
-    this.suggestion = undefined; this.ghost.textContent = '';
+    this.fallbackDots?.remove(); this.fallbackDots = undefined;
+    this.pending = undefined; clearInterval(this.dotsTimer); this.dotsTimer = undefined;
+    this.loadingStatus.textContent = '';
+    this.suggestion = undefined; this.ghost.textContent = ''; this.ghost.classList.remove('loading');
     if (this.hiddenPlaceholder) {
       const { element, visibility, priority } = this.hiddenPlaceholder;
       if (visibility) element.style.setProperty('visibility', visibility, priority); else element.style.removeProperty('visibility');
       this.hiddenPlaceholder = undefined;
     }
+    this.updateTrigger();
   }
   private stickerReadiness = new StickerReadiness();
   private refresh() {
@@ -450,13 +476,13 @@ export class DomConnector {
     const contentKey = suggestionKey(snapshot);
     if (key !== this.lastKey && !(this.dispatch && this.dispatchMatches(this.dispatch, snapshot))) {
       this.lastKey = key;
-      if (this.suggestion && this.suggestion.key !== contentKey) this.clear();
+      if ((this.suggestion && this.suggestion.key !== contentKey) || (this.pending && this.pending.key !== contentKey)) this.clear();
       if (contentKey !== this.lastContentKey) this.hidePopup();
       this.lastContentKey = contentKey;
       this.emit({ type: 'snapshot', snapshot });
     }
     const editor = this.editor(), rect = editor?.getBoundingClientRect();
-    this.button.hidden = !snapshot.ready;
+    this.button.hidden = !snapshot.ready; this.updateTrigger(snapshot);
     if (rect && editor) {
       this.button.style.left = `${Math.max(12, rect.right - 30)}px`; this.button.style.top = `${rect.top - 29}px`;
       this.popup.style.left = `${Math.max(8, Math.min(rect.right - 296, this.doc.documentElement.clientWidth - 304))}px`; this.popup.style.bottom = `${this.doc.documentElement.clientHeight - rect.top + 36}px`;
@@ -470,9 +496,9 @@ export class DomConnector {
   private openPopup() {
     const snapshot = this.read(), key = suggestionKey(snapshot);
     const suggested = this.suggestion?.key === key ? this.suggestion : undefined;
-    const hasText = Boolean(snapshot.draft.trim() || suggested?.id);
+    const hasText = Boolean(snapshot.draft.trim() || suggested);
     if (suggested?.replace && snapshot.draft.trim()) this.clear();
-    this.takeover(); this.popupShell('refine', hasText ? snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion' : 'Reply assistance');
+    this.takeover();
     const request = (instruction?: string, operation?: 'translate' | 'retry') => {
       if (suggestionKey(this.read()) !== key) { this.hidePopup(); return; }
       this.dismissedKey = undefined;
@@ -482,9 +508,9 @@ export class DomConnector {
       this.refresh(); this.emit({ type: 'request', instruction, ...(operation ? { operation } : {}), key, ...(instruction && !snapshot.draft.trim() && suggested?.id ? { suggestionId: suggested.id } : {}) });
     };
     if (!hasText) {
-      const suggest = this.doc.createElement('button'); suggest.className = 'action'; suggest.textContent = 'Suggest reply';
-      suggest.addEventListener('click', event => { if (event.isTrusted) request(); }); this.popup.append(suggest); suggest.focus(); return;
+      request(); return;
     }
+    this.popupShell('refine', snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion');
     const row = this.doc.createElement('div'); row.className = 'actions';
     let translating = false;
     for (const label of [...Object.keys(refinements), 'Translate…']) {
@@ -515,9 +541,10 @@ export class DomConnector {
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
     if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
-    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup(); return; }
+    if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'notice') this.hidePopup(); return; }
     if (command.type === 'notice') {
       if ((command.requestId && this.dismissedIds.has(command.requestId)) || (command.retryKey && command.retryKey !== suggestionKey(this.read()))) return;
+      if (this.pending) this.clear();
       this.popupShell('notice', 'Reply assistance');
       if (command.requestId) this.popupRequest = { id: command.requestId };
       const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text);
@@ -536,11 +563,39 @@ export class DomConnector {
     }
     if (command.type === 'refining' || command.type === 'thinking') {
       if (command.key !== suggestionKey(this.read()) || this.dismissedIds.has(command.requestId)) return;
-      this.clear(); this.popupShell('pending', command.type === 'refining' ? 'Refining' : 'Thinking');
-      this.popupRequest = { id: command.requestId };
-      const progress = this.doc.createElement('div'); progress.className = 'pending-text'; progress.setAttribute('role', 'status');
-      const spinner = this.doc.createElement('span'); spinner.className = 'spinner'; spinner.setAttribute('aria-hidden', 'true');
-      progress.append(spinner, command.type === 'refining' ? 'Working on your text…' : 'Thinking…'); this.popup.append(progress); return;
+      // Compatible re-publication must not restart animation or re-announce status.
+      if (this.pending?.requestId === command.requestId && this.pending.key === command.key && this.pending.type === command.type && this.pending.origin === command.origin) return;
+      const snapshot = this.read();
+      if (snapshot.composing || snapshot.draftIssue || !snapshot.ready) return;
+      this.clear(); this.hidePopup(); this.pending = command;
+      this.ghost.classList.add('loading'); this.hidePlaceholder(snapshot.draft);
+      const prefix = this.doc.createElement('span'); prefix.textContent = snapshot.draft; prefix.style.visibility = 'hidden';
+      const dots = this.doc.createElement('span'); dots.className = 'dots';
+      if (snapshot.draft && !/\s$/.test(snapshot.draft)) dots.classList.add('gap');
+      const periods = Array.from({ length: 3 }, () => { const period = this.doc.createElement('i'); period.textContent = '.'; return period; });
+      dots.append(...periods);
+      this.fallbackDots = this.doc.createElement('span'); this.fallbackDots.className = 'dots dots-fallback';
+      this.fallbackDots.setAttribute('aria-hidden', 'true'); this.fallbackDots.hidden = true;
+      const fallbackPeriods = periods.map(period => period.cloneNode(true) as HTMLElement);
+      this.fallbackDots.append(...fallbackPeriods); this.button.before(this.fallbackDots);
+      const motion = this.doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)');
+      let step = 1;
+      const render = () => {
+        const count = motion?.matches ? 3 : step;
+        periods.forEach((period, index) => {
+          period.style.opacity = fallbackPeriods[index].style.opacity = index < count ? '1' : '0';
+        });
+        this.syncGhostScroll();
+      };
+      this.ghost.append(prefix, dots); render();
+      this.dotsTimer = setInterval(() => { step = step % 3 + 1; render(); }, 400);
+      // Announce only requests the user asked for; automatic dots after every typing pause would be noisy.
+      if (command.origin === 'user' && !this.announcedRequests.has(command.requestId)) {
+        this.announcedRequests.add(command.requestId);
+        while (this.announcedRequests.size > 50) this.announcedRequests.delete(this.announcedRequests.values().next().value!);
+        this.loadingStatus.textContent = command.type === 'refining' ? 'Refining' : 'Suggesting a reply';
+      }
+      this.updateTrigger(snapshot); return;
     }
     if (command.type === 'suggestion') {
       const editor = this.editor(), s = this.read();
@@ -550,25 +605,17 @@ export class DomConnector {
         return;
       }
       this.clear(); this.suggestion = command; this.ghost.replaceChildren();
-      if (this.popupMode === 'pending' || this.popupMode === 'notice') this.hidePopup();
+      if (this.popupMode === 'notice') this.hidePopup();
       // An explicit refinement edits a written draft directly. Empty composers
       // keep the revised reply as ghost text, so Enter can never send it unseen.
       if (command.replace && s.draft.trim()) {
         if (command.id) this.emit({ type: 'displayAck', suggestionId: command.id, key: command.key, reason: 'displayed' });
         void this.replaceDraft(command); return;
       }
-      if (!s.draft) {
-        const label = editor.getAttribute('aria-placeholder');
-        const placeholder = [...(editor.parentElement?.children ?? [])].find(el => el !== editor && el instanceof HTMLElement && el.getAttribute('aria-hidden') === 'true' && label && el.textContent?.trim() === label) as HTMLElement | undefined;
-        if (placeholder) {
-          this.hiddenPlaceholder = { element: placeholder, visibility: placeholder.style.getPropertyValue('visibility'), priority: placeholder.style.getPropertyPriority('visibility') };
-          placeholder.style.setProperty('visibility', 'hidden', 'important');
-        }
-      }
+      this.hidePlaceholder(s.draft);
       if (!command.replace) { const prefix = this.doc.createElement('span'); prefix.textContent = s.draft; prefix.style.visibility = 'hidden'; this.ghost.append(prefix); }
-      const suffix = this.doc.createElement('span'); suffix.textContent = command.text; this.ghost.append(suffix); this.syncGhostScroll();
+      const suffix = this.doc.createElement('span'); suffix.textContent = command.text; this.ghost.append(suffix); this.syncGhostScroll(); this.updateTrigger(s);
       if (command.id) this.emit({ type: 'displayAck', suggestionId: command.id, key: command.key, reason: 'displayed' });
-      if (!this.popup.hidden && this.popupMode === 'refine' && !this.popup.querySelector('input') && command.id) this.openPopup();
       return;
     }
     if (command.type === 'autoSend') {
@@ -580,13 +627,48 @@ export class DomConnector {
       this.emit({ type: 'stickerLocated', nonce: command.nonce, found: Boolean(image) });
     }
   }
+  private updateTrigger(snapshot = this.read()) {
+    const cancels = this.pending?.origin === 'user';
+    const label = cancels ? 'Cancel' : snapshot.draft.trim() ? 'Refine draft' : this.suggestion ? 'Refine suggestion' : 'Suggest reply';
+    this.button.title = label; this.button.setAttribute('aria-label', label);
+    this.button.setAttribute('aria-haspopup', cancels || (!snapshot.draft.trim() && !this.suggestion) ? 'false' : 'dialog');
+  }
+  private hidePlaceholder(draft: string) {
+    const editor = this.editor();
+    if (draft || !editor) return;
+    const label = editor.getAttribute('aria-placeholder');
+    const placeholder = [...(editor.parentElement?.children ?? [])].find(el => el !== editor && el instanceof HTMLElement && el.getAttribute('aria-hidden') === 'true' && label && el.textContent?.trim() === label) as HTMLElement | undefined;
+    if (placeholder) {
+      this.hiddenPlaceholder = { element: placeholder, visibility: placeholder.style.getPropertyValue('visibility'), priority: placeholder.style.getPropertyPriority('visibility') };
+      placeholder.style.setProperty('visibility', 'hidden', 'important');
+    }
+  }
   private syncGhostScroll() {
     const editor = this.editor();
-    if (!editor || !this.suggestion) return;
+    if (!editor || (!this.suggestion && !this.pending)) return;
     this.ghost.scrollTop = editor.scrollTop; this.ghost.scrollLeft = editor.scrollLeft;
+    if (this.pending) { this.positionDots(); return; }
     // If the suffix wraps below the viewport, reveal it in the overlay without moving the actual caret.
     const suffix = this.ghost.lastElementChild?.getBoundingClientRect(), viewport = this.ghost.getBoundingClientRect();
     if (suffix && suffix.top >= viewport.bottom) this.ghost.scrollTop += suffix.top - viewport.top - 10;
+  }
+  private positionDots() {
+    const dots = this.ghost.querySelector<HTMLElement>('.dots'), fallback = this.fallbackDots;
+    if (!dots || !fallback) return;
+    // Measure every period, including the transparent animation steps, so the
+    // indicator never changes position while cycling. Visibility preserves layout.
+    const viewport = this.ghost.getBoundingClientRect();
+    const periods = [...dots.children].map(period => period.getBoundingClientRect());
+    const clipped = periods.some(rect => rect.right > viewport.right || rect.left < viewport.left ||
+      rect.top < viewport.top || rect.bottom > viewport.bottom);
+    dots.style.visibility = clipped ? 'hidden' : 'visible'; fallback.hidden = !clipped;
+    if (clipped) {
+      const trigger = this.button.getBoundingClientRect();
+      Object.assign(fallback.style, { left: `${trigger.left - 6}px`, top: `${trigger.top + trigger.height / 2}px`,
+        fontFamily: this.ghost.style.fontFamily, fontSize: this.ghost.style.fontSize,
+        fontWeight: this.ghost.style.fontWeight, fontStyle: this.ghost.style.fontStyle,
+        lineHeight: this.ghost.style.lineHeight });
+    }
   }
   private dispatchMatches(attempt: NonNullable<DomConnector['dispatch']>, snapshot: Snapshot): boolean {
     return this.dispatch === attempt && this.editor() === attempt.editor && !snapshot.draftIssue && snapshot.draft === attempt.command.text &&

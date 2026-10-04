@@ -22,7 +22,7 @@ export type RemoteCommand =
   // Discard request-bound text and pending/recovery notices together.
   | { type: 'clear' }
   | { type: 'suggestion'; key: string; text: string; replace: boolean; id?: string; requestId?: string }
-  | { type: 'refining' | 'thinking'; key: string; requestId: string }
+  | { type: 'refining' | 'thinking'; key: string; requestId: string; origin: 'user' | 'auto' }
   | { type: 'autoSend'; key: string; text: string; nonce: string; expiresAt: number }
   | { type: 'locateSticker'; id: string; nonce: string }
   | { type: 'notice'; text: string; retryKey?: string; requestId?: string };

@@ -12,6 +12,7 @@ import { snapshotKey, suggestionKey } from '../src/core/suggestions';
 import type { RemoteEvent, RemoteCommand } from '../src/shared/connector';
 import { composerProvablyEmpty } from '../src/connector/draft';
 import { emptyComposers } from './fixtures/empty-composers';
+import { composerStyle } from '../src/connector/composer-style';
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.getSelection()?.removeAllRanges(); document.body.replaceChildren(); });
 function fixture() {
   document.body.innerHTML = '<div id="main"><header><span title="A friend">A friend</span></header><div data-id="false_123@c.us_one"><span class="selectable-text copyable-text">Hi</span></div><footer><div contenteditable="true" role="textbox">A draft</div></footer></div>';
@@ -547,26 +548,30 @@ test('a quoted-message suggestion survives main-process schema validation and di
   } finally { connector.stop(); }
 });
 
-test('an empty assistance menu becomes suggestion refinement when the ghost reply arrives', async () => {
-  vi.useFakeTimers(); const editor = fixture(); editor.textContent = '';
-  const connector = new DomConnector(document, () => {}); connector.start();
+test('an empty composer requests immediately from the star, then refines the shown suggestion', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks(); const editor = fixture(); editor.textContent = '';
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
   try {
-    await vi.advanceTimersByTimeAsync(600); connector['openPopup']();
-    expect(connector['popup'].getAttribute('aria-label')).toBe('Reply assistance');
-    expect(connector['popup'].querySelector('input')).toBeNull();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(connector['button'].title).toBe('Suggest reply');
+    connector['button'].click(); expect(events.some(e => e.type === 'request')).toBe(false);
+    clicks.trigger(connector);
+    expect(events.filter(e => e.type === 'request')).toEqual([{ type: 'request', instruction: undefined, key: suggestionKey(connector.read()) }]);
+    expect(connector['popup'].hidden).toBe(true);
     connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), id: '00000000-0000-4000-8000-000000000001', text: 'The visible suggestion', replace: false });
+    expect(connector['button'].title).toBe('Refine suggestion'); clicks.trigger(connector);
     expect(connector['popup'].getAttribute('aria-label')).toBe('Refine suggestion');
     expect(connector['popup'].querySelectorAll('.action')).toHaveLength(10);
     expect(connector['ghost'].textContent).toBe('The visible suggestion');
     expect(editor.textContent).toBe('');
-  } finally { connector.stop(); }
+  } finally { connector.stop(); clicks.stop(); }
 });
 test('typing during pending refinement hides it and rejects a queued result', async () => {
   vi.useFakeTimers(); const editor = fixture();
   const connector = new DomConnector(document, () => {}); connector.start();
   try {
     await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
-    connector.command({ type: 'refining', key, requestId: '00000000-0000-4000-8000-000000000003' }); expect(connector['popup'].hidden).toBe(false);
+    connector.command({ type: 'refining', origin: 'user', key, requestId: '00000000-0000-4000-8000-000000000003' }); expect(connector['ghost'].querySelector('.dots')).not.toBeNull();
     connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
     expect(connector['popup'].hidden).toBe(true); expect(connector['button'].getAttribute('aria-expanded')).toBe('false');
     connector.command({ type: 'suggestion', key, text: 'Stale result', replace: true });
@@ -594,7 +599,7 @@ test('refocusing during refinement preserves the request and shows the revised g
   const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
   try {
     await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
-    connector.command({ type: 'refining', key, requestId: '00000000-0000-4000-8000-000000000003' });
+    connector.command({ type: 'refining', origin: 'user', key, requestId: '00000000-0000-4000-8000-000000000003' });
     connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
     expect(events.some(event => event.type === 'dismiss')).toBe(false);
     connector.command({ type: 'suggestion', key, text: 'An updated suggestion', replace: true });
@@ -1133,7 +1138,7 @@ test('dismissal after a new bubble mounts carries the old visible offer, leaving
 });
 
 
-test.each(['Escape', 'close', 'trigger'] as const)('dismissing a pending empty-composer refinement via %s cancels its request and suppresses replay', async source => {
+test.each(['Escape', 'trigger'] as const)('dismissing a pending empty-composer refinement via %s cancels its request and suppresses replay', async source => {
   vi.useFakeTimers(); const clicks = retryClicks(); let finish!: (text: string) => void;
   const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Original reply')
     .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
@@ -1143,11 +1148,10 @@ test.each(['Escape', 'close', 'trigger'] as const)('dismissing a pending empty-c
     const original = app.connector['suggestion']!, context = app.assistant['emptyKey']();
     const work = app.assistant.request('Warmer', false, { suggestionId: original.id, key: original.key });
     expect(app.connector['suggestion']).toBeUndefined();
-    expect(app.connector['popup'].getAttribute('aria-label')).toBe('Refining');
-    const requestId = app.connector['popupRequest']!.id;
+    expect(app.connector['popup'].hidden).toBe(true); expect(app.connector['loadingStatus'].textContent).toBe('Refining');
+    const requestId = app.connector['pending']!.requestId;
     if (source === 'Escape') app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor,
       composedPath: () => [app.editor], preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
-    else if (source === 'close') clicks.click(app.connector, 'Close reply assistance');
     else {
       app.connector['button'].dispatchEvent(new Event('click')); // untrusted events must leave work live
       expect(generator.mock.calls[1][0].signal?.aborted).toBe(false);
@@ -1166,14 +1170,15 @@ test.each(['Escape', 'close', 'trigger'] as const)('dismissing a pending empty-c
   } finally { app.stop(); clicks.stop(); }
 });
 
-test('Escape during automatic Thinking cancels the request and suppresses a revisit', async () => {
+test('Escape during automatic suggestion dots cancels the request and suppresses a revisit', async () => {
   vi.useFakeTimers(); let finish!: (text: string) => void;
   const generator = vi.fn<typeof generate>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   const app = integratedAssistant(generator);
   try {
     app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
-    expect(app.connector['popup'].getAttribute('aria-label')).toBe('Thinking');
-    const requestId = app.connector['popupRequest']!.id, context = app.assistant['emptyKey']();
+    // Automatic dots are visual only; screen readers hear only requests the user made.
+    expect(app.connector['popup'].hidden).toBe(true); expect(app.connector['loadingStatus'].textContent).toBe('');
+    const requestId = app.connector['pending']!.requestId, context = app.assistant['emptyKey']();
     app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor, composedPath: () => [app.editor],
       preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
     expect(app.events.filter(e => e.type === 'dismiss').at(-1)).toEqual({ type: 'dismiss', requestId });
@@ -1263,4 +1268,309 @@ test('dismissal of an old visible offer preserves a newer offer already queued f
     spy.mockRestore(); for (const command of queued) deliver(command);
     expect(app.connector['ghost'].textContent).toBe('New reply'); expect(generator).toHaveBeenCalledTimes(2);
   } finally { app.stop(); }
+});
+
+
+describe('composer loading dots', () => {
+  test.each(['user', 'auto'] as const)('Escape cancels %s dots and typing cancels either origin', async origin => {
+    vi.useFakeTimers(); const editor = fixture(), events: RemoteEvent[] = [];
+    const connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+      connector.command({ type: 'thinking', origin, key, requestId: 'escape' });
+      connector['keydown']({ isTrusted: true, key: 'Escape', target: editor, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() } as unknown as KeyboardEvent);
+      expect(events).toContainEqual({ type: 'dismiss', requestId: 'escape' });
+      expect(connector['pending']).toBeUndefined(); expect(connector['ghost'].textContent).toBe('');
+      connector.command({ type: 'thinking', origin, key, requestId: 'typing' });
+      connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+      expect(connector['pending']).toBeUndefined(); expect(connector['ghost'].textContent).toBe('');
+    } finally { connector.stop(); }
+  });
+
+  test.each(['user', 'auto'] as const)('star and tooltip handle %s dots in an empty composer', async origin => {
+    vi.useFakeTimers(); const clicks = retryClicks(); fixture().textContent = '';
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin, key: suggestionKey(connector.read()), requestId: 'empty' });
+      expect(connector['button'].title).toBe(origin === 'user' ? 'Cancel' : 'Suggest reply');
+      expect(connector['button'].getAttribute('aria-label')).toBe(connector['button'].title);
+      expect(connector['button'].getAttribute('aria-haspopup')).toBe('false');
+      const start = events.length; clicks.trigger(connector);
+      expect(connector['popup'].hidden).toBe(true);
+      if (origin === 'auto') {
+        expect(connector['pending']?.requestId).toBe('empty'); expect(events.slice(start)).toEqual([]);
+        expect(connector['ghost'].querySelector('.dots')).not.toBeNull();
+      } else {
+        expect(connector['pending']).toBeUndefined();
+        expect(events.slice(start).filter(event => event.type === 'dismiss')).toEqual([{ type: 'dismiss', requestId: 'empty' }]);
+        expect(events.slice(start).some(event => event.type === 'request')).toBe(false);
+      }
+    } finally { connector.stop(); clicks.stop(); }
+  });
+
+  test.each(['user', 'auto'] as const)('one star click during %s draft dots handles the live continuation', async origin => {
+    vi.useFakeTimers(); const clicks = retryClicks();
+    const generator = vi.fn<typeof generate>().mockImplementation(() => new Promise(() => {}));
+    const app = integratedAssistant(generator);
+    try {
+      await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh']();
+      await vi.advanceTimersByTimeAsync(1000);
+      if (origin === 'user') void app.assistant.request('Make it warmer');
+      expect(app.connector['pending']?.origin).toBe(origin);
+      const id = app.connector['pending']!.requestId;
+      expect(app.connector['button'].title).toBe(origin === 'auto' ? 'Refine draft' : 'Cancel');
+      expect(app.connector['button'].getAttribute('aria-label')).toBe(app.connector['button'].title);
+      expect(app.connector['button'].getAttribute('aria-haspopup')).toBe(origin === 'auto' ? 'dialog' : 'false');
+      clicks.trigger(app.connector);
+      expect(app.connector['pending']).toBeUndefined(); expect(app.connector['ghost'].textContent).toBe('');
+      expect(generator.mock.calls.at(-1)![0].signal?.aborted).toBe(true);
+      expect(app.events).toContainEqual({ type: 'dismiss', requestId: id });
+      expect(app.editor.textContent).toBe('A draft');
+      expect(app.connector['popup'].hidden).toBe(origin === 'user');
+      if (origin === 'auto') {
+        expect(app.connector['popup'].textContent).toContain('Refine draft');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(generator).toHaveBeenCalledOnce();
+      }
+    } finally { app.stop(); clicks.stop(); }
+  });
+
+  test('near-edge dots have no wrapping width and their gap belongs to the first period', async () => {
+    vi.useFakeTimers(); const editor = fixture(); editor.textContent = 'A draft nearly filling the line';
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin: 'auto', key: suggestionKey(connector.read()), requestId: 'edge' });
+      const dots = connector['ghost'].querySelector<HTMLElement>('.dots')!;
+      // jsdom does not lay out lines; verify the zero-width/non-wrapping contract
+      // that leaves the prefix's final word in its original position.
+      const style = document.createElement('style');
+      // The host has a closed shadow root, so copy the actual shared stylesheet.
+      style.textContent = composerStyle; document.head.append(style);
+      const clone = dots.cloneNode(true) as HTMLElement; document.body.append(clone);
+      try {
+        expect(getComputedStyle(clone).display).toBe('inline-block'); expect(getComputedStyle(clone).width).toBe('0px');
+        expect(getComputedStyle(clone).whiteSpace).toBe('nowrap'); expect(getComputedStyle(clone).marginLeft).not.toBe('0.18em');
+        expect(getComputedStyle(clone.firstElementChild!).marginLeft).toBe('0.18em');
+        expect(connector['ghost'].firstElementChild?.textContent).toBe(editor.textContent);
+      } finally { clone.remove(); style.remove(); }
+    } finally { connector.stop(); }
+  });
+  test.each([
+    ['fits', 470, 218, false],
+    ['full line', 510, 218, true],
+    ['no right padding', 520, 218, true],
+    ['caret scrolled above', 470, 190, true],
+    ['caret scrolled below', 470, 242, true]
+  ] as const)('%s selects visible inline or fallback dots after layout', async (_kind, right, top, clipped) => {
+    vi.useFakeTimers(); const editor = fixture();
+    editor.textContent = _kind.startsWith('caret scrolled') ? 'A long draft\n'.repeat(20) + 'Last line' : 'Near the edge';
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin: 'auto', key: suggestionKey(connector.read()), requestId: 'geometry' });
+      const ghost = connector['ghost'], dots = ghost.querySelector<HTMLElement>('.dots')!, fallback = connector['fallbackDots']!;
+      ghost.getBoundingClientRect = () => ({ left: 0, right: 500, top: 200, bottom: 240 } as DOMRect);
+      connector['button'].getBoundingClientRect = () => ({ left: 470, top: 171, height: 28 } as DOMRect);
+      for (const period of dots.children) period.getBoundingClientRect = () => ({ left: right - 20, right, top, bottom: top + 14 } as DOMRect);
+      if (_kind.startsWith('caret scrolled')) editor.scrollTop = 100;
+      editor.dispatchEvent(new Event('scroll'));
+      expect(ghost.scrollTop).toBe(editor.scrollTop);
+      expect(dots.style.visibility).toBe(clipped ? 'hidden' : 'visible'); expect(fallback.hidden).toBe(!clipped);
+      expect(fallback.getAttribute('aria-hidden')).toBe('true');
+      if (clipped) { expect(fallback.style.left).toBe('464px'); expect(fallback.style.top).toBe('185px'); }
+      const visible = (element: Element) => [...element.children].filter(period => (period as HTMLElement).style.opacity === '1').length;
+      expect(visible(dots)).toBe(1); expect(visible(fallback)).toBe(1);
+      await vi.advanceTimersByTimeAsync(400); expect(visible(fallback)).toBe(2);
+      expect(connector['loadingStatus'].textContent).toBe('');
+      connector.command({ type: 'clear' }); expect(fallback.isConnected).toBe(false); expect(connector['fallbackDots']).toBeUndefined();
+    } finally { connector.stop(); }
+  });
+
+  test('dots return inline when resize, scroll or input restores space', async () => {
+    vi.useFakeTimers(); const editor = fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin: 'user', key: suggestionKey(connector.read()), requestId: 'transition' });
+      const dots = connector['ghost'].querySelector<HTMLElement>('.dots')!, fallback = connector['fallbackDots']!;
+      connector['ghost'].getBoundingClientRect = () => ({ left: 0, right: 500, top: 200, bottom: 240 } as DOMRect);
+      let right = 520;
+      for (const period of dots.children) period.getBoundingClientRect = () => ({ left: 460, right, top: 218, bottom: 232 } as DOMRect);
+      for (const event of ['resize', 'scroll', 'input']) {
+        right = 520; editor.dispatchEvent(new Event('scroll')); expect(fallback.hidden).toBe(false);
+        right = 480;
+        if (event === 'resize') window.dispatchEvent(new Event(event)); else editor.dispatchEvent(new Event(event));
+        expect(fallback.hidden).toBe(true); expect(dots.style.visibility).toBe('visible');
+      }
+      expect(connector['pending']?.requestId).toBe('transition');
+    } finally { connector.stop(); }
+  });
+
+  test('fallback dots respect reduced motion without another announcement', async () => {
+    vi.useFakeTimers(); vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
+    fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'refining', origin: 'user', key: suggestionKey(connector.read()), requestId: 'fallback-reduced' });
+      const dots = connector['ghost'].querySelector('.dots')!, fallback = connector['fallbackDots']!;
+      connector['ghost'].getBoundingClientRect = () => ({ left: 0, right: 500, top: 200, bottom: 240 } as DOMRect);
+      for (const period of dots.children) period.getBoundingClientRect = () => ({ left: 490, right: 510, top: 218, bottom: 232 } as DOMRect);
+      const status = vi.spyOn(connector['loadingStatus'], 'textContent', 'set');
+      for (let i = 0; i < 4; i++) {
+        await vi.advanceTimersByTimeAsync(400); expect(fallback.hidden).toBe(false);
+        expect([...fallback.children].map(period => (period as HTMLElement).style.opacity)).toEqual(['1', '1', '1']);
+      }
+      expect(status).not.toHaveBeenCalled(); status.mockRestore();
+    } finally { connector.stop(); }
+  });
+
+  test.each([
+    ['empty suggestion', '', 'thinking', false],
+    ['continuation', 'Hello', 'thinking', true],
+    ['trailing space', 'Hello ', 'thinking', false],
+    ['trailing newline', 'Hello\n', 'thinking', false],
+    ['draft refinement', 'Hello', 'refining', true],
+    ['shown suggestion refinement', '', 'refining', false]
+  ] as const)('%s uses the ghost overlay at the result position', async (_kind, draft, type, gap) => {
+    vi.useFakeTimers(); const editor = fixture(); editor.textContent = draft;
+    // Native contenteditables retain a terminal BR after a user-authored newline.
+    if (draft.endsWith('\n')) editor.append(document.createElement('br'));
+    editor.setAttribute('aria-placeholder', 'Type a message');
+    const placeholder = document.createElement('div'); placeholder.textContent = 'Type a message'; placeholder.setAttribute('aria-hidden', 'true'); editor.parentElement!.append(placeholder);
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+      if (!draft && type === 'refining') connector.command({ type: 'suggestion', key, text: 'Old suggestion', replace: false });
+      const pending = { type, origin: 'user' as const, key, requestId: '00000000-0000-4000-8000-000000000003' };
+      connector.command(pending);
+      const ghost = connector['ghost'], dots = ghost.querySelector('.dots')!;
+      const visibleDots = () => [...dots.querySelectorAll('i')].filter(period => period.style.opacity === '1').map(period => period.textContent).join('');
+      expect(ghost.classList.contains('loading')).toBe(true); expect(ghost.getAttribute('aria-hidden')).toBe('true');
+      expect(ghost.firstElementChild?.textContent).toBe(draft); expect((ghost.firstElementChild as HTMLElement).style.visibility).toBe('hidden');
+      expect(dots.classList.contains('gap')).toBe(gap); expect(visibleDots()).toBe('.');
+      expect(placeholder.style.visibility).toBe(draft ? '' : 'hidden');
+      expect(connector['popup'].hidden).toBe(true); expect(connector['suggestion']).toBeUndefined();
+      expect(connector['button'].title).toBe('Cancel'); expect(connector['button'].getAttribute('aria-label')).toBe('Cancel');
+      expect(connector['button'].getAttribute('aria-haspopup')).toBe('false'); expect(connector['button'].textContent).toBe('✦');
+      const status = connector['loadingStatus'];
+      expect(status.getAttribute('role')).toBe('status'); expect(status.className).toBe('sr-status');
+      expect(status.textContent).toBe(type === 'thinking' ? 'Suggesting a reply' : 'Refining');
+      const announce = vi.spyOn(status, 'textContent', 'set');
+      await vi.advanceTimersByTimeAsync(399); expect(visibleDots()).toBe('.');
+      connector.command(pending); // Republished live state must not restart or announce again.
+      for (const [delay, text] of [[1, '..'], [400, '...'], [400, '.'], [400, '..']] as const) {
+        await vi.advanceTimersByTimeAsync(delay);
+        expect(visibleDots()).toBe(text);
+      }
+      expect(announce).not.toHaveBeenCalled(); announce.mockRestore();
+      expect(editor.textContent).toBe(draft);
+      connector.command({ type: 'clear' }); expect(placeholder.style.visibility).toBe('');
+      expect(status.textContent).toBe(''); expect(ghost.textContent).toBe(''); expect(connector['dotsTimer']).toBeUndefined();
+      expect(connector['button'].title).toBe(draft.trim() ? 'Refine draft' : 'Suggest reply');
+    } finally { connector.stop(); }
+  });
+
+  test('reduced motion keeps three static dots', async () => {
+    vi.useFakeTimers(); vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
+    fixture().textContent = ''; const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin: 'user', key: suggestionKey(connector.read()), requestId: 'reduced' });
+      for (let i = 0; i < 4; i++) {
+        expect(connector['ghost'].textContent).toBe('...');
+        expect([...connector['ghost'].querySelectorAll('i')].map(period => period.style.opacity)).toEqual(['1', '1', '1']);
+        await vi.advanceTimersByTimeAsync(400);
+      }
+    } finally { connector.stop(); }
+  });
+
+  test.each(['user', 'auto'] as const)('%s dots retain focus-independent work and synchronize composer scroll', async origin => {
+    vi.useFakeTimers(); const editor = fixture(); editor.tabIndex = 0;
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin, key: suggestionKey(connector.read()), requestId: 'scroll' });
+      const ghost = connector['ghost'];
+      ghost.getBoundingClientRect = () => ({ top: 200, bottom: 240 } as DOMRect);
+      ghost.lastElementChild!.getBoundingClientRect = () => ({ top: 220 } as DOMRect);
+      editor.scrollTop = 15; editor.scrollLeft = 7; editor.dispatchEvent(new Event('scroll'));
+      expect(ghost.scrollTop).toBe(15); expect(ghost.scrollLeft).toBe(7);
+      editor.focus(); editor.blur(); connector['refresh']();
+      connector['pointer']({ isTrusted: true, composedPath: () => [document.body] } as unknown as Event);
+      connector['activity']({ isTrusted: true } as Event);
+      expect(connector['pending']?.requestId).toBe('scroll'); expect(events.some(e => e.type === 'dismiss')).toBe(false);
+      ghost.lastElementChild!.getBoundingClientRect = () => ({ top: 270 } as DOMRect);
+      editor.dispatchEvent(new Event('scroll')); expect(ghost.scrollTop).toBe(15); expect(editor.scrollTop).toBe(15);
+    } finally { connector.stop(); }
+  });
+
+  test('Tab and Shift+Tab keep ordinary navigation while dots run', async () => {
+    vi.useFakeTimers(); const editor = fixture(); editor.textContent = '';
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin: 'user', key: suggestionKey(connector.read()), requestId: 'tab' });
+      for (const shiftKey of [false, true]) {
+        const event = { isTrusted: true, key: 'Tab', target: editor, shiftKey, composedPath: () => [editor], preventDefault: vi.fn() };
+        connector['keydown'](event as unknown as KeyboardEvent); expect(event.preventDefault).not.toHaveBeenCalled();
+      }
+      expect(connector['pending']?.requestId).toBe('tab');
+    } finally { connector.stop(); }
+  });
+
+  test.each((['user', 'auto'] as const).flatMap(origin => (['typing', 'IME', 'sending', 'send button'] as const).map(action => [origin, action] as const)))('%s dots: %s cancels and rejects queued responses', async (origin, action) => {
+    vi.useFakeTimers(); const editor = fixture(), connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+      connector.command({ type: origin === 'user' ? 'refining' : 'thinking', origin, key, requestId: 'cancel' });
+      if (action === 'typing') connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+      if (action === 'IME') editor.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      if (action === 'sending') connector['keydown']({ isTrusted: true, key: 'Enter', target: editor } as unknown as KeyboardEvent);
+      if (action === 'send button') {
+        const send = document.createElement('button'), icon = document.createElement('span'); icon.dataset.icon = 'send'; send.append(icon); editor.parentElement!.append(send);
+        connector['pointer']({ isTrusted: true, target: icon, composedPath: () => [icon, send] } as unknown as Event);
+      }
+      expect(connector['pending']).toBeUndefined(); expect(connector['ghost'].textContent).toBe('');
+      expect(connector['fallbackDots']).toBeUndefined();
+      connector.command({ type: 'suggestion', key, text: 'Queued stale reply', replace: true, requestId: 'cancel' });
+      expect(connector['ghost'].textContent).toBe(''); expect(editor.textContent).toBe('A draft');
+    } finally { connector.stop(); }
+  });
+
+  test('one click from an owner-last composer uses an explicit request and errors retry with dots', async () => {
+    vi.useFakeTimers(); const clicks = retryClicks(); let finish!: (text: string) => void;
+    const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network unavailable'))
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const app = integratedAssistant(generator);
+    try {
+      app.editor.textContent = ''; document.querySelector<HTMLElement>('#main [data-id]')!.dataset.id = 'true_123@c.us_own';
+      app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+      expect(generator).not.toHaveBeenCalled(); clicks.trigger(app.connector); await vi.advanceTimersByTimeAsync(0);
+      expect(generator.mock.calls[0][0].reason).toBe('explicit suggest');
+      expect(app.connector['ghost'].textContent).toBe(''); expect(app.connector['popup'].textContent).toContain('Try again');
+      expect(app.connector['fallbackDots']).toBeUndefined();
+      clicks.click(app.connector);
+      expect(app.connector['ghost'].querySelector('.dots')?.textContent).toBe('...'); expect(app.connector['popup'].hidden).toBe(true);
+      expect(generator.mock.calls[1][0].reason).toBe('retry');
+      finish('Explicit reply'); await vi.advanceTimersByTimeAsync(0);
+      expect(app.connector['ghost'].textContent).toBe('Explicit reply'); expect(app.editor.textContent).toBe('');
+      expect(app.connector['fallbackDots']).toBeUndefined();
+    } finally { app.stop(); clicks.stop(); }
+  });
+});
+
+test('automatic dots are not announced and a star click returns focus to the empty composer', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = ''; const clicks = retryClicks();
+  const connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+    connector.command({ type: 'thinking', origin: 'auto', key, requestId: '00000000-0000-4000-8000-0000000000a1' });
+    expect(connector['pending']?.origin).toBe('auto'); expect(connector['loadingStatus'].textContent).toBe('');
+    connector['button'].focus(); clicks.trigger(connector);
+    expect(connector['pending']?.requestId).toBe('00000000-0000-4000-8000-0000000000a1');
+    expect(document.activeElement).toBe(editor);
+    connector.command({ type: 'thinking', origin: 'user', key, requestId: '00000000-0000-4000-8000-0000000000a2' });
+    expect(connector['loadingStatus'].textContent).toBe('Suggesting a reply');
+  } finally { connector.stop(); clicks.stop(); }
 });
