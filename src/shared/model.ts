@@ -190,4 +190,4 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('cancelAuto') }).strict(),
 ]);
 export type Action = z.infer<typeof actionSchema>;
-export interface DesktopAPI { shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }
+export interface DesktopAPI { shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider, refresh?: boolean): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }

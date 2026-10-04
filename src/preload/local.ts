@@ -4,7 +4,7 @@ const api: DesktopAPI = {
   shieldReady: (nonce, reducedMotion) => ipcRenderer.invoke('companion:shield-ready', { nonce, reducedMotion }),
   shieldFaded: nonce => ipcRenderer.invoke('companion:shield-faded', nonce),
   status: () => ipcRenderer.invoke('companion:status'),
-  models: provider => ipcRenderer.invoke('companion:models', provider),
+  models: (provider, refresh = false) => ipcRenderer.invoke('companion:models', provider, refresh),
   action: action => ipcRenderer.invoke('companion:action', action),
   subscribe: fn => {
     const listener = (_event: Electron.IpcRendererEvent, update: StatusUpdate) => fn(update);

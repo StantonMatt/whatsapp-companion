@@ -14,6 +14,8 @@ export type RemoteCommand =
   | ({ type: 'sendSticker'; expiresAt: number } & StickerTicket)
   | { type: 'cancelSticker' }
   | { type: 'chrome'; panel: Panel; pending: boolean; panelBounds?: { left: number; right: number } | null }
+  | { type: 'snapshot'; nonce: string }
+  // Discard request-bound text and pending/recovery notices together.
   | { type: 'clear' }
   | { type: 'suggestion'; key: string; text: string; replace: boolean; id?: string }
   | { type: 'refining'; key: string }
@@ -24,4 +26,4 @@ export interface Connector {
   send(command: RemoteCommand): void;
   focus(): void;
 }
-export type RemoteEvent = z.infer<typeof accountSafetyEventSchema> | { type: 'stickerPickerLayout'; nonce: string; result: PickerLayoutResult } | { type: 'stickerPrepared'; nonce: string; found: boolean; diagnostics?: StickerLookupDiagnostics } | { type: 'stickerCancelled'; nonce: string; reason: 'chat-changed'; detail?: StickerMakerDetail } | { type: 'stickerClicked'; nonce: string } | { type: 'stickerSent'; nonce: string; clicked: boolean; confirmed?: boolean; reason?: 'editor-unavailable' | 'unconfirmed' | 'draft'; detail?: StickerMakerDetail; diagnostics?: StickerLookupDiagnostics } | { type: 'stickerLocated'; nonce: string; found: boolean } | { type: 'navigate'; panel: Panel } | { type: 'chrome'; rail: number; listWidth: number; theme: 'dark' | 'light' } | { type: 'cancelAuto' } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'activity'; editing?: boolean } | { type: 'dismiss' } | { type: 'request'; instruction?: string; key?: string; suggestionId?: string } | { type: 'result'; nonce: string; sent: boolean } | { type: 'sticker'; image: string };
+export type RemoteEvent = z.infer<typeof accountSafetyEventSchema> | { type: 'stickerPickerLayout'; nonce: string; result: PickerLayoutResult } | { type: 'stickerPrepared'; nonce: string; found: boolean; diagnostics?: StickerLookupDiagnostics } | { type: 'stickerCancelled'; nonce: string; reason: 'chat-changed'; detail?: StickerMakerDetail } | { type: 'stickerClicked'; nonce: string } | { type: 'stickerSent'; nonce: string; clicked: boolean; confirmed?: boolean; reason?: 'editor-unavailable' | 'unconfirmed' | 'draft'; detail?: StickerMakerDetail; diagnostics?: StickerLookupDiagnostics } | { type: 'stickerLocated'; nonce: string; found: boolean } | { type: 'navigate'; panel: Panel } | { type: 'chrome'; rail: number; listWidth: number; theme: 'dark' | 'light' } | { type: 'cancelAuto' } | { type: 'snapshot'; snapshot: Snapshot; nonce?: string } | { type: 'activity'; editing?: boolean } | { type: 'applied'; key: string; suggestionId: string; success?: boolean } | { type: 'dismiss' } | { type: 'request'; instruction?: string; operation?: 'translate' | 'retry'; key?: string; suggestionId?: string } | { type: 'result'; nonce: string; sent: boolean } | { type: 'sticker'; image: string };

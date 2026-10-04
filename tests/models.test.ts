@@ -65,3 +65,24 @@ describe('provider model discovery', () => {
     }
   });
 });
+
+describe('model catalog cache', () => {
+  test('revisits use ten-minute provider/key cache, refresh bypasses and expiry reloads', async () => {
+    let now = 0;
+    const loader = vi.fn(async (provider: 'openai' | 'anthropic') => [{ id: provider, name: provider }]);
+    const catalog = new ModelCatalog(loader, () => now);
+    const first = await catalog.load('openai', key); first.models[0].name = 'Modified by caller';
+    expect((await catalog.load('openai', key)).models[0].name).toBe('openai'); expect(loader).toHaveBeenCalledOnce();
+    await catalog.load('anthropic', key); await catalog.load('openai', 'other-key'); expect(loader).toHaveBeenCalledTimes(3);
+    await catalog.load('openai', key, true); expect(loader).toHaveBeenCalledTimes(4);
+    now = 599999; await catalog.load('openai', key); expect(loader).toHaveBeenCalledTimes(4);
+    now = 600000; await catalog.load('openai', key); expect(loader).toHaveBeenCalledTimes(5);
+    catalog.invalidate('openai'); await catalog.load('openai', key); expect(loader).toHaveBeenCalledTimes(6);
+  });
+  test('failed refresh never resurrects the old cached list', async () => {
+    const loader = vi.fn().mockResolvedValueOnce([{ id: 'gpt-6-luna', name: 'Luna' }]).mockRejectedValue(new Error('network'));
+    const catalog = new ModelCatalog(loader);
+    await catalog.load('openai', key); expect((await catalog.load('openai', key, true)).error).toBeDefined();
+    expect((await catalog.load('openai', key)).error).toBeDefined(); expect(loader).toHaveBeenCalledTimes(3);
+  });
+});

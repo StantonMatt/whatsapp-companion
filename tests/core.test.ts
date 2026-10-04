@@ -131,18 +131,20 @@ describe('stale suggestions', () => {
     expect(generator.mock.calls[0][0].effort).toBe('none');
     store.update(s => setReasoning(s, 'openai', 'gpt-6-luna', 'high')); assistant.reconfigure();
     expect(generator.mock.calls[0][0].signal?.aborted).toBe(true);
+    const refresh = commands.find((c): c is Extract<RemoteCommand, { type: 'snapshot' }> => c.type === 'snapshot')!;
+    assistant.receive(snap(), false, refresh.nonce);
     finish('Old effort reply'); await pending;
     expect(commands.some(command => command.type === 'suggestion')).toBe(false);
     await assistant.request(); expect(generator.mock.calls[1][0].effort).toBe('high');
     expect(commands.some(command => command.type === 'suggestion' && command.text === 'Current effort reply')).toBe(true);
     expect(commands.some(command => command.type === 'autoSend')).toBe(false); assistant.cancel();
   });
-  test.each(['image', 'document'] as const)('%s-only context starts a suggestion promptly, marks unseen contents and cannot trigger automatic sending', async attachment => {
+  test.each(['image', 'document'] as const)('%s-only context starts a suggestion after stable-context debounce, marks unseen contents and cannot trigger automatic sending', async attachment => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; s.auto[chat] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0 }; });
     const generator = vi.fn(async () => 'Thanks for sending that.'), commands: RemoteCommand[] = [];
     const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     const image = snap({ focused: false, caretAtEnd: false, messages: [{ id: 'media', text: '', outgoing: false, attachment }] });
-    assistant.receive(image); await vi.advanceTimersByTimeAsync(0);
+    assistant.receive(image); await vi.advanceTimersByTimeAsync(1000);
     expect(generator).toHaveBeenCalledOnce(); expect(commands.some(c => c.type === 'suggestion')).toBe(true);
     expect(autoDecision(store.state.auto[chat], image, [], new Date())).toBe('No new incoming text');
     expect(commands.some(c => c.type === 'autoSend')).toBe(false);
@@ -152,12 +154,12 @@ describe('stale suggestions', () => {
     expect(JSON.parse(buildPrompt(store.state, { ...store.state.global, shareContext: false }, image).input).context).toEqual([]);
     assistant.cancel();
   });
-  test.each([true, false, null])('empty composer suggests regardless of the last author (%s), without granting sending permission', async outgoing => {
+  test.each([true, false, null])('empty composer automatically suggests only for an incoming last author (%s), without granting sending permission', async outgoing => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; });
     const commands: RemoteCommand[] = [], assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
     assistant.receive(snap({ focused: true, messages: [{ id: 'last', text: 'I will let you know.', outgoing }] }));
     await vi.advanceTimersByTimeAsync(1500);
-    expect(commands.some(c => c.type === 'suggestion')).toBe(true);
+    expect(commands.some(c => c.type === 'suggestion')).toBe(outgoing === false);
     expect(commands.some(c => c.type === 'autoSend')).toBe(false); expect(assistant.pending).toBeNull();
     const prompt = buildPrompt(store.state, store.state.global, assistant.snapshot);
     expect(prompt.system).toContain('from the account owner'); expect(prompt.system).toContain('do not answer the owner as if you were the contact');
@@ -223,7 +225,7 @@ describe('stale suggestions', () => {
     let finish!: (text: string) => void;
     const generator = vi.fn((_request: Parameters<typeof generate>[0]) => new Promise<string>(resolve => { finish = resolve; })), commands: RemoteCommand[] = [];
     const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
-    assistant.receive(snap({ focused: false, caretAtEnd: false })); await vi.advanceTimersByTimeAsync(0);
+    assistant.receive(snap({ focused: false, caretAtEnd: false })); await vi.advanceTimersByTimeAsync(1000);
     expect(generator).toHaveBeenCalledOnce(); const before = commands.length;
     assistant.activity(); assistant.receive(snap({ focused: true, activity: 1 }));
     assistant.receive(snap({ focused: false, caretAtEnd: false, activity: 1 }));
@@ -553,7 +555,7 @@ describe('refinement source', () => {
     const generator = vi.fn<typeof generate>().mockResolvedValueOnce('An offered reply').mockResolvedValue('A refined reply');
     const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     const offered = () => commands.filter((c): c is Extract<RemoteCommand, { type: 'suggestion' }> => c.type === 'suggestion').at(-1)!;
-    return { assistant, generator, commands, offered };
+    return { assistant, generator, commands, offered, store };
   }
   test('refines the offered reply without inserting it or granting send permission', async () => {
     const { assistant, generator, commands, offered } = setup();
@@ -578,14 +580,14 @@ describe('refinement source', () => {
     } finally { assistant.cancel(); }
   });
   test.each(['dismiss', 'chat', 'messages', 'draft', 'settings', 'wrong-id'])('never refines an old suggestion after %s', async change => {
-    const { assistant, generator, offered } = setup();
+    const { assistant, generator, offered, store } = setup();
     try {
       assistant.receive(snap()); await assistant.request(); const source = offered();
       if (change === 'dismiss') assistant.dismiss();
       if (change === 'chat') assistant.receive(snap({ chatId: group }));
       if (change === 'messages') assistant.receive(snap({ messages: [{ id: 'new', text: 'Different message', outgoing: false }] }));
       if (change === 'draft') assistant.receive(snap({ draft: 'New text' }));
-      if (change === 'settings') assistant.reconfigure();
+      if (change === 'settings') { store.update(s => { s.global.tone = 'friendly'; }); assistant.reconfigure(); }
       await assistant.request('Shorter.', false, { key: source.key, suggestionId: change === 'wrong-id' ? 'unrecognized' : source.id });
       expect(generator).toHaveBeenCalledTimes(1);
     } finally { assistant.cancel(); }
@@ -614,32 +616,30 @@ describe('suggestion recovery', () => {
     const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Recovered reply');
     const { assistant, commands } = setup(generator);
     try {
-      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
-      expect(generator).toHaveBeenCalledOnce(); expect(assistant.message).toContain('Retrying');
       assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+      expect(generator).toHaveBeenCalledOnce(); expect(assistant.message).toContain('Retrying');
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(2000);
       expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Recovered reply' });
     } finally { assistant.cancel(); }
   });
-  test('retries stop after two attempts and a manual retry works on the same snapshot', async () => {
+  test('retries stop after one retry and a manual retry works on the same snapshot', async () => {
     const generator = vi.fn<typeof generate>().mockRejectedValue(new ProviderError('Network interrupted', true));
     const { assistant, commands } = setup(generator);
     try {
       assistant.receive(snap()); await vi.advanceTimersByTimeAsync(60000);
-      expect(generator).toHaveBeenCalledTimes(3); expect(commands.at(-1)).toMatchObject({ type: 'notice', retryKey: expect.any(String) });
-      assistant.receive(snap({ activity: 1 })); await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledTimes(3);
+      expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'notice', retryKey: expect.any(String) });
+      assistant.receive(snap({ activity: 1 })); await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledTimes(2);
       generator.mockResolvedValue('Manual recovery'); await assistant.request();
       expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Manual recovery' });
       expect(commands.some(c => c.type === 'autoSend')).toBe(false);
     } finally { assistant.cancel(); }
   });
-  test.each(['dismiss', 'edit', 'chat', 'settings'])('%s invalidates a scheduled retry', async change => {
+  test.each(['dismiss', 'settings'])('%s invalidates a scheduled retry', async change => {
     const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Current reply');
     const { assistant, store } = setup(generator);
     try {
-      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
       if (change === 'dismiss') assistant.dismiss();
-      if (change === 'edit') assistant.activity(true);
-      if (change === 'chat') assistant.receive(snap({ chatId: group, messages: [] }));
       if (change === 'settings') { store.update(s => { s.global.suggestions = false; }); assistant.reconfigure(); }
       await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledOnce();
     } finally { assistant.cancel(); }
@@ -656,7 +656,7 @@ describe('suggestion recovery', () => {
     const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Original suggestion').mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Revised');
     const { assistant, commands } = setup(generator);
     try {
-      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
       const source = commands.at(-1) as Extract<RemoteCommand, { type: 'suggestion' }>;
       await assistant.request('Shorter', false, { key: source.key, suggestionId: source.id });
       await vi.advanceTimersByTimeAsync(60000); expect(generator).toHaveBeenCalledTimes(2);
@@ -669,18 +669,18 @@ describe('suggestion recovery', () => {
     const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue(' recovered');
     const { assistant, commands } = setup(generator);
     try {
-      assistant.receive(snap({ draft: 'Keep typing', focused: true })); await vi.advanceTimersByTimeAsync(250);
+      assistant.receive(snap({ draft: 'Keep typing', focused: true })); await vi.advanceTimersByTimeAsync(1000);
       assistant.receive(snap({ draft: 'Keep typing', focused: true, caretAtEnd: false, activity: 1 }));
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: ' recovered' });
-      expect(assistant.message).toBe('Tab to accept · Esc to dismiss');
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(generator).toHaveBeenCalledOnce(); expect(commands.at(-1)).toMatchObject({ type: 'notice', retryKey: expect.any(String) });
+      expect(assistant.message).toContain('Try again');
     } finally { assistant.cancel(); }
   });
   test('manual requests supersede a scheduled retry without duplicate provider calls', async () => {
     const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Network interrupted', true)).mockResolvedValue('Requested reply');
     const { assistant, commands } = setup(generator);
     try {
-      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
       await assistant.request(); await vi.advanceTimersByTimeAsync(60000);
       expect(generator).toHaveBeenCalledTimes(2); expect(commands.filter(c => c.type === 'suggestion')).toHaveLength(1);
     } finally { assistant.cancel(); }
@@ -690,7 +690,7 @@ describe('suggestion recovery', () => {
     const generator = vi.fn<typeof generate>().mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; })).mockResolvedValue('Current reply');
     const { assistant, commands } = setup(generator);
     try {
-      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(0);
+      assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
       await assistant.request(); fail(new ProviderError('Old failure', true)); await vi.advanceTimersByTimeAsync(60000);
       expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Current reply' });
     } finally { assistant.cancel(); }

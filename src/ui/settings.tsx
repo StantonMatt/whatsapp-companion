@@ -92,7 +92,7 @@ function ModelPicker({ provider, value, available, act }: { provider: Provider; 
   useEffect(() => {
     let current = true;
     setResult({ models: [] }); setLoading(available);
-    if (available) void window.companion.models(provider).then(next => {
+    if (available) void window.companion.models(provider, refresh > 0).then(next => {
       if (current) setResult(next.cancelled ? { models: [], error: 'Model list changed. Refresh to load it again.' } : next);
     }).catch(() => { if (current) setResult({ models: [], error: 'Unable to load models. Try refreshing.' }); })
       .finally(() => { if (current) setLoading(false); });
