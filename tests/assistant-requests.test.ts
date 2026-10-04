@@ -3,6 +3,8 @@ import { emptySnapshot, initialState, defaultAuto, type Snapshot, type State } f
 import { Conversations } from '../src/main/conversations';
 import { Assistant } from '../src/main/assistant';
 import { suggestionKey } from '../src/core/suggestions';
+import { resetStylePreferences, setPreferences } from '../src/core/settings';
+import { learnStyle } from '../src/core/style';
 import { ProviderError, type generate } from '../src/main/providers';
 import type { Store } from '../src/main/store';
 import type { Vault } from '../src/main/vault';
@@ -15,13 +17,14 @@ function setup(generator = vi.fn<typeof generate>().mockResolvedValue('Reply')) 
   const state = initialState(); state.global.suggestions = true; state.global.shareContext = true;
   const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
   const commands: RemoteCommand[] = [];
-  const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+  const changed = vi.fn(() => {});
+  const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, changed, false, generator);
   const fresh = (snapshot = assistant.snapshot) => {
     const command = commands.filter((c): c is Extract<RemoteCommand, { type: 'snapshot' }> => c.type === 'snapshot').at(-1)!;
     assistant.receive(snapshot, false, command.nonce);
   };
   const offer = () => commands.filter((c): c is Extract<RemoteCommand, { type: 'suggestion' }> => c.type === 'suggestion').at(-1)!;
-  return { assistant, generator, commands, state, store, fresh, offer };
+  return { assistant, generator, commands, state, store, fresh, offer, changed };
 }
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -285,6 +288,214 @@ describe.each(['chat override', 'global inherited change'])('conversation-scoped
   });
 });
 
+describe('learning from the current snapshot on settings changes', () => {
+  const history = Array.from({ length: 5 }, (_, i) => ({ id: `own-${i}`, text: 'An owner style sample', outgoing: true }));
+
+  test.each(['global', a])('enabling automatic learning via %s immediately publishes a profile without requesting', async scope => {
+    const { assistant, state, generator, commands, changed } = setup();
+    state.global.style = 'conversation'; assistant.receive(snap({ messages: history }));
+    let published: State['profiles'] = {};
+    changed.mockImplementation(() => { published = structuredClone(state.profiles); });
+    const before = commands.length;
+    setPreferences(state, scope, { learnFromSent: true }); assistant.reconfigure();
+    expect(published[a]).toMatchObject({ source: 'observed', samples: 5 });
+    expect(state.profiles[a]).toEqual(published[a]);
+    expect(commands).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(5000); expect(generator).not.toHaveBeenCalled(); assistant.cancel();
+  });
+
+  test.each([false, true])('reset and re-enable immediately publishes the replacement (refresh acknowledged: %s)', async acknowledge => {
+    const { assistant, state, generator, changed, fresh } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    state.profiles[a] = learnStyle(history.map(m => m.text), 'selected')!;
+    assistant.receive(snap({ messages: history }));
+    let published: State['profiles'] = {};
+    changed.mockImplementation(() => { published = structuredClone(state.profiles); });
+    delete state.profiles[a]; setPreferences(state, a, { learnFromSent: false }); assistant.reconfigure();
+    expect(published[a]).toBeUndefined(); if (acknowledge) fresh();
+    setPreferences(state, a, { learnFromSent: true }); assistant.reconfigure();
+    expect(published[a]).toMatchObject({ source: 'observed', samples: 5 });
+    await vi.advanceTimersByTimeAsync(5000); expect(generator).not.toHaveBeenCalled(); assistant.cancel();
+  });
+
+  test.each(['off', 'conversation'] as const)('explicit Learn from this chat publishes a selected profile while style is %s', async style => {
+    const { assistant, state, store, generator, commands, changed } = setup();
+    state.global.style = style; state.global.learnFromSent = true;
+    assistant.receive(snap({ messages: history }));
+    let published: State['profiles'] = {};
+    changed.mockImplementation(() => { published = structuredClone(state.profiles); });
+    const before = commands.length;
+    // The main-process learn action saves locally, then reconfigures as learning.
+    store.update(s => { s.profiles[a] = learnStyle(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text), 'selected')!; });
+    assistant.reconfigure({ learning: true });
+    expect(published[a]).toMatchObject({ source: 'selected', samples: 5 });
+    expect(commands).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(5000); expect(generator).not.toHaveBeenCalled(); assistant.cancel();
+  });
+
+  test.each(['scope change', 'restore inheritance'])('%s observes the current history before an output refresh returns', async change => {
+    const { assistant, state, generator, changed } = setup();
+    state.global.learnFromSent = true;
+    if (change === 'restore inheritance') { state.global.style = 'conversation'; state.chats[a] = { style: 'off' }; }
+    assistant.receive(snap({ messages: history }));
+    let published: State['profiles'] = {};
+    changed.mockImplementation(() => { published = structuredClone(state.profiles); });
+    if (change === 'restore inheritance') resetStylePreferences(state, a);
+    else setPreferences(state, a, { style: 'conversation' });
+    assistant.reconfigure();
+    expect(published[a]).toMatchObject({ source: 'observed', samples: 5 });
+    await vi.advanceTimersByTimeAsync(5000); expect(generator).not.toHaveBeenCalled(); assistant.cancel();
+  });
+
+  test('a reset clears previously accumulated samples instead of relearning unloaded history', () => {
+    const { assistant, state, fresh } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    assistant.receive(snap({ messages: history }));
+    assistant.receive(snap({ messages: history.slice(-1) }));
+    delete state.profiles[a]; setPreferences(state, a, { learnFromSent: false }); assistant.reconfigure(); fresh();
+    setPreferences(state, a, { learnFromSent: true }); assistant.reconfigure();
+    expect(state.profiles[a]).toBeUndefined(); assistant.cancel();
+  });
+
+  test.each(['other chat', 'provider', 'model', 'tone', 'style scope', 'navigation'])('%s keeps unloaded samples and the saved profile', change => {
+    const { assistant, state, fresh } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    const more = Array.from({ length: 5 }, (_, i) => ({ id: `more-${i}`, text: 'A different longer message with punctuation!', outgoing: true }));
+    assistant.receive(snap({ messages: history }));
+    assistant.receive(snap({ messages: more }));
+    const saved = structuredClone(state.profiles[a]);
+    expect(saved.samples).toBe(10);
+    if (change === 'other chat') setPreferences(state, b, { tone: 'friendly' });
+    if (change === 'provider') state.provider = 'anthropic';
+    if (change === 'model') state.models.openai = 'gpt-6-sol';
+    if (change === 'tone') state.global.tone = 'friendly';
+    if (change === 'style scope') setPreferences(state, a, { style: 'general' });
+    if (change === 'navigation') { assistant.suspend(); assistant.refresh(true); fresh(snap({ messages: more })); }
+    else assistant.reconfigure();
+    expect(state.profiles[a]).toEqual(saved);
+    if (change === 'style scope') { setPreferences(state, a, { style: 'conversation' }); assistant.reconfigure(); }
+    const next = snap({ messages: [...more, { id: 'extra', text: 'One more usable sample', outgoing: true }] });
+    if (change === 'other chat') assistant.receive(next); else fresh(next);
+    expect(state.profiles[a].samples).toBe(11); assistant.cancel();
+  });
+
+  test('observation after restart cannot replace a saved profile with fewer usable samples', () => {
+    const { assistant, state } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    const saved = learnStyle(Array.from({ length: 10 }, () => 'A saved message!'), 'observed')!;
+    state.profiles[a] = saved;
+    // The count must use styleSamples filtering, not the raw observed map size.
+    const unusable = Array.from({ length: 10 }, (_, i) => ({ id: `short-${i}`, text: 'ok', outgoing: true }));
+    assistant.receive(snap({ messages: [...history, ...unusable] }));
+    expect(state.profiles[a]).toEqual(saved);
+    assistant.reconfigure(); expect(state.profiles[a]).toEqual(saved); assistant.cancel();
+  });
+
+  test.each(['reset', 'disable'])('%s clears only the target chat, including an inactive chat', action => {
+    const { assistant, state } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    const ten = Array.from({ length: 10 }, (_, i) => ({ id: `old-${i}`, text: 'Previously loaded sample', outgoing: true }));
+    assistant.receive(snap({ messages: ten }));
+    assistant.receive(snap({ chatId: b, settingsId: b, messages: ten }));
+    assistant.receive(snap({ messages: ten.slice(-1) }));
+    if (action === 'reset') delete state.profiles[b];
+    else setPreferences(state, b, { learnFromSent: false });
+    assistant.reconfigure();
+    // Adding a sample proves A retained its unloaded history, even with the
+    // monotonic saved-profile guard in place.
+    assistant.receive(snap({ messages: [{ id: 'a-extra', text: 'One more sample for A', outgoing: true }] }));
+    expect(state.profiles[a].samples).toBe(11);
+    if (action === 'disable') { setPreferences(state, b, { learnFromSent: true }); assistant.reconfigure(); }
+    const replacement = Array.from({ length: 11 }, (_, i) => ({ id: `new-${i}`, text: 'Replacement sample', outgoing: true }));
+    assistant.receive(snap({ chatId: b, settingsId: b, messages: replacement }));
+    expect(state.profiles[b].samples).toBe(11); assistant.cancel();
+  });
+
+  test('global disable clears inheriting chats while retaining explicitly enabled chat samples', () => {
+    const { assistant, state } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    setPreferences(state, b, { learnFromSent: true });
+    const ten = Array.from({ length: 10 }, (_, i) => ({ id: `old-${i}`, text: 'Previously loaded sample', outgoing: true }));
+    assistant.receive(snap({ messages: ten }));
+    assistant.receive(snap({ chatId: b, settingsId: b, messages: ten }));
+    assistant.receive(snap({ messages: ten.slice(-1) }));
+    setPreferences(state, 'global', { learnFromSent: false }); assistant.reconfigure();
+    assistant.receive(snap({ chatId: b, settingsId: b, messages: [{ id: 'b-extra', text: 'One extra sample', outgoing: true }] }));
+    expect(state.profiles[b].samples).toBe(11);
+    setPreferences(state, 'global', { learnFromSent: true }); assistant.reconfigure();
+    const replacement = Array.from({ length: 11 }, (_, i) => ({ id: `new-${i}`, text: 'Replacement sample', outgoing: true }));
+    assistant.receive(snap({ messages: replacement }));
+    expect(state.profiles[a].samples).toBe(11); assistant.cancel();
+  });
+
+  test('a failed reconfigure profile write cancels queued automatic work and still refreshes and publishes', async () => {
+    const { assistant, state, store, commands, changed, fresh, generator } = setup();
+    state.global.style = 'conversation';
+    state.auto[a] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0 };
+    assistant.receive(snap({ messages: history }));
+    assistant.receive(snap({ atBottom: true, messages: [...history, ...snap().messages] }));
+    await vi.advanceTimersByTimeAsync(1000); expect(assistant.pending).not.toBeNull();
+    const signal = generator.mock.calls[0][0].signal;
+    const before = commands.length; changed.mockClear();
+    const write = vi.spyOn(store, 'update').mockImplementationOnce(() => {
+      expect(assistant.pending).toBeNull(); expect(signal?.aborted).toBe(true);
+      throw new Error('profile write failed');
+    });
+    setPreferences(state, a, { learnFromSent: true, tone: 'friendly' });
+    expect(() => assistant.reconfigure()).toThrow('profile write failed');
+    expect(commands.slice(before).some(c => c.type === 'snapshot')).toBe(true);
+    expect(changed).toHaveBeenCalled(); expect(assistant.pending).toBeNull();
+    write.mockRestore(); await vi.advanceTimersByTimeAsync(40000);
+    expect(commands.some(c => c.type === 'autoSend')).toBe(false);
+    fresh(); await vi.advanceTimersByTimeAsync(1000);
+    expect(state.profiles[a].samples).toBe(5);
+    expect(commands.some(c => c.type === 'autoSend')).toBe(false); assistant.cancel();
+  });
+
+  test.each([false, true])('a failed receive profile write still settles scheduling/status (composing: %s)', async composing => {
+    const { assistant, state, store, changed, generator } = setup();
+    state.global.style = 'conversation'; state.global.learnFromSent = true;
+    vi.spyOn(store, 'update').mockImplementationOnce(() => { throw new Error('profile write failed'); });
+    expect(() => assistant.receive(snap({ messages: [...history, ...snap().messages], composing }))).toThrow('profile write failed');
+    expect(changed).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(generator).toHaveBeenCalledTimes(composing ? 0 : 1); assistant.cancel();
+  });
+
+  test.each(['unready', 'suspended'])('enabling learning cannot observe an %s snapshot', async phase => {
+    const { assistant, state, generator } = setup();
+    state.global.style = 'conversation'; assistant.receive(snap({ messages: history, ready: phase !== 'unready' }));
+    if (phase === 'suspended') assistant.suspend();
+    setPreferences(state, a, { learnFromSent: true }); assistant.reconfigure();
+    expect(state.profiles[a]).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(5000); expect(generator).not.toHaveBeenCalled(); assistant.cancel();
+  });
+
+  test.each(['debounce', 'running', 'retry', 'offered', 'dismissed'])('learning-only changes preserve %s work and its request count', async phase => {
+    let complete!: (text: string) => void;
+    const generator = phase === 'running' ? vi.fn<typeof generate>(() => new Promise(resolve => { complete = resolve; })) : vi.fn<typeof generate>().mockResolvedValue('Reply');
+    if (phase === 'retry') generator.mockRejectedValueOnce(new ProviderError('Transient', true));
+    const { assistant, state, commands, offer } = setup(generator);
+    state.global.style = 'conversation';
+    const saved = snap({ messages: [...history, ...snap().messages] }); assistant.receive(saved);
+    await vi.advanceTimersByTimeAsync(phase === 'debounce' ? 500 : 1000);
+    if (phase === 'dismissed') assistant.dismiss();
+    const before = commands.length, message = assistant.message;
+    setPreferences(state, a, { learnFromSent: true }); assistant.reconfigure();
+    expect(state.profiles[a]).toMatchObject({ source: 'observed', samples: 5 });
+    expect(commands).toHaveLength(before); expect(assistant.message).toBe(message);
+    if (phase === 'running') {
+      expect(generator.mock.calls[0][0].signal?.aborted).toBe(false); complete('Reply');
+    }
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(generator).toHaveBeenCalledTimes(phase === 'retry' ? 2 : 1);
+    if (phase !== 'dismissed') expect(offer()).toMatchObject({ text: 'Reply' });
+    assistant.receive(snap({ chatId: b, settingsId: b, messages: [] })); assistant.receive({ ...saved, revision: 'revisited' });
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(generator).toHaveBeenCalledTimes(phase === 'retry' ? 2 : 1); assistant.cancel();
+  });
+});
+
 describe('learning keeps every request record stable', () => {
   test.each(['reply', 'dismissal', 'continuation', 'draft dismissal', 'applied refinement'])('replacing a general fallback preserves %s', async entry => {
     const generator = vi.fn<typeof generate>();
@@ -453,6 +664,32 @@ describe('automatic-send settings preserve inline assistance (A6)', () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(generator).toHaveBeenCalledOnce(); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Reply' }); assistant.cancel();
     });
+  });
+});
+
+describe('automatic setting writes fail safely', () => {
+  test.each(['rules', 'enable', 'pause', 'disable', 'resume'] as const)('%s cancels before writing and settles status even when persistence fails', async transition => {
+    const { assistant, state, store, commands, changed, generator } = setup();
+    state.global.suggestions = false;
+    state.auto[a] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0 };
+    assistant.receive(snap({ atBottom: true }));
+    assistant.receive(snap({ atBottom: true, messages: [{ id: 'new', text: 'New question', outgoing: false }] }));
+    await vi.advanceTimersByTimeAsync(1000); expect(assistant.pending).not.toBeNull();
+    const signal = generator.mock.calls[0][0].signal;
+    changed.mockClear();
+    const write = vi.spyOn(store, 'update').mockImplementationOnce(() => {
+      expect(signal?.aborted).toBe(true); expect(assistant.pending).toBeNull();
+      throw new Error('settings write failed');
+    });
+    const change = () => transition === 'rules' ? assistant.updateAutoRules(a, { delaySeconds: 15 }) : assistant.changeAutoPermission(a, transition);
+    expect(change).toThrow('settings write failed');
+    expect(changed).toHaveBeenCalled();
+    expect(assistant.isRuntimePaused()).toBe(transition === 'pause' || transition === 'disable');
+    write.mockRestore();
+    assistant.receive({ ...assistant.snapshot, activity: 1 });
+    await vi.advanceTimersByTimeAsync(40000);
+    expect(commands.some(c => c.type === 'autoSend')).toBe(false);
+    expect(generator).toHaveBeenCalledOnce(); assistant.cancel();
   });
 });
 

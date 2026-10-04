@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { emptySnapshot, defaultAuto, type Snapshot, type Status, type AutoPatch, type AutoPermission, type Provider, type ChatKind } from '../shared/model';
+import { emptySnapshot, defaultAuto, type Snapshot, type Status, type AutoPatch, type AutoPermission, type Provider, type ChatKind, type Preferences } from '../shared/model';
 import type { Connector } from '../shared/connector';
 import { resolveSettings } from '../core/settings';
 import { SuggestionGate, snapshotKey, suggestionKey } from '../core/suggestions';
@@ -210,7 +210,7 @@ export class Assistant {
     }
     this.armTimer();
   }
-  private observed = new Map<string, Map<string, string>>();
+  private observed = new Map<string, { samples: Map<string, string>; hasProfile: boolean }>();
   constructor(private store: Store, private vault: Vault, private connector: Connector, private onChanged: () => void, private fixture: boolean, private generator: typeof generate = generate) { this.activeConfiguration = this.activeConfigurationKey(); }
   cancel(abortEmpty = false) {
     const hadLive = Boolean(this.live);
@@ -227,6 +227,30 @@ export class Assistant {
   private activeConfigurationKey(learning = false) {
     return JSON.stringify([this.outputConfiguration(this.snapshot, learning), resolveSettings(this.store.state, this.snapshot.kind, this.chatIdentity()).values.suggestions]);
   }
+  /** Local observation is independent of suggestion eligibility and refreshes. */
+  private observeStyle() {
+    const next = this.snapshot, settingsId = this.chatIdentity(next);
+    if (this.suspended || !next.ready || !settingsId) return;
+    const preferences = resolveSettings(this.store.state, next.kind, settingsId).values;
+    if (!preferences.learnFromSent || preferences.style !== 'conversation') return;
+    const observation = this.observed.get(settingsId) ?? { samples: new Map<string, string>(), hasProfile: false };
+    const { samples } = observation;
+    next.messages.filter(m => m.outgoing && m.text).forEach(m => samples.set(m.id, m.text));
+    while (samples.size > 100) samples.delete(samples.keys().next().value!);
+    this.observed.set(settingsId, observation);
+    // Explicitly edited/selected profiles are never silently replaced.
+    const existing = this.store.state.profiles[settingsId];
+    observation.hasProfile = Boolean(existing);
+    if (!existing || existing.source === 'observed') {
+      const profile = learnStyle([...samples.values()], 'observed');
+      if (profile && profile.samples >= (existing?.samples ?? 0) &&
+          (profile.samples !== existing?.samples || profile.description !== existing?.description)) {
+        this.store.update(s => { s.profiles[settingsId] = profile; });
+        this.outputConfiguration(next, true);
+      }
+    }
+    observation.hasProfile = Boolean(this.store.state.profiles[settingsId]);
+  }
   reconfigure(options: { keyProvider?: Provider; learning?: boolean; autoRules?: boolean } = {}) {
     if (options.keyProvider) { this.keyVersions[options.keyProvider]++; this.abortEmpty(options.keyProvider); }
     // Invalidate only entries whose effective output settings changed, including
@@ -239,18 +263,30 @@ export class Assistant {
     const activeConfiguration = this.activeConfigurationKey(options.learning);
     const affectsOutput = activeConfiguration !== this.activeConfiguration;
     this.activeConfiguration = activeConfiguration;
-    if (!affectsOutput && !options.autoRules) { this.reconcileLive(); return; }
-    if (affectsOutput) this.cancel();
-    else this.cancelAutomatic();
-    this.baseline = this.snapshot.messages.at(-1)?.id; this.fresh = undefined;
-    if (affectsOutput) this.refresh();
-    this.reconcileLive();
+    // Retain unloaded samples across unrelated edits. Effective learning settings
+    // respect per-chat overrides, so global disable clears only inheriting chats.
+    for (const [id, observation] of this.observed) {
+      if (!resolveSettings(this.store.state, 'unknown', id).values.learnFromSent ||
+          (observation.hasProfile && !this.store.state.profiles[id])) this.observed.delete(id);
+    }
+    const requiresCancellation = affectsOutput || options.autoRules;
+    if (requiresCancellation) {
+      if (affectsOutput) this.cancel();
+      else this.cancelAutomatic();
+      this.baseline = this.snapshot.messages.at(-1)?.id; this.fresh = undefined;
+    }
+    // Learning writes cannot keep stale automatic work alive or skip refresh.
+    try { this.observeStyle(); }
+    finally {
+      if (affectsOutput) this.refresh();
+      this.changed();
+    }
   }
   private cancelAutomatic() { if (this.automatic || this.attempt || this.pending) this.cancel(); }
   /** Drop navigation/crash state; never process the old document's snapshot again. */
   suspend() {
     this.cancel(true); this.clearTransient(); this.snapshot = emptySnapshot; this.suspended = true; this.refreshNonce = undefined;
-    this.baseline = undefined; this.fresh = undefined; this.observed.clear(); this.changed();
+    this.baseline = undefined; this.fresh = undefined; this.changed();
   }
   refresh(documentLoaded = false) {
     if (this.suspended && !documentLoaded) return;
@@ -263,11 +299,13 @@ export class Assistant {
   }
   updateAutoRules(chatId: string, patch: AutoPatch) {
     this.requireActiveChat(chatId);
-    this.store.update(s => {
-      const current = s.auto[chatId] ?? defaultAuto;
-      s.auto[chatId] = { ...current, ...patch, enabled: current.enabled, paused: current.paused || this.runtimePaused.has(chatId) };
-    });
-    this.reconfigure({ autoRules: true });
+    this.cancelAutomatic();
+    try {
+      this.store.update(s => {
+        const current = s.auto[chatId] ?? defaultAuto;
+        s.auto[chatId] = { ...current, ...patch, enabled: current.enabled, paused: current.paused || this.runtimePaused.has(chatId) };
+      });
+    } finally { this.reconfigure({ autoRules: true }); }
   }
   changeAutoPermission(chatId: string, permission: AutoPermission) {
     this.requireActiveChat(chatId);
@@ -275,15 +313,15 @@ export class Assistant {
     if (permission === 'resume' && !current.enabled) throw new Error('Enable automatic replies in this chat before resuming.');
     // A repeated enable is not a resume. Only a deliberate permission transition clears takeover.
     const arm = permission === 'resume' || (permission === 'enable' && !current.enabled);
-    if (permission === 'pause' || permission === 'disable') { this.runtimePaused.add(chatId); this.cancelAutomatic(); }
+    if (permission === 'pause' || permission === 'disable') this.runtimePaused.add(chatId);
+    this.cancelAutomatic();
     try {
       this.store.update(s => {
         s.auto[chatId] = { ...current, enabled: permission === 'disable' ? false : permission === 'enable' ? true : current.enabled,
           paused: arm ? false : permission === 'pause' || permission === 'disable' || current.paused || this.runtimePaused.has(chatId) };
       });
-    } catch (error) { this.changed(); throw error; }
-    if (arm) this.runtimePaused.delete(chatId);
-    this.reconfigure({ autoRules: true });
+      if (arm) this.runtimePaused.delete(chatId);
+    } finally { this.reconfigure({ autoRules: true }); }
   }
   isRuntimePaused() { return Boolean(this.snapshot.chatId && this.runtimePaused.has(this.snapshot.chatId)); }
   dismiss() {
@@ -355,21 +393,11 @@ export class Assistant {
     if (this.message === 'Open a conversation to use writing assistance.') this.message = 'Ready';
     const settingsId = next.settingsId ?? next.chatId;
     const preferences = resolveSettings(this.store.state, next.kind, settingsId).values;
-    if (settingsId && preferences.learnFromSent && preferences.style === 'conversation') {
-      const samples = this.observed.get(settingsId) ?? new Map<string, string>();
-      next.messages.filter(m => m.outgoing && m.text).forEach(m => samples.set(m.id, m.text));
-      while (samples.size > 100) samples.delete(samples.keys().next().value!);
-      this.observed.set(settingsId, samples);
-      // Explicitly edited/selected profiles are never silently replaced.
-      const existing = this.store.state.profiles[settingsId];
-      if (!existing || existing.source === 'observed') {
-        const profile = learnStyle([...samples.values()], 'observed');
-        if (profile && (profile.samples !== existing?.samples || profile.description !== existing?.description)) {
-          this.store.update(s => { s.profiles[settingsId] = profile; });
-          this.outputConfiguration(next, true);
-        }
-      }
-    }
+    try { this.observeStyle(); }
+    finally { this.completeSnapshot(next, preferences, previousIdentity !== this.recordIdentity() || !previous.ready ? 'open/revisit' : 'incoming message'); }
+  }
+  private completeSnapshot(next: Snapshot, preferences: Preferences, reason: RequestReason) {
+    const normalized = this.normalizeDraft(next.draft);
     const configuration = this.outputConfiguration(next);
     this.activeConfiguration = JSON.stringify([configuration, preferences.suggestions]);
     if (next.composing || next.draftIssue) { if (next.draftIssue) this.message = this.draftIssueMessage(next); this.changed(); return; }
@@ -394,7 +422,6 @@ export class Assistant {
           const pending = this.inFlight.get(key);
           if (pending) { this.live = pending; this.message = 'Thinking…'; }
           else if (this.inFlight.size < 5) {
-            const reason = previousIdentity !== this.recordIdentity() || !previous.ready ? 'open/revisit' : 'incoming message';
             this.schedule(() => { void this.request(undefined, false, undefined, 0, reason); }, this.inlineSignature());
           }
         }
