@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { actionSchema, snapshotSchema, discoveredStickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
-import { accountSafetyEventSchema, type AccountSafetyReason } from '../shared/connector';
+import { accountSafetyEventSchema, displayAckSchema, dismissEventSchema, type AccountSafetyReason } from '../shared/connector';
 import { Store } from './store';
 import { Conversations } from './conversations';
 import { Vault, promptKey, configuredBackend } from './vault';
@@ -200,7 +200,7 @@ async function start() {
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
   const libraryMessage = () => stickerBlobErrors.values().next().value ?? stickerIntakeError ?? store.recoveryHint ?? (store.state.stickers.length >= MAX_LIBRARY_STICKERS || store.state.stickers.reduce((total, s) => total + s.size, 0) >= MAX_LIBRARY_BYTES ? 'Sticker library is full' : undefined);
-  const status = (): Status => ({ sequence, panel, stickerLibraryError: libraryMessage(), stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  const status = (): Status => ({ sequence, panel, stickerLibraryError: libraryMessage(), stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing && !m.directionFallback).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   let lastMakerDiagnostic: Status['stickerSend'];
   const recordStickerSend = () => {
     const send = stickerTransfer.send;
@@ -489,7 +489,7 @@ async function start() {
         case 'learn': {
           if (!action.examples.trim() && (!assistant.snapshot.ready || !action.sourceChatId || action.sourceChatId !== assistant.snapshot.settingsId)) throw new Error('This conversation changed. Reopen Style and try again.');
           if (action.scope !== 'general' && action.scope !== assistant.snapshot.settingsId) throw new Error('Open this conversation to learn its style.');
-          const examples = action.examples.trim() ? action.examples.split('\n') : assistant.snapshot.messages.filter(m => m.outgoing).map(m => m.text);
+          const examples = action.examples.trim() ? action.examples.split('\n') : assistant.snapshot.messages.filter(m => m.outgoing && !m.directionFallback).map(m => m.text);
           const profile = learnStyle(examples, 'selected');
           if (!profile) throw new Error(action.examples.trim() ? `Add at least ${minimumStyleSamples} messages with three or more characters, one per line.` : `Only ${styleSamples(examples).length} usable sent messages are loaded. Scroll up in WhatsApp to load more; at least ${minimumStyleSamples} are needed.`);
           store.update(s => { s.profiles[action.scope] = profile; }); assistant.reconfigure({ learning: true }); break;
@@ -658,7 +658,8 @@ async function start() {
         case 'cancelAuto': assistant.activity(); break;
         case 'activity': { const v = z.object({ type: z.literal('activity'), editing: z.boolean().optional() }).strict().safeParse(raw); if (v.success) assistant.activity(v.data.editing); break; }
         case 'applied': { const v = z.object({ type: z.literal('applied'), key: z.string().max(1_000_000), suggestionId: z.string().uuid(), success: z.boolean().optional() }).strict().safeParse(raw); if (v.success) assistant.applied(v.data); break; }
-        case 'dismiss': assistant.dismiss(); break;
+        case 'displayAck': { const v = displayAckSchema.safeParse(raw); if (v.success) assistant.displayAck(v.data); break; }
+        case 'dismiss': { const v = dismissEventSchema.safeParse(raw); if (v.success) assistant.dismiss(v.data); break; }
         case 'request': { const v = z.object({ type: z.literal('request'), instruction: z.string().max(1000).optional(), operation: z.enum(['translate', 'retry']).optional(), key: z.string().max(1_000_000).optional(), suggestionId: z.string().uuid().optional() }).strict().safeParse(raw); if (v.success) void assistant.request(v.data.instruction, false, v.data); break; }
         case 'result': { const v = z.object({ type: z.literal('result'), nonce: z.string().uuid(), sent: z.boolean() }).strict().safeParse(raw); if (v.success) assistant.result(v.data.nonce, v.data.sent); break; }
         case 'sticker': {

@@ -1,21 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { emptySnapshot, defaultAuto, type Snapshot, type Status, type AutoPatch, type AutoPermission, type Provider, type ChatKind, type Preferences } from '../shared/model';
-import type { Connector } from '../shared/connector';
+import type { Connector, displayAckSchema } from '../shared/connector';
+import type { z } from 'zod';
 import { resolveSettings } from '../core/settings';
 import { SuggestionGate, snapshotKey, suggestionKey } from '../core/suggestions';
 import { autoDecision, autoSendExpiry } from '../core/auto-reply';
 import { learnStyle, styleFor } from '../core/style';
 import { savedEffort } from '../core/model-policy';
 import { generate, buildPrompt, ProviderError } from './providers';
-import type { RequestReason } from './request-counts';
+import { countDecision, type DecisionReason, type RequestReason } from './request-counts';
 import type { Store } from './store';
 import type { Vault } from './vault';
 
 type RequestSource = { key?: string; suggestionId?: string; operation?: 'translate' | 'retry' };
 type InlineRequest = { operation: 'suggest' | 'continuation' | 'refine' | 'translate'; instruction?: string;
   draft: string; composerDraft: string; contextKey: string | undefined; reason: RequestReason };
-type Offer = { id: string; key: string; text: string; replace: boolean };
-type Live = { signature: string; controller: AbortController; request?: InlineRequest; offer?: Offer; error?: string;
+type Offer = { id: string; key: string; text: string; replace: boolean; displayAttempts?: number; displayed?: boolean };
+type Live = { id: string; signature: string; controller: AbortController; request?: InlineRequest; offer?: Offer; error?: string;
   due?: number; run?: () => void; running?: boolean; awaitingSnapshot?: boolean;
   deferred?: { text: string; replace: boolean } | { error: string } };
 type ConversationRecord = { kind: ChatKind; profile: string | null; generation: number; output: string; configuration: string };
@@ -45,9 +46,21 @@ export class Assistant {
   private keyVersions: Record<Provider, number> = { openai: 0, anthropic: 0 };
   private activeConfiguration?: string;
   private refreshNonce?: string;
+  private freshAfterTimeout = false;
+  private snapshotTimer?: ReturnType<typeof setTimeout>;
+  private displayRefresh?: { nonce: string; id: string };
+  private admission?: { signature: string; reason: RequestReason };
+  private dismissalTargets = new Map<string, { emptyKey?: string; identity: string; draft: string; work: Live }>();
+  private decisions = new Map<string, string>();
   private suspended = false;
   private transientId = `document:${randomUUID()}`;
   private recordIdentity(snapshot = this.snapshot) { return this.chatIdentity(snapshot) ?? this.transientId; }
+  private decision(reason?: DecisionReason, phase = 'admission', token = this.inlineSignature()) {
+    const value = JSON.stringify([token, reason]);
+    if (this.decisions.get(phase) === value) return;
+    this.decisions.set(phase, value);
+    if (reason) countDecision(reason);
+  }
   private clearTransient() {
     this.conversations.delete(this.transientId);
     this.requested.delete(this.transientId);
@@ -130,18 +143,66 @@ export class Assistant {
   private show(work: Live, text: string, replace: boolean) {
     work.error = undefined;
     work.offer = { id: randomUUID(), key: suggestionKey(this.snapshot), text, replace };
-    this.connector.send({ type: 'suggestion', ...work.offer });
+    this.sendOffer(work.offer, work);
     this.message = 'Tab to accept · Esc to dismiss';
+  }
+  private rememberDismissalTarget(id: string, work: Live) {
+    if (this.dismissalTargets.has(id)) return;
+    const draft = work.request?.composerDraft ?? this.snapshot.draft;
+    this.dismissalTargets.set(id, { emptyKey: !draft ? work.request?.contextKey ?? this.emptyKey() : undefined,
+      identity: this.recordIdentity(), draft: this.normalizeDraft(draft), work });
+    while (this.dismissalTargets.size > 50) this.dismissalTargets.delete(this.dismissalTargets.keys().next().value!);
+  }
+  private sendOffer(offer: Offer, work: Live) {
+    this.rememberDismissalTarget(offer.id, work);
+    // Send only protocol fields, never main-owned recovery metadata.
+    this.connector.send({ type: 'suggestion', id: offer.id, requestId: work.id, key: offer.key, text: offer.text, replace: offer.replace });
+  }
+  private sendPending(work: Live) {
+    this.rememberDismissalTarget(work.id, work);
+    this.connector.send({ type: work.request?.instruction ? 'refining' : 'thinking', key: suggestionKey(this.snapshot), requestId: work.id });
+  }
+  private sendNotice(work: Live, text: string, key = suggestionKey(this.snapshot)) {
+    this.rememberDismissalTarget(work.id, work);
+    this.connector.send({ type: 'notice', text, retryKey: key, requestId: work.id });
+  }
+  displayAck(source: z.infer<typeof displayAckSchema>) {
+    const offer = this.live?.offer;
+    if (!offer || offer.id !== source.suggestionId || offer.key !== source.key || this.suspended || this.refreshNonce) return;
+    offer.displayed = source.reason === 'displayed';
+    if (offer.displayed) {
+      offer.displayAttempts = 0;
+      if (this.displayRefresh?.id === offer.id) { this.displayRefresh = undefined; clearTimeout(this.snapshotTimer); }
+      this.decision(undefined, 'display', offer.id); this.changed(); return;
+    }
+    this.decision(`display_rejected_${source.reason}` as DecisionReason, 'display', offer.id);
+    // Acknowledgements only recover an existing main-owned result. They cannot
+    // request provider work or influence send authorization.
+    if (!this.displayRefresh && (offer.displayAttempts ?? 0) < 3) this.recoverDisplay(offer);
+    this.changed();
+  }
+  private recoverDisplay(offer: Offer) {
+    clearTimeout(this.snapshotTimer);
+    offer.displayAttempts = (offer.displayAttempts ?? 0) + 1;
+    const nonce = randomUUID(); this.displayRefresh = { nonce, id: offer.id };
+    this.snapshotTimer = setTimeout(() => {
+      if (this.live?.offer !== offer || this.displayRefresh?.nonce !== nonce) return;
+      this.displayRefresh = undefined;
+      if (offer.displayAttempts! < 3) this.recoverDisplay(offer);
+      this.changed();
+    }, 1000);
+    this.connector.send({ type: 'snapshot', nonce });
   }
   private publishLive() {
     const work = this.live;
     if (!work) return;
+    if (work.request && (work.running || work.run || work.deferred)) { this.sendPending(work); return; }
     if (work.offer) {
       work.offer.key = suggestionKey(this.snapshot);
-      this.connector.send({ type: 'suggestion', ...work.offer });
+      this.sendOffer(work.offer, work);
     }
     if (work.error && work.request)
-      this.connector.send({ type: 'notice', text: work.error, retryKey: suggestionKey(this.snapshot) });
+      this.sendNotice(work, work.error);
   }
   /** Every transition settles the view into scheduled, running, offered, failed,
    * deferred until a snapshot, or empty. A request alone is not pending work. */
@@ -156,7 +217,7 @@ export class Assistant {
       if ('text' in outcome) this.show(work, outcome.text, outcome.replace);
       else {
         work.error = outcome.error;
-        this.connector.send({ type: 'notice', text: outcome.error, retryKey: suggestionKey(this.snapshot) });
+        this.sendNotice(work, outcome.error);
       }
     }
     if (work && !work.running && !work.run && !work.offer && !work.error && !work.deferred) {
@@ -165,7 +226,7 @@ export class Assistant {
     if (work?.running || work?.deferred) this.message = 'Thinking…';
     else if (work?.run) this.message = work.request && !work.awaitingSnapshot ? 'Connection interrupted. Retrying suggestion…' : 'Ready';
     else if (work?.error) this.message = work.awaitingSnapshot ? 'Ready' : work.error;
-    else if (work?.offer) this.message = 'Tab to accept · Esc to dismiss';
+    else if (work?.offer) this.message = work.offer.displayed === false ? 'Ready' : 'Tab to accept · Esc to dismiss';
     else if (/^(Tab to accept|Thinking|Connection interrupted)/.test(this.message)) this.message = 'Ready';
   }
   private changed() { this.reconcileLive(); this.onChanged(); }
@@ -177,7 +238,7 @@ export class Assistant {
       this.live!.request ??= { operation: 'suggest', draft: '', composerDraft: this.snapshot.draft, contextKey: this.emptyKey(), reason: 'retry' };
       this.live!.offer = undefined;
       this.live!.error = this.message = 'Could not insert the suggestion. Try again.';
-      this.connector.send({ type: 'notice', text: this.message, retryKey: source.key }); this.changed(); return;
+      this.sendNotice(this.live!, this.message, source.key); this.changed(); return;
     }
     this.requested.set(this.recordIdentity(), this.normalizeDraft(offer.replace ? offer.text : this.snapshot.draft + offer.text));
     this.reconcileLive();
@@ -195,11 +256,12 @@ export class Assistant {
       }
       this.armTimer();
       this.changed();
+      this.resumeAdmission();
     }, Math.max(0, Math.min(...waiting.map(work => work.due!)) - Date.now()));
   }
   private schedule(run: () => void, signature: string) {
     this.cancel();
-    this.live = { signature, controller: new AbortController(), run, due: Date.now() + 1000 };
+    this.live = { id: randomUUID(), signature, controller: new AbortController(), run, due: Date.now() + 1000 };
     this.armTimer();
     this.reconcileLive();
   }
@@ -213,6 +275,8 @@ export class Assistant {
   private observed = new Map<string, { samples: Map<string, string>; hasProfile: boolean }>();
   constructor(private store: Store, private vault: Vault, private connector: Connector, private onChanged: () => void, private fixture: boolean, private generator: typeof generate = generate) { this.activeConfiguration = this.activeConfigurationKey(); }
   cancel(abortEmpty = false) {
+    this.admission = undefined;
+    if (this.displayRefresh) { clearTimeout(this.snapshotTimer); this.displayRefresh = undefined; }
     const hadLive = Boolean(this.live);
     if (abortEmpty) this.abortEmpty();
     if (this.live && ![...this.inFlight.values()].includes(this.live)) { this.live.controller.abort(); this.live.run = undefined; }
@@ -235,7 +299,7 @@ export class Assistant {
     if (!preferences.learnFromSent || preferences.style !== 'conversation') return;
     const observation = this.observed.get(settingsId) ?? { samples: new Map<string, string>(), hasProfile: false };
     const { samples } = observation;
-    next.messages.filter(m => m.outgoing && m.text).forEach(m => samples.set(m.id, m.text));
+    next.messages.filter(m => m.outgoing && !m.directionFallback && m.text).forEach(m => samples.set(m.id, m.text));
     while (samples.size > 100) samples.delete(samples.keys().next().value!);
     this.observed.set(settingsId, observation);
     // Explicitly edited/selected profiles are never silently replaced.
@@ -279,20 +343,41 @@ export class Assistant {
     try { this.observeStyle(); }
     finally {
       if (affectsOutput) this.refresh();
+      this.resumeAdmission();
       this.changed();
     }
   }
   private cancelAutomatic() { if (this.automatic || this.attempt || this.pending) this.cancel(); }
   /** Drop navigation/crash state; never process the old document's snapshot again. */
   suspend() {
-    this.cancel(true); this.clearTransient(); this.snapshot = emptySnapshot; this.suspended = true; this.refreshNonce = undefined;
+    clearTimeout(this.snapshotTimer); this.displayRefresh = undefined;
+    this.cancel(true); this.clearTransient(); this.snapshot = emptySnapshot; this.suspended = true; this.refreshNonce = undefined; this.freshAfterTimeout = false;
     this.baseline = undefined; this.fresh = undefined; this.changed();
   }
   refresh(documentLoaded = false) {
     if (this.suspended && !documentLoaded) return;
     this.cancel();
-    this.refreshNonce = randomUUID(); this.connector.send({ type: 'snapshot', nonce: this.refreshNonce });
+    this.freshAfterTimeout = false;
+    clearTimeout(this.snapshotTimer);
+    this.refreshNonce = randomUUID();
+    this.decision('refresh_pending', 'refresh', this.refreshNonce);
+    this.requestRefreshSnapshot(this.refreshNonce, 0);
     this.reconcileLive();
+  }
+  private requestRefreshSnapshot(nonce: string, attempt: number) {
+    // Retry snapshots only. Reuse the nonce so a late acknowledgement of any
+    // recovery attempt is still valid; a newer refresh invalidates all of them.
+    this.snapshotTimer = setTimeout(() => {
+      if (this.refreshNonce !== nonce) return;
+      if (attempt < 2) this.requestRefreshSnapshot(nonce, attempt + 1);
+      else if (!this.suspended) {
+        this.refreshNonce = undefined;
+        this.freshAfterTimeout = true;
+        this.decision(undefined, 'refresh');
+      }
+      this.changed();
+    }, 1000);
+    this.connector.send({ type: 'snapshot', nonce });
   }
   private requireActiveChat(chatId: string) {
     if (chatId !== this.snapshot.chatId || !this.snapshot.ready) throw new Error('Open this conversation before changing its automatic-reply settings.');
@@ -324,11 +409,33 @@ export class Assistant {
     } finally { this.reconfigure({ autoRules: true }); }
   }
   isRuntimePaused() { return Boolean(this.snapshot.chatId && this.runtimePaused.has(this.snapshot.chatId)); }
-  dismiss() {
-    const key = !this.snapshot.draft && this.emptyKey();
-    if (key) this.remember(key, { dismissed: true });
-    if (this.snapshot.ready && this.snapshot.draft) this.requested.set(this.recordIdentity(), this.normalizeDraft(this.snapshot.draft));
-    this.cancel(); this.changed();
+  dismiss(source?: { suggestionId?: string; key?: string; requestId?: string }) {
+    const id = source?.suggestionId ?? source?.requestId;
+    const target = id ? this.dismissalTargets.get(id) : undefined;
+    // Remote dismissals target only a main-owned item that was actually shown.
+    // An unbound notice/menu must never cancel a newer request behind it.
+    if (source && !target) return;
+    const work = target?.work ?? this.live;
+    const key = target ? target.emptyKey : !this.snapshot.draft && this.emptyKey();
+    if (key && this.validContext(key)) this.remember(key, { dismissed: true });
+    if (target?.draft && target.identity === this.recordIdentity() && target.draft === this.normalizeDraft(this.snapshot.draft)) this.requested.set(target.identity, target.draft);
+    else if (!target && this.snapshot.ready && this.snapshot.draft) this.requested.set(this.recordIdentity(), this.normalizeDraft(this.snapshot.draft));
+    this.decision('dismissed', 'dismiss', key || target?.draft || this.inlineSignature());
+    // Retire detached work too, without touching a genuinely newer live item.
+    if (work) {
+      work.controller.abort(); work.run = undefined; work.due = undefined;
+      for (const [context, pending] of this.inFlight) if (pending === work) this.inFlight.delete(context);
+    }
+    const current = !source || (source.requestId ? this.live?.id === source.requestId : this.live?.offer?.id === source.suggestionId);
+    if (current) {
+      // A visible offer can be retained by its pending refinement.
+      if (this.live && this.live !== work) {
+        this.live.controller.abort();
+        for (const [context, pending] of this.inFlight) if (pending === this.live) this.inFlight.delete(context);
+      }
+      this.cancel();
+    } else this.armTimer();
+    this.resumeAdmission(); this.changed();
   }
   activity(editing = false) {
     if (this.automatic || (editing && !this.live?.request)) this.cancel();
@@ -336,6 +443,8 @@ export class Assistant {
       // Hide stale text now; the following snapshot decides whether recovery is
       // compatible. Whitespace input must not lose its backoff or replay.
       this.live.offer = undefined; this.live.awaitingSnapshot = true;
+      if (this.displayRefresh) { clearTimeout(this.snapshotTimer); this.displayRefresh = undefined; }
+      this.decision('awaiting_snapshot', 'lifecycle');
       this.connector.send({ type: 'clear' }); this.armTimer();
     }
     const id = this.snapshot.chatId;
@@ -352,15 +461,22 @@ export class Assistant {
     finally { this.reconcileLive(); }
   }
   private receiveSnapshot(next: Snapshot, force: boolean, refreshNonce?: string) {
+    const displayRecovery = Boolean(this.displayRefresh && refreshNonce === this.displayRefresh.nonce);
+    if (displayRecovery) { this.displayRefresh = undefined; clearTimeout(this.snapshotTimer); }
     if (this.suspended || this.refreshNonce) {
       if (!this.refreshNonce || refreshNonce !== this.refreshNonce) return;
       this.refreshNonce = undefined; this.suspended = false; force = true;
+      clearTimeout(this.snapshotTimer); this.decision(undefined, 'refresh');
     }
-    if (!force && !this.live?.awaitingSnapshot && snapshotKey(next) === snapshotKey(this.snapshot) && next.settingsId === this.snapshot.settingsId) return;
+    if (this.freshAfterTimeout) { force = true; this.freshAfterTimeout = false; }
+    if (!force && !displayRecovery && !this.live?.awaitingSnapshot && snapshotKey(next) === snapshotKey(this.snapshot) && next.settingsId === this.snapshot.settingsId) return;
     const previous = this.snapshot, previousIdentity = this.recordIdentity();
     const changedChat = previous.chatId !== next.chatId || previous.name !== next.name || previous.revision !== next.revision;
     const switched = changedChat || !previous.ready;
-    const compatible = !force && !switched && next.ready && next.conversationOpen && !next.composing && !next.draftIssue && this.live?.signature === this.inlineSignature(next);
+    const recoveringOffer = Boolean(this.live?.offer && (displayRecovery || this.displayRefresh?.id === this.live.offer.id));
+    const displayReady = next.ready && !next.composing && !next.draftIssue;
+    const compatible = !force && !changedChat && (!switched || this.live?.offer?.displayed === false) && next.conversationOpen &&
+      (displayReady || recoveringOffer && previous.draft === next.draft) && this.live?.signature === this.inlineSignature(next);
     if (this.automatic || !compatible) this.cancel();
     else if (this.live?.offer && previous.draft !== next.draft) {
       this.live.offer = undefined; this.connector.send({ type: 'clear' }); this.message = 'Ready';
@@ -369,8 +485,10 @@ export class Assistant {
     this.snapshot = next;
     if (compatible && this.live) {
       const edited = this.live.awaitingSnapshot, deferred = Boolean(this.live.deferred); this.live.awaitingSnapshot = false;
+      this.decision(undefined, 'lifecycle');
       this.reconcileLive();
-      if (!deferred && (edited || suggestionKey(previous) !== suggestionKey(next))) this.publishLive();
+      if (!deferred && displayReady && (displayRecovery || edited || suggestionKey(previous) !== suggestionKey(next))) this.publishLive();
+      else if (displayRecovery && this.live.offer && !displayReady && (this.live.offer.displayAttempts ?? 0) < 3) this.recoverDisplay(this.live.offer);
       if (edited) this.armTimer();
     }
     if (previous.draftIssue && !next.draftIssue) this.message = 'Ready';
@@ -383,7 +501,7 @@ export class Assistant {
       if (this.seenMessages.size < 10000) this.seenMessages.add(message.id);
       else this.seenCapacityReached = true;
     }
-    if (!next.ready) { this.changed(); return; }
+    if (!next.ready) { this.decision('composer_unready'); this.changed(); return; }
     // Touch the conversation LRU only on observation, not on settings scans.
     this.outputConfiguration(next);
     const conversationId = this.recordIdentity(next), conversation = this.conversations.get(conversationId);
@@ -400,7 +518,8 @@ export class Assistant {
     const normalized = this.normalizeDraft(next.draft);
     const configuration = this.outputConfiguration(next);
     this.activeConfiguration = JSON.stringify([configuration, preferences.suggestions]);
-    if (next.composing || next.draftIssue) { if (next.draftIssue) this.message = this.draftIssueMessage(next); this.changed(); return; }
+    if (next.composing || next.draftIssue) { this.decision(next.composing ? 'composing' : 'draft_issue'); if (next.draftIssue) this.message = this.draftIssueMessage(next); this.changed(); return; }
+    let decision: DecisionReason | undefined = !preferences.suggestions ? 'suggestions_disabled' : !preferences.shareContext && !normalized ? 'context_disabled' : this.live?.run && !this.live.request ? 'debouncing_unsettled' : undefined;
     const latestIsFresh = this.fresh?.id === next.messages.at(-1)?.id && this.fresh && Date.now() - this.fresh.seenAt < 60000;
     const rules = next.chatId ? this.store.state.auto[next.chatId] : undefined;
     const canAuto = next.chatId && !this.runtimePaused.has(next.chatId) && latestIsFresh && preferences.shareContext && !autoDecision(rules, next, this.store.state.ledger[next.chatId] ?? [], new Date(), this.baseline);
@@ -408,26 +527,39 @@ export class Assistant {
       this.schedule(() => { void this.request(undefined, true); }, this.inlineSignature()); this.automatic = true;
     } else if (!this.live && preferences.suggestions) {
       if (normalized) {
-        if (next.focused && next.caretAtEnd && this.requested.get(this.recordIdentity()) !== normalized)
+        if (next.focused && next.caretAtEnd && this.requested.get(this.recordIdentity()) !== normalized) {
+          decision = 'debouncing_unsettled';
           this.schedule(() => { void this.request(undefined, false, undefined, 0, 'draft continuation'); }, this.inlineSignature());
+        }
       } else if (!next.draft && preferences.shareContext) {
         const key = this.emptyKey(), last = next.messages.at(-1), cached = key ? this.cache.get(key) : undefined;
         if (cached && key) {
           this.remember(key, cached);
           if ('text' in cached && last?.outgoing === false) {
-            this.live = { signature: this.inlineSignature(), controller: new AbortController() };
+            this.live = { id: randomUUID(), signature: this.inlineSignature(), controller: new AbortController() };
             this.show(this.live, cached.text, false);
-          }
+          } else if ('dismissed' in cached) decision = 'dismissed';
         } else if (key && last?.outgoing === false && (last.text.trim() || last.attachment)) {
           const pending = this.inFlight.get(key);
-          if (pending) { this.live = pending; this.message = 'Thinking…'; }
+          if (pending) { this.live = pending; pending.awaitingSnapshot = false; this.publishLive(); this.reconcileLive(); this.armTimer(); }
           else if (this.inFlight.size < 5) {
+            decision = 'debouncing_unsettled';
             this.schedule(() => { void this.request(undefined, false, undefined, 0, reason); }, this.inlineSignature());
+          } else {
+            this.admission = { signature: this.inlineSignature(), reason }; decision = 'capacity_full';
           }
-        }
+        } else decision = last?.outgoing === null ? 'unknown_direction' : last?.outgoing === true ? 'owner_last' : 'unreadable_latest';
       }
     }
-    this.changed();
+    this.decision(decision); this.changed();
+  }
+  private resumeAdmission() {
+    const candidate = this.admission;
+    if (!candidate || this.inFlight.size >= 5) return;
+    this.admission = undefined;
+    if (this.live || this.suspended || this.refreshNonce || !this.snapshot.ready || candidate.signature !== this.inlineSignature()) return;
+    const preferences = resolveSettings(this.store.state, this.snapshot.kind, this.chatIdentity()).values;
+    this.completeSnapshot(this.snapshot, preferences, candidate.reason);
   }
   async request(instruction?: string, automatic = false, source?: RequestSource, retry = 0, reason?: RequestReason) {
     if (this.suspended || this.refreshNonce) return;
@@ -456,16 +588,17 @@ export class Assistant {
     if (!automatic && reason === undefined && retry === 0) this.supersedeEmpty(request.contextKey);
     if (emptyKey) {
       const pending = this.inFlight.get(emptyKey);
-      if (pending) { this.cancel(); this.live = pending; this.message = 'Thinking…'; this.changed(); return; }
-      if (this.inFlight.size >= 5) { this.cancel(); this.changed(); return; }
+      if (pending) { this.cancel(); this.live = pending; pending.awaitingSnapshot = false; this.publishLive(); this.armTimer(); this.changed(); return; }
+      if (this.inFlight.size >= 5) { this.cancel(); this.admission = { signature: this.inlineSignature(), reason: reason! }; this.decision('capacity_full'); this.changed(); return; }
     }
     this.cancel();
     if (this.normalizeDraft(snapshot.draft)) this.requested.set(this.recordIdentity(), this.normalizeDraft(snapshot.draft));
-    const work: Live = { signature: this.inlineSignature(), controller: new AbortController(), request, running: true, offer: suggested !== undefined ? previous?.offer : undefined };
+    const work: Live = { id: randomUUID(), signature: this.inlineSignature(), controller: new AbortController(), request, running: true, offer: suggested !== undefined ? previous?.offer : undefined };
     this.live = automatic ? undefined : work; this.automatic = automatic;
     if (emptyKey) this.inFlight.set(emptyKey, work);
+    this.decision(undefined);
     const ticket = automatic ? this.gate.begin(snapshot, true) : undefined;
-    if (instruction) this.connector.send({ type: 'refining', key: suggestionKey(snapshot) });
+    if (!automatic) this.sendPending(work);
     this.message = automatic ? 'Preparing an automatic reply…' : 'Thinking…'; this.changed();
     const state = this.store.state, prompt = buildPrompt(state, preferences, { ...snapshot, draft }, instruction);
     const input = { provider: state.provider, model: state.models[state.provider], effort: savedEffort(state), ...prompt };
@@ -473,12 +606,12 @@ export class Assistant {
       const alive = () => emptyKey ? this.inFlight.get(emptyKey) === work && !work.controller.signal.aborted : ticket ? this.gate.current(ticket, this.snapshot) : this.current(work);
       const finish = () => { if (emptyKey && this.inFlight.get(emptyKey) === work) this.inFlight.delete(emptyKey); };
       try {
-        if (!alive()) return;
+        if (!alive()) { this.decision('stale_context', 'completion', work.signature); return; }
         work.running = true;
         let text = this.fixture ? instruction ? 'That sounds lovely. See you then!' : snapshot.draft ? ' see you then!' : 'Sounds good, see you then!' : await this.generator({ ...input, key: this.vault.get(input.provider), reason: attempt ? 'retry' : request.reason, signal: ticket?.signal ?? work.controller.signal });
         if (this.fixture) await new Promise(resolve => setTimeout(resolve, 200));
-        if (!alive()) return;
-        if (!automatic && !this.validContext(request.contextKey) && request.contextKey) { finish(); if (this.live === work) this.cancel(); return; }
+        if (!alive()) { this.decision('stale_context', 'completion', work.signature); return; }
+        if (!automatic && !this.validContext(request.contextKey) && request.contextKey) { this.decision('stale_context', 'completion', work.signature); finish(); if (this.live === work) this.cancel(); return; }
         if (!snapshot.draft || instruction) text = text.trim();
         // Detached automatic replies may complete off-view. Only incoming-message text is cached, and stale configurations cannot repopulate it.
         if (!automatic && !snapshot.draft && snapshot.messages.at(-1)?.outgoing === false && this.validContext(request.contextKey) && (!emptyKey || !this.cache.has(request.contextKey!)))
@@ -492,9 +625,9 @@ export class Assistant {
         } else if (this.current(work)) {
           work.offer = undefined; work.error = undefined;
           work.deferred = { text, replace: Boolean(instruction) };
-        }
+        } else this.decision('stale_context', 'completion', work.signature);
       } catch (error) {
-        if (!alive()) return;
+        if (!alive()) { this.decision('stale_context', 'completion', work.signature); return; }
         work.running = false;
         if (emptyKey && this.cache.has(emptyKey)) { finish(); return; }
         const message = error instanceof Error ? error.message : 'Unable to generate a reply.';
@@ -508,7 +641,7 @@ export class Assistant {
             if (emptyKey && (this.cache.has(emptyKey) || !this.validContext(request.contextKey) || !resolveSettings(this.store.state, snapshot.kind, this.chatIdentity(snapshot)).values.suggestions)) { finish(); return; }
             if (!emptyKey && request.operation === 'continuation' && (!this.snapshot.focused || !this.snapshot.caretAtEnd)) {
               work.error = this.message = 'Suggestion interrupted. Try again.';
-              this.connector.send({ type: 'notice', text: this.message, retryKey: suggestionKey(this.snapshot) }); this.changed(); return;
+              this.sendNotice(work, this.message); this.changed(); return;
             }
             // Continuation retries always use the current exact whitespace boundary.
             if (!emptyKey && request.operation === 'continuation') {
@@ -521,13 +654,14 @@ export class Assistant {
         if (!ticket && !this.current(work)) return;
         if (!automatic) {
           if (!this.matches(request)) { this.cancel(); return; }
-          if (work.offer && work.offer.key === suggestionKey(this.snapshot)) this.connector.send({ type: 'suggestion', ...work.offer });
+          if (work.offer && work.offer.key === suggestionKey(this.snapshot)) this.sendOffer(work.offer, work);
           work.error = message;
-          this.connector.send({ type: 'notice', text: message, retryKey: suggestionKey(this.snapshot) });
+          this.sendNotice(work, message);
         } else { this.message = message; this.connector.send({ type: 'notice', text: message }); }
       } finally {
         work.running = false;
         this.changed();
+        this.resumeAdmission();
       }
     };
     await run(retry);

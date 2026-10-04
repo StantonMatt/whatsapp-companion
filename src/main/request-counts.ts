@@ -8,7 +8,11 @@ export const requestReasons = ['open/revisit', 'incoming message', 'draft contin
 export type RequestReason = typeof requestReasons[number];
 export type RequestOutcome = 'completed' | 'error' | 'timeout' | 'aborted';
 export type RequestMetadata = { provider: Provider; model: string; reason: RequestReason; method: 'POST' | 'GET' };
+export const decisionReasons = ['unknown_direction', 'unreadable_latest', 'owner_last', 'debouncing_unsettled', 'capacity_full', 'dismissed', 'awaiting_snapshot', 'stale_context', 'display_rejected_key', 'display_rejected_unready', 'display_rejected_composition', 'display_rejected_draft', 'display_rejected_dismissed', 'refresh_pending', 'suggestions_disabled', 'context_disabled', 'composer_unready', 'composing', 'draft_issue'] as const;
+export type DecisionReason = typeof decisionReasons[number];
 const count = z.number().int().nonnegative().safe();
+const decisionRowSchema = z.object({ day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), reason: z.enum(decisionReasons), count }).strict();
+const decisionFileSchema = z.object({ version: z.literal(1), counts: z.array(decisionRowSchema).max(10000) }).strict();
 const rowSchema = z.object({ day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), provider: providerSchema,
   model: z.union([modelIdSchema, z.literal('')]), reason: z.enum(requestReasons), method: z.enum(['POST', 'GET']),
   dispatched: count, completed: count, error: count, timeout: count, aborted: count }).strict();
@@ -21,12 +25,16 @@ function localDay(date: Date) {
 /** Aggregate dispatch telemetry only. Never accept prompts, keys, chat IDs or request bodies. */
 export class RequestCounts {
   private rows = new Map<string, Row>();
+  private decisions = new Map<string, z.infer<typeof decisionRowSchema>>();
+  private decisionsDirty = false;
   private timer?: ReturnType<typeof setTimeout>;
   private dirty = false;
   private closed = false;
   readonly path: string;
+  readonly decisionsPath: string;
   constructor(directory: string, private now = () => new Date()) {
     this.path = join(directory, 'request-counts.json');
+    this.decisionsPath = join(directory, 'suggestion-decisions.json');
     try {
       if (existsSync(this.path) && statSync(this.path).size <= 4 * 1024 * 1024) {
         const parsed = fileSchema.parse(JSON.parse(readFileSync(this.path, 'utf8')));
@@ -34,6 +42,13 @@ export class RequestCounts {
         for (const row of parsed.counts) this.rows.set(this.rowKey(row), row);
       }
     } catch { console.warn('Request counts could not be loaded; starting fresh aggregate counts.'); }
+    try {
+      if (existsSync(this.decisionsPath) && statSync(this.decisionsPath).size <= 4 * 1024 * 1024) {
+        const parsed = decisionFileSchema.parse(JSON.parse(readFileSync(this.decisionsPath, 'utf8')));
+        chmodSync(this.decisionsPath, 0o600);
+        for (const row of parsed.counts) this.decisions.set(JSON.stringify([row.day, row.reason]), row);
+      }
+    } catch { console.warn('Suggestion decisions could not be loaded; starting fresh aggregate counts.'); }
     this.prune();
   }
   private rowKey(row: Pick<Row, 'day' | 'provider' | 'model' | 'reason' | 'method'>) {
@@ -44,6 +59,7 @@ export class RequestCounts {
     const oldest = localDay(cutoff), today = localDay(this.now());
     for (const [key, row] of this.rows) if (row.day < oldest || row.day > today) { this.rows.delete(key); this.dirty = true; }
     while (this.rows.size > 10000) { this.rows.delete(this.rows.keys().next().value!); this.dirty = true; }
+    for (const [key, row] of this.decisions) if (row.day < oldest || row.day > today) { this.decisions.delete(key); this.decisionsDirty = true; }
   }
   begin(metadata: RequestMetadata): (outcome: RequestOutcome) => void {
     // Construct an allowlisted record rather than spreading an input object.
@@ -57,24 +73,37 @@ export class RequestCounts {
       existing[outcome]++; this.schedule();
     };
   }
-  private schedule() {
-    this.dirty = true; this.prune();
+  decision(reason: DecisionReason) {
+    const row = decisionRowSchema.parse({ day: localDay(this.now()), reason, count: 0 });
+    const key = JSON.stringify([row.day, row.reason]), existing = this.decisions.get(key) ?? row;
+    existing.count++; this.decisions.set(key, existing); this.decisionsDirty = true; this.schedule(true);
+  }
+  private schedule(decision = false) {
+    if (!decision) this.dirty = true;
+    this.prune();
     if (!this.closed && !this.timer) {
-      this.timer = setTimeout(() => { this.timer = undefined; this.flush(); if (this.dirty) this.schedule(); }, 30000);
+      this.timer = setTimeout(() => { this.timer = undefined; this.flush(); if (this.dirty || this.decisionsDirty) this.schedule(!this.dirty); }, 30000);
       this.timer.unref?.();
     }
   }
   flush() {
     this.prune();
-    if (!this.dirty) return;
-    try { atomicWrite(this.path, JSON.stringify({ version: 1, counts: [...this.rows.values()] }, null, 2), undefined, 'request-counts'); this.dirty = false; }
-    catch { console.warn('Request counts could not be saved; retrying on the next batch.'); }
+    if (this.dirty) {
+      try { atomicWrite(this.path, JSON.stringify({ version: 1, counts: [...this.rows.values()] }, null, 2), undefined, 'request-counts'); this.dirty = false; }
+      catch { console.warn('Request counts could not be saved; retrying on the next batch.'); }
+    }
+    if (this.decisionsDirty) {
+      try { atomicWrite(this.decisionsPath, JSON.stringify({ version: 1, counts: [...this.decisions.values()] }, null, 2), undefined, 'suggestion-decisions'); this.decisionsDirty = false; }
+      catch { console.warn('Suggestion decisions could not be saved; retrying on the next batch.'); }
+    }
   }
   close() { clearTimeout(this.timer); this.timer = undefined; this.closed = true; this.flush(); }
 }
 
 let counter: RequestCounts | undefined;
 export function useRequestCounts(value?: RequestCounts) { counter = value; }
+/** Accepts only a reason code; context tokens stay in Assistant's memory. */
+export function countDecision(reason: DecisionReason) { counter?.decision(reason); }
 /** Called immediately around a real fetch dispatch, including response validation. */
 export async function countedDispatch<T>(metadata: RequestMetadata, signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
   signal.throwIfAborted(); // A cancelled timer or preflight is not an HTTP dispatch.

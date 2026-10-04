@@ -47,6 +47,8 @@ Right-click the message field or a Companion input for Cut, Copy, Paste and Sele
 
 Provider HTTP dispatch counts are saved locally in `request-counts.json` in the app’s data directory, separately from `companion.json`. The owner-only JSON file aggregates the last 30 local calendar days by provider/model, request reason and completed/error/timeout/aborted outcome. Model-list GETs are counted separately from generation POSTs. Writes are batched every 30 seconds and flushed on quit. It contains no messages, prompts, chat identities or keys; dispatch counts are not billing totals.
 
+Suggestion decisions are counted separately in `suggestion-decisions.json`, using only local day, allowlisted reason and count. Counts track changes in eligibility and display rejection rather than every poll. This uses the same 30-day retention, owner-only permissions and batched writes as request counts.
+
 ## Diagnostics
 
 Open WhatsApp’s native sticker picker, then choose **Companion → Capture sticker picker layout**. The app saves a JSON file under `diagnostics/` in its data directory and reveals it in your file manager. Send that file when requested to investigate the picker markup. If the picker is closed, the app asks you to open it first.

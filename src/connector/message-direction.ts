@@ -33,3 +33,43 @@ export function messageDirection(node: HTMLElement, id = node.dataset.id ?? ''):
   }
   return null;
 }
+
+function bubbleBounds(node: HTMLElement) {
+  return (ownElements(node, '[data-testid="msg-container"]')[0] ?? node).getBoundingClientRect();
+}
+function measurable(rect: DOMRect) {
+  return rect.width > 0 && rect.height > 0 && [rect.left, rect.right].every(Number.isFinite);
+}
+/** Suggestion-only inference. Never use this to authorize automatic sending. */
+export function fallbackDirection(node: HTMLElement, pane: HTMLElement, preceding?: { node: HTMLElement; direction: boolean | null }): boolean | null {
+  if (node.closest(quoteSelector)) return null;
+  const bounds = bubbleBounds(node), viewport = pane.getBoundingClientRect();
+  if (!measurable(bounds) || !measurable(viewport)) return null;
+  // Walk only empty wrapper boundaries. A divider/system row, even without an
+  // ID, breaks the run; never search backwards past it for a convenient author.
+  let row = node;
+  const precedingText = (element: HTMLElement) => {
+    for (let sibling = element.previousSibling; sibling; sibling = sibling.previousSibling)
+      if (sibling.nodeType === 3 && sibling.textContent?.trim()) return true;
+    return false;
+  };
+  while (!row.previousElementSibling && !precedingText(row) && row.parentElement && row.parentElement !== pane && row.parentElement.id !== 'main') row = row.parentElement;
+  const sibling = row.previousElementSibling;
+  const previous = sibling?.matches('[data-id]') ? sibling as HTMLElement : sibling?.querySelector<HTMLElement>('[data-id]');
+  if (previous && !precedingText(row) && !sibling?.matches('[data-testid*="system"], [data-testid*="date"], [role="separator"]') &&
+      !sibling?.querySelector('[data-testid*="system"], [data-testid*="date"], [role="separator"]') &&
+      (!sibling?.querySelectorAll('[data-id]').length || sibling.querySelectorAll('[data-id]').length === 1)) {
+    const before = bubbleBounds(previous);
+    const direction = messageDirection(previous) ?? (preceding?.node === previous ? preceding.direction : null);
+    if (measurable(before) && direction != null &&
+        Math.abs((direction ? bounds.right : bounds.left) - (direction ? before.right : before.left)) <= 12 &&
+        Math.abs((bounds.left + bounds.right) / 2 - (before.left + before.right) / 2) < viewport.width / 4)
+      return direction;
+  }
+  // Require a clear gap difference, so wide/centred/partially mounted bubbles
+  // and zero-sized placeholders stay unknown.
+  const left = bounds.left - viewport.left, right = viewport.right - bounds.right;
+  const margin = Math.max(24, viewport.width * 0.08);
+  if (left < -12 || right < -12 || Math.abs(left - right) < margin) return null;
+  return left > right;
+}

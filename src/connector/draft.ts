@@ -16,7 +16,7 @@ export function readDraft(editor: HTMLElement): string {
       text += serialize(child);
       if (block && child.nextSibling && !text.endsWith('\n')) text += '\n';
     }
-    return text || (node.getAttribute('contenteditable') === 'false' ? '\ufffc' : '');
+    return text || node.getAttribute('data-plain-text') || (node.getAttribute('contenteditable') === 'false' ? '\ufffc' : '');
   };
   return serialize(editor).replace(/\u200b/g, '').replace(/\n$/, '');
 }

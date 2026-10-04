@@ -2,14 +2,14 @@
 import { describe, test, expect, vi, afterEach } from 'vitest';
 import { DomConnector, peerFromMessageId, caretAtEnd, readDraft, accountSafetyReason } from '../src/connector/dom';
 import { stickerImageState } from '../src/connector/sticker-image-state';
-import { snapshotSchema, initialState, type State } from '../src/shared/model';
+import { snapshotSchema, initialState, type Snapshot, type State } from '../src/shared/model';
 import { Assistant } from '../src/main/assistant';
 import { ProviderError, type generate } from '../src/main/providers';
 import type { Store } from '../src/main/store';
 import type { Vault } from '../src/main/vault';
 import { StickerTransfer, canSendSticker, stickerRoute } from '../src/core/sticker-transfer';
 import { snapshotKey, suggestionKey } from '../src/core/suggestions';
-import type { RemoteEvent } from '../src/shared/connector';
+import type { RemoteEvent, RemoteCommand } from '../src/shared/connector';
 import { composerProvablyEmpty } from '../src/connector/draft';
 import { emptyComposers } from './fixtures/empty-composers';
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.getSelection()?.removeAllRanges(); document.body.replaceChildren(); });
@@ -566,7 +566,7 @@ test('typing during pending refinement hides it and rejects a queued result', as
   const connector = new DomConnector(document, () => {}); connector.start();
   try {
     await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
-    connector.command({ type: 'refining', key }); expect(connector['popup'].hidden).toBe(false);
+    connector.command({ type: 'refining', key, requestId: '00000000-0000-4000-8000-000000000003' }); expect(connector['popup'].hidden).toBe(false);
     connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
     expect(connector['popup'].hidden).toBe(true); expect(connector['button'].getAttribute('aria-expanded')).toBe('false');
     connector.command({ type: 'suggestion', key, text: 'Stale result', replace: true });
@@ -594,7 +594,7 @@ test('refocusing during refinement preserves the request and shows the revised g
   const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
   try {
     await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
-    connector.command({ type: 'refining', key });
+    connector.command({ type: 'refining', key, requestId: '00000000-0000-4000-8000-000000000003' });
     connector['pointer']({ isTrusted: true, composedPath: () => [editor] } as unknown as Event);
     expect(events.some(event => event.type === 'dismiss')).toBe(false);
     connector.command({ type: 'suggestion', key, text: 'An updated suggestion', replace: true });
@@ -920,16 +920,20 @@ function retryClicks() {
     return add.call(this, type, listener, options);
   });
   return {
-    click(connector: DomConnector) {
-      const button = [...connector['popup'].querySelectorAll('button')].find(b => b.textContent === 'Try again');
+    click(connector: DomConnector, label = 'Try again') {
+      const button = [...connector['popup'].querySelectorAll('button')].find(b => b.textContent === label || b.getAttribute('aria-label') === label);
       expect(connector['popup'].hidden).toBe(false); expect(button).toBeDefined();
       const listener = listeners.get(button!)!; expect(listener).toBeDefined();
       listener.call(button!, { isTrusted: true } as Event);
     },
+    trigger(connector: DomConnector) {
+      const button = connector['button'], listener = listeners.get(button)!;
+      expect(listener).toBeDefined(); listener.call(button, { isTrusted: true } as Event);
+    },
     stop: () => spy.mockRestore()
   };
 }
-function integratedAssistant(generator: typeof generate) {
+function integratedAssistant(generator: typeof generate, identify?: (snapshot: Snapshot) => string) {
   const editor = fixture(); editor.tabIndex = 0;
   const state = initialState(); state.global.suggestions = true; state.global.shareContext = true;
   const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
@@ -937,11 +941,12 @@ function integratedAssistant(generator: typeof generate) {
   let assistant!: Assistant;
   const connector = new DomConnector(document, event => {
     events.push(event);
-    if (event.type === 'snapshot') assistant.receive(event.snapshot, false, event.nonce);
+    if (event.type === 'snapshot') assistant.receive(identify ? { ...event.snapshot, settingsId: identify(event.snapshot) } : event.snapshot, false, event.nonce);
     if (event.type === 'activity') assistant.activity(event.editing);
     if (event.type === 'applied') assistant.applied(event);
     if (event.type === 'request') void assistant.request(event.instruction, false, event);
-    if (event.type === 'dismiss') assistant.dismiss();
+    if (event.type === 'dismiss') assistant.dismiss(event);
+    if (event.type === 'displayAck') assistant.displayAck(event);
   });
   assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => connector.command(c), focus() {} }, () => {}, false, generator);
   connector.start();
@@ -1052,4 +1057,210 @@ test.each(['caret', 'selection'])('failed replacement restores the original %s f
     const typing = selection.getRangeAt(0); typing.deleteContents(); typing.insertNode(document.createTextNode('!'));
     expect(editor.textContent).toBe(mode === 'caret' ? 'Or!iginal' : 'Or!nal');
   } finally { connector.stop(); }
+});
+
+
+test('the reported Spanish sequence with opaque consecutive bubbles displays the final reply and revisits reuse it', async () => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValue('Un precio tremendo 😂');
+  const app = integratedAssistant(generator, () => 'persisted-chat');
+  try {
+    const main = document.querySelector<HTMLElement>('#main')!;
+    main.getBoundingClientRect = () => ({ left: 0, right: 800, width: 800, height: 600 } as DOMRect);
+    main.querySelector('header')!.innerHTML = '<span data-testid="conversation-info-header-chat-title">A friend</span>';
+    const selected = document.createElement('div'); selected.id = 'pane-side'; selected.innerHTML = '<div aria-selected="true">A friend</div>'; document.body.prepend(selected);
+    main.querySelector('[data-id]')!.remove(); app.editor.textContent = '';
+    const sequence: [string, boolean][] = [
+      ['Perfecto', true], ['VOy a decirle...', true], ['Eso al Jippitty 😂', false], ['jajaj que se gane el sueldo', true],
+      ['200 😳', false], ['Caro el asistente pero menos que uno orgánico', true],
+      ['Que se haga un mameluco o presta el 🍑 al menos 😂', false], ['🫢', false], ['Por ese precio', false]
+    ];
+    for (const [index, [text, outgoing]] of sequence.entries()) {
+      const id = `OPAQUE_${index}`, row = document.createElement('div'); row.dataset.id = id; row.dataset.testid = `conv-msg-${id}`;
+      const bubble = document.createElement('div'); bubble.dataset.testid = 'msg-container';
+      if (index === 0 || sequence[index - 1][1] !== outgoing) bubble.innerHTML = `<span data-icon="tail-${outgoing ? 'out' : 'in'}"></span>`;
+      if (text === '🫢') bubble.insertAdjacentHTML('beforeend', '<img alt="🫢">');
+      else { const body = document.createElement('span'); body.dataset.testid = 'msg-text'; body.textContent = text; bubble.append(body); }
+      bubble.getBoundingClientRect = () => ({ left: outgoing ? 510 : 70, right: outgoing ? 730 : 290, width: 220, height: 40 } as DOMRect);
+      row.append(bubble); main.insertBefore(row, main.querySelector('footer')); app.connector['refresh']();
+      await vi.advanceTimersByTimeAsync(1600);
+    }
+    const last = app.connector.read().messages.at(-1)!;
+    expect(last).toMatchObject({ text: 'Por ese precio', outgoing: false, directionFallback: true });
+    expect(app.connector.read().messages.at(-2)!.text).toBe('🫢');
+    expect(app.connector['ghost'].textContent).toBe('Un precio tremendo 😂');
+    expect(JSON.parse(generator.mock.calls.at(-1)![0].input).context.at(-1).text).toBe('Por ese precio');
+    expect(generator).toHaveBeenCalledTimes(5);
+    // The test boundary resolves the same persistent identity on revisits.
+    const snapshot = app.connector.read(), requests = generator.mock.calls.length;
+    app.assistant.receive({ ...snapshot, name: 'Other chat', settingsId: 'other-chat', messages: [] });
+    app.assistant.receive({ ...snapshot, settingsId: 'persisted-chat' });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(app.connector['ghost'].textContent).toBe('Un precio tremendo 😂'); expect(generator).toHaveBeenCalledTimes(requests);
+    expect(app.events.some(e => e.type === 'displayAck' && e.reason === 'displayed')).toBe(true);
+  } finally { app.stop(); }
+});
+
+test('a transient tail/key rejection recovers a cached suggestion without another provider request', async () => {
+  vi.useFakeTimers(); let finish!: (text: string) => void;
+  const generator = vi.fn<typeof generate>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const app = integratedAssistant(generator);
+  try {
+    modernFixture(); app.editor = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    app.editor.textContent = ''; const row = document.querySelector<HTMLElement>('[data-id]')!;
+    row.insertAdjacentHTML('beforeend', '<span data-icon="tail-in"></span>'); app.connector['refresh']();
+    await vi.advanceTimersByTimeAsync(2000);
+    // Reproduce completion ahead of the normal observer/poll refresh.
+    app.connector['observer']!.disconnect();
+    const tail = row.querySelector('[data-icon="tail-in"]')!; tail.remove(); finish('Recovered ghost');
+    await Promise.resolve(); // completion sees the temporary key before polling
+    row.append(tail); await vi.advanceTimersByTimeAsync(400);
+    expect(app.events.some(e => e.type === 'displayAck' && e.reason === 'key')).toBe(true);
+    expect(app.connector['ghost'].textContent).toBe('Recovered ghost'); expect(generator).toHaveBeenCalledOnce();
+  } finally { app.stop(); }
+});
+
+test('dismissal after a new bubble mounts carries the old visible offer, leaving the new suggestion eligible', async () => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValue('Reply'); const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    const old = app.connector['suggestion']!;
+    const incoming = document.createElement('div'); incoming.dataset.id = 'false_123@c.us_new'; incoming.innerHTML = '<span data-testid="msg-text">New question</span>';
+    document.querySelector('#main')!.insertBefore(incoming, document.querySelector('footer'));
+    app.connector['dismissPopup'](); app.connector['refresh'](); await vi.advanceTimersByTimeAsync(1000);
+    expect(app.events.filter(e => e.type === 'dismiss').at(-1)).toMatchObject({ suggestionId: old.id, key: old.key });
+    expect(app.connector['ghost'].textContent).toBe('Reply'); expect(generator).toHaveBeenCalledTimes(2);
+  } finally { app.stop(); }
+});
+
+
+test.each(['Escape', 'close', 'trigger'] as const)('dismissing a pending empty-composer refinement via %s cancels its request and suppresses replay', async source => {
+  vi.useFakeTimers(); const clicks = retryClicks(); let finish!: (text: string) => void;
+  const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Original reply')
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    const original = app.connector['suggestion']!, context = app.assistant['emptyKey']();
+    const work = app.assistant.request('Warmer', false, { suggestionId: original.id, key: original.key });
+    expect(app.connector['suggestion']).toBeUndefined();
+    expect(app.connector['popup'].getAttribute('aria-label')).toBe('Refining');
+    const requestId = app.connector['popupRequest']!.id;
+    if (source === 'Escape') app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor,
+      composedPath: () => [app.editor], preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    else if (source === 'close') clicks.click(app.connector, 'Close reply assistance');
+    else {
+      app.connector['button'].dispatchEvent(new Event('click')); // untrusted events must leave work live
+      expect(generator.mock.calls[1][0].signal?.aborted).toBe(false);
+      clicks.trigger(app.connector);
+    }
+    expect(app.events.filter(e => e.type === 'dismiss').at(-1)).toEqual({ type: 'dismiss', requestId });
+    expect(generator.mock.calls[1][0].signal?.aborted).toBe(true);
+    expect(app.assistant['live']).toBeUndefined(); expect(app.assistant['cache'].get(context!)).toEqual({ dismissed: true });
+    expect(app.connector['popup'].hidden).toBe(true);
+    finish('Late revision'); await work;
+    // A result queued before main received the dismissal must also stay hidden.
+    app.connector.command({ type: 'suggestion', id: '00000000-0000-4000-8000-000000000004', requestId,
+      key: original.key, text: 'Queued revision', replace: true });
+    app.assistant.refresh(); await vi.advanceTimersByTimeAsync(3000);
+    expect(app.connector['ghost'].textContent).toBe(''); expect(generator).toHaveBeenCalledTimes(2);
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test('Escape during automatic Thinking cancels the request and suppresses a revisit', async () => {
+  vi.useFakeTimers(); let finish!: (text: string) => void;
+  const generator = vi.fn<typeof generate>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    expect(app.connector['popup'].getAttribute('aria-label')).toBe('Thinking');
+    const requestId = app.connector['popupRequest']!.id, context = app.assistant['emptyKey']();
+    app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor, composedPath: () => [app.editor],
+      preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(app.events.filter(e => e.type === 'dismiss').at(-1)).toEqual({ type: 'dismiss', requestId });
+    expect(generator.mock.calls[0][0].signal?.aborted).toBe(true); expect(app.assistant['inFlight'].size).toBe(0);
+    expect(app.assistant['cache'].get(context!)).toEqual({ dismissed: true });
+    finish('Late reply'); await vi.advanceTimersByTimeAsync(0);
+    app.assistant.refresh(); await vi.advanceTimersByTimeAsync(3000);
+    expect(app.connector['ghost'].textContent).toBe(''); expect(generator).toHaveBeenCalledOnce();
+  } finally { app.stop(); }
+});
+
+test('closing a refinement failure notice dismisses its request even when an older ghost is restored', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Original reply').mockRejectedValueOnce(new ProviderError('Rejected'));
+  const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    const original = app.connector['suggestion']!, context = app.assistant['emptyKey']();
+    await app.assistant.request('Warmer', false, { suggestionId: original.id, key: original.key });
+    expect(app.connector['ghost'].textContent).toBe('Original reply');
+    expect(app.connector['popup'].textContent).toContain('Rejected');
+    const requestId = app.connector['popupRequest']!.id;
+    clicks.click(app.connector, 'Close reply assistance');
+    expect(app.events.filter(e => e.type === 'dismiss').at(-1)).toEqual({ type: 'dismiss', requestId });
+    expect(app.assistant['live']).toBeUndefined(); expect(app.assistant['cache'].get(context!)).toEqual({ dismissed: true });
+    app.assistant.refresh(); await vi.advanceTimersByTimeAsync(3000);
+    expect(app.connector['ghost'].textContent).toBe(''); expect(app.connector['popup'].hidden).toBe(true);
+    expect(generator).toHaveBeenCalledTimes(2);
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test('an old-key Escape cancels the same rekeyed offer and rejects its queued display after snapshot recovery', async () => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValue('Reply'); const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    const original = app.connector['suggestion']!, context = app.assistant['emptyKey']();
+    app.connector['observer']!.disconnect(); clearInterval(app.connector['timer']);
+    const queued: RemoteCommand[] = [], deliver = app.connector.command.bind(app.connector);
+    const spy = vi.spyOn(app.connector, 'command').mockImplementation(command => {
+      if (command.type === 'suggestion') queued.push(command); else deliver(command);
+    });
+    document.querySelector('#main [data-id]')!.insertAdjacentHTML('beforebegin', '<div data-id="false_123@c.us_older"><span data-testid="msg-text">History</span></div>');
+    app.assistant.receive(app.connector.read());
+    expect(queued.at(-1)).toMatchObject({ id: original.id });
+    expect(app.assistant['live']!.offer!.key).not.toBe(original.key);
+    app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor, composedPath: () => [app.editor],
+      preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(app.assistant['live']).toBeUndefined(); expect(app.assistant['cache'].get(context!)).toEqual({ dismissed: true });
+    app.connector.command({ type: 'snapshot', nonce: 'test-recovery' });
+    for (const command of queued) deliver(command);
+    expect(app.connector['ghost'].textContent).toBe('');
+    expect(app.events.some(e => e.type === 'displayAck' && e.suggestionId === original.id && e.reason === 'dismissed')).toBe(true);
+    spy.mockRestore(); app.assistant.refresh(); await vi.advanceTimersByTimeAsync(3000);
+    expect(generator).toHaveBeenCalledOnce(); expect(app.connector['ghost'].textContent).toBe('');
+  } finally { app.stop(); }
+});
+
+test('closing the refinement popup dismisses the ghost offer', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks(); const generator = vi.fn<typeof generate>().mockResolvedValue('Reply');
+  const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    const original = app.connector['suggestion']!; app.connector['openPopup'](); clicks.click(app.connector, 'Close reply assistance');
+    expect(app.events.filter(e => e.type === 'dismiss').at(-1)).toMatchObject({ suggestionId: original.id, key: original.key });
+    expect(app.assistant['live']).toBeUndefined(); expect(app.connector['ghost'].textContent).toBe('');
+    app.assistant.refresh(); await vi.advanceTimersByTimeAsync(3000); expect(generator).toHaveBeenCalledOnce();
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test('dismissal of an old visible offer preserves a newer offer already queued for a new message', async () => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Old reply').mockResolvedValueOnce('New reply');
+  const app = integratedAssistant(generator);
+  try {
+    app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
+    const original = app.connector['suggestion']!, oldContext = app.assistant['emptyKey']();
+    app.connector['observer']!.disconnect(); clearInterval(app.connector['timer']);
+    const queued: RemoteCommand[] = [], deliver = app.connector.command.bind(app.connector);
+    const spy = vi.spyOn(app.connector, 'command').mockImplementation(command => { queued.push(command); });
+    document.querySelector('#main footer')!.insertAdjacentHTML('beforebegin', '<div data-id="false_123@c.us_new"><span data-testid="msg-text">New question</span></div>');
+    app.assistant.receive(app.connector.read()); await vi.advanceTimersByTimeAsync(1000);
+    const newer = app.assistant['live']!.offer!, beforeDismiss = queued.length;
+    expect(newer.id).not.toBe(original.id); expect(app.connector['suggestion']!.id).toBe(original.id);
+    app.connector['dismissPopup']();
+    expect(app.assistant['live']!.offer!.id).toBe(newer.id); expect(queued.length).toBe(beforeDismiss);
+    expect(app.assistant['cache'].get(oldContext!)).toEqual({ dismissed: true });
+    expect(app.assistant['cache'].get(app.assistant['emptyKey']()!)).toEqual({ text: 'New reply' });
+    spy.mockRestore(); for (const command of queued) deliver(command);
+    expect(app.connector['ghost'].textContent).toBe('New reply'); expect(generator).toHaveBeenCalledTimes(2);
+  } finally { app.stop(); }
 });

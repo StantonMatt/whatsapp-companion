@@ -9,6 +9,7 @@ import { ProviderError, type generate } from '../src/main/providers';
 import type { Store } from '../src/main/store';
 import type { Vault } from '../src/main/vault';
 import type { RemoteCommand } from '../src/shared/connector';
+import { useRequestCounts, type RequestCounts } from '../src/main/request-counts';
 
 const a = '123@c.us', b = '456@c.us';
 const snap = (patch: Partial<Snapshot> = {}): Snapshot => ({ ...emptySnapshot, chatId: a, settingsId: a, name: 'A', revision: '1',
@@ -27,7 +28,7 @@ function setup(generator = vi.fn<typeof generate>().mockResolvedValue('Reply')) 
   return { assistant, generator, commands, state, store, fresh, offer, changed };
 }
 beforeEach(() => vi.useFakeTimers());
-afterEach(() => vi.useRealTimers());
+afterEach(() => { useRequestCounts(); vi.useRealTimers(); });
 
 describe('automatic suggestion requests', () => {
   test('open once, six A/B switches, revisions and history loading reuse the latest-message cache', async () => {
@@ -876,11 +877,11 @@ describe('empty requests finish across view changes (A1, B1)', () => {
     fresh(snap({ revision: 'new-document' })); await vi.advanceTimersByTimeAsync(1000);
     expect(generator).toHaveBeenCalledTimes(2); expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Fresh' }); assistant.cancel(true);
   });
-  test('dismissal during an empty request keeps it un-aborted, hides the completion, and suppresses revisits', async () => {
+  test('dismissal during an empty request aborts it, hides the completion, and suppresses revisits', async () => {
     let finish!: (text: string) => void;
     const { assistant, generator, commands } = setup(vi.fn<typeof generate>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })));
     assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000); assistant.dismiss();
-    expect(generator.mock.calls[0][0].signal?.aborted).toBe(false);
+    expect(generator.mock.calls[0][0].signal?.aborted).toBe(true);
     const start = commands.length; finish('Dismissed'); await vi.advanceTimersByTimeAsync(0);
     assistant.receive(snap({ chatId: b, settingsId: b, messages: [] })); assistant.receive(snap({ revision: 'return' })); await vi.advanceTimersByTimeAsync(3000);
     expect(generator).toHaveBeenCalledOnce(); expect(commands.slice(start).some(c => c.type === 'suggestion' || c.type === 'notice')).toBe(false); assistant.cancel(true);
@@ -1106,7 +1107,8 @@ describe('round-two fingerprint and admission regressions', () => {
     expect(generator.mock.calls.every(([input]) => !input.signal?.aborted)).toBe(true);
     finishes[0]('Completed elsewhere'); await vi.advanceTimersByTimeAsync(0);
     expect(commands.at(-1)).toMatchObject({ type: 'clear' });
-    assistant.receive({ ...assistant.snapshot, activity: 1 }); await vi.advanceTimersByTimeAsync(1000);
+    // No further snapshot/activity is needed to admit the skipped candidate.
+    await vi.advanceTimersByTimeAsync(1000);
     expect(generator).toHaveBeenCalledTimes(6); expect(assistant['inFlight'].size).toBe(5);
     finishes[5]('Admitted later'); await vi.advanceTimersByTimeAsync(0);
     expect(commands.at(-1)).toMatchObject({ type: 'suggestion', text: 'Admitted later' }); assistant.cancel(true);
@@ -1384,5 +1386,153 @@ describe('completion between editing activity and its snapshot', () => {
     expect(events.size).toBe(12); expect(generator.mock.calls.length).toBeGreaterThan(5);
     assistant.cancel(true); for (const completion of completions) completion.finish('Late result');
     await vi.advanceTimersByTimeAsync(5000); invariant(); expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+
+describe('silent suggestion recovery', () => {
+  test.each(['success', 'backoff'] as const)('reattached empty work clears stale awaitingSnapshot (%s)', async outcome => {
+    let resolve!: (text: string) => void, reject!: (error: Error) => void;
+    const generator = vi.fn<typeof generate>().mockImplementationOnce(() => new Promise((yes, no) => { resolve = yes; reject = no; })).mockResolvedValue('Recovered');
+    const { assistant, offer } = setup(generator);
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    assistant.activity(true); assistant.receive(snap({ draft: 'x', editRevision: 1 }));
+    assistant.receive(snap({ draft: '', editRevision: 2 }));
+    expect(assistant['live']?.awaitingSnapshot).toBe(false);
+    if (outcome === 'success') resolve('Recovered'); else reject(new ProviderError('Temporary', true));
+    await vi.advanceTimersByTimeAsync(outcome === 'success' ? 0 : 2000);
+    expect(offer()).toMatchObject({ text: 'Recovered', key: suggestionKey(assistant.snapshot) });
+    expect(assistant.message).toBe('Tab to accept · Esc to dismiss');
+    expect(generator).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 2); assistant.cancel(true);
+  });
+  test.each(['key', 'unready', 'composition', 'draft'] as const)('display rejection %s refreshes and republishes the live result without dispatch', async reason => {
+    const { assistant, generator, offer, commands, fresh } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const original = offer(), start = commands.length;
+    assistant.displayAck({ type: 'displayAck', suggestionId: original.id!, key: original.key, reason });
+    expect(commands.slice(start)).toContainEqual({ type: 'snapshot', nonce: expect.any(String) });
+    fresh(); expect(offer()).toMatchObject({ id: original.id, text: 'Reply' });
+    expect(commands.filter(c => c.type === 'suggestion')).toHaveLength(2);
+    assistant.displayAck({ type: 'displayAck', suggestionId: original.id!, key: offer().key, reason: 'displayed' });
+    await vi.advanceTimersByTimeAsync(5000); expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
+  });
+  test.each(['unready', 'composition', 'draft'] as const)('display recovery retains a live continuation across temporary %s', async reason => {
+    const { assistant, generator, offer, commands, fresh } = setup();
+    assistant.receive(snap({ draft: 'Thanks' })); await vi.advanceTimersByTimeAsync(1000);
+    const original = offer();
+    assistant.displayAck({ type: 'displayAck', suggestionId: original.id!, key: original.key, reason });
+    const temporary = reason === 'unready' ? { ready: false } : reason === 'composition' ? { composing: true } : { draftIssue: 'unsupported' as const };
+    fresh(snap({ draft: 'Thanks', ...temporary }));
+    expect(assistant['live']?.offer?.id).toBe(original.id);
+    fresh(snap({ draft: 'Thanks' }));
+    expect(offer()).toMatchObject({ id: original.id, key: suggestionKey(assistant.snapshot) });
+    expect(commands.filter(c => c.type === 'suggestion')).toHaveLength(2); expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
+  });
+  test('forged/stale acknowledgements do nothing and rejection recovery is bounded', async () => {
+    const { assistant, generator, offer, commands, fresh } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const original = offer(), start = commands.length;
+    assistant.displayAck({ type: 'displayAck', suggestionId: 'forged', key: original.key, reason: 'key' });
+    assistant.displayAck({ type: 'displayAck', suggestionId: original.id!, key: 'wrong', reason: 'key' });
+    expect(commands).toHaveLength(start);
+    for (let i = 0; i < 4; i++) {
+      assistant.displayAck({ type: 'displayAck', suggestionId: original.id!, key: offer().key, reason: 'key' });
+      if (i < 3) fresh();
+    }
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(commands.filter(c => c.type === 'snapshot')).toHaveLength(3); expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
+  });
+  test('a stale visible-offer dismissal never dismisses or cancels the newer context', async () => {
+    const { assistant, generator, offer } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const old = offer(), oldKey = assistant['emptyKey']();
+    assistant.receive(snap({ messages: [{ id: 'new', text: 'New question', outgoing: false }] }));
+    assistant.dismiss({ suggestionId: old.id, key: old.key });
+    expect(assistant['cache'].get(oldKey!)).toEqual({ dismissed: true });
+    await vi.advanceTimersByTimeAsync(1000); expect(generator).toHaveBeenCalledTimes(2);
+    expect(offer().id).not.toBe(old.id); expect(assistant['cache'].get(assistant['emptyKey']()!)).toEqual({ text: 'Reply' });
+    const current = offer(); assistant.dismiss({ suggestionId: 'forged', key: current.key });
+    expect(assistant['live']?.offer?.id).toBe(current.id); assistant.cancel(true);
+  });
+  test('dismissal by offer ID survives more than fifty display-key updates', async () => {
+    const { assistant, offer, commands, generator } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const original = offer(), context = assistant['emptyKey']();
+    for (let i = 0; i < 60; i++) assistant.receive(snap({ messages: [{ id: `history-${i}`, text: 'Older', outgoing: true }, ...snap().messages] }));
+    expect(offer().id).toBe(original.id); expect(offer().key).not.toBe(original.key);
+    const start = commands.length; assistant.dismiss({ suggestionId: original.id, key: original.key });
+    expect(assistant['live']).toBeUndefined(); expect(commands.slice(start)).toContainEqual({ type: 'clear' });
+    expect(assistant['cache'].get(context!)).toEqual({ dismissed: true });
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(3000); expect(generator).toHaveBeenCalledOnce();
+    assistant.cancel(true);
+  });
+  test('dismissal of a detached Thinking request retires only its original context while a newer request is live', async () => {
+    const completions: ((text: string) => void)[] = [];
+    const { assistant, generator, commands, offer } = setup(vi.fn<typeof generate>().mockImplementation(() => new Promise(resolve => completions.push(resolve))));
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const old = commands.filter(c => c.type === 'thinking').at(-1)!;
+    if (old.type !== 'thinking') throw new Error('Expected Thinking');
+    const oldContext = assistant['emptyKey']();
+    assistant.receive(snap({ messages: [{ id: 'new', text: 'New question', outgoing: false }] }));
+    await vi.advanceTimersByTimeAsync(1000); const newer = assistant['live']!, start = commands.length;
+    assistant.dismiss({ requestId: old.requestId });
+    expect(generator.mock.calls[0][0].signal?.aborted).toBe(true);
+    expect(generator.mock.calls[1][0].signal?.aborted).toBe(false);
+    expect(assistant['live']).toBe(newer); expect(commands).toHaveLength(start);
+    expect(assistant['cache'].get(oldContext!)).toEqual({ dismissed: true });
+    completions[0]('Dismissed result'); completions[1]('New reply'); await vi.advanceTimersByTimeAsync(0);
+    expect(offer().text).toBe('New reply'); expect(assistant['cache'].get(oldContext!)).toEqual({ dismissed: true });
+    assistant.cancel(true);
+  });
+  test('unbound and forged remote dismissals cannot dismiss a newer offer', async () => {
+    const { assistant, offer, commands } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    const current = offer(), start = commands.length;
+    assistant.dismiss({}); assistant.dismiss({ requestId: 'forged' });
+    expect(assistant['live']?.offer?.id).toBe(current.id); expect(commands).toHaveLength(start);
+    assistant.cancel(true);
+  });
+  test('a stale draft-offer dismissal cannot overwrite suppression for a newer draft', async () => {
+    const { assistant, offer, generator } = setup();
+    assistant.receive(snap({ draft: 'Old draft' })); await vi.advanceTimersByTimeAsync(1000); const old = offer();
+    assistant.receive(snap({ draft: 'New draft' })); await vi.advanceTimersByTimeAsync(1000);
+    assistant.dismiss({ suggestionId: old.id, key: old.key });
+    expect(assistant['requested'].get(a)).toBe('New draft');
+    assistant.receive(snap({ draft: 'New draft', activity: 1 })); await vi.advanceTimersByTimeAsync(1000);
+    expect(generator).toHaveBeenCalledTimes(2); assistant.cancel(true);
+  });
+  test('lost refresh acknowledgement retries snapshots three times then accepts an ordinary fresh snapshot', async () => {
+    const { assistant, generator, offer, commands } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+    assistant.refresh(); assistant.receive(snap());
+    expect(assistant['live']).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(3000);
+    const refreshes = commands.filter(c => c.type === 'snapshot');
+    expect(refreshes).toHaveLength(3); expect(new Set(refreshes.map(c => c.nonce)).size).toBe(1);
+    expect(assistant['refreshNonce']).toBeUndefined();
+    assistant.receive(snap()); expect(offer()).toMatchObject({ text: 'Reply' });
+    expect(assistant['live']?.offer).toBeDefined(); expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
+  });
+  test('a late retry acknowledgement restores the cache and cancels the watchdog; suspended documents stay gated', async () => {
+    const { assistant, generator, commands, fresh } = setup();
+    assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000); assistant.refresh();
+    await vi.advanceTimersByTimeAsync(1000); fresh();
+    await vi.advanceTimersByTimeAsync(5000); expect(commands.filter(c => c.type === 'snapshot')).toHaveLength(2); expect(generator).toHaveBeenCalledOnce();
+    assistant.suspend(); assistant.refresh(true); await vi.advanceTimersByTimeAsync(5000);
+    assistant.receive(snap()); expect(assistant.snapshot.ready).toBe(false);
+    fresh(snap({ revision: 'new document' })); expect(assistant.snapshot.ready).toBe(true); assistant.cancel(true);
+  });
+  test('decision counters count transitions rather than activity polls', async () => {
+    const decision = vi.fn(); useRequestCounts({ decision } as unknown as RequestCounts);
+    const { assistant, generator } = setup();
+    const unknown = snap({ messages: [{ id: 'unknown', text: 'PRIVATE_MESSAGE', outgoing: null }] });
+    for (let activity = 0; activity < 10; activity++) assistant.receive({ ...unknown, activity });
+    expect(decision.mock.calls).toEqual([['unknown_direction']]);
+    assistant.receive(snap({ messages: [{ id: 'owner', text: 'PRIVATE_OWNER', outgoing: true }] }));
+    assistant.receive(snap({ messages: [{ id: 'empty', text: '', outgoing: false }] }));
+    assistant.receive(snap());
+    for (let activity = 11; activity < 20; activity++) assistant.receive({ ...snap(), activity });
+    expect(decision.mock.calls).toEqual([['unknown_direction'], ['owner_last'], ['unreadable_latest'], ['debouncing_unsettled']]);
+    await vi.advanceTimersByTimeAsync(1000); expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
   });
 });
