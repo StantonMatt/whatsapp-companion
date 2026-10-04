@@ -28,6 +28,7 @@ import { StickerSendDiagnostics } from './sticker-send-diagnostics';
 import { PickerDiagnostics } from './picker-diagnostics';
 import { DirectStickerSender } from './direct-sticker-sender';
 import { DirectStickerSafety } from './direct-sticker-safety';
+import { installEditContextMenus } from './context-menu';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -104,6 +105,7 @@ async function start() {
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), partition: fixture ? 'persist:fixture' : 'persist:whatsapp', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true } });
+  installEditContextMenus([remote.webContents, controls.webContents], win, Menu);
   // Scheme privileges are global; the handler exists only in the local session.
   controls.webContents.session.protocol.handle(STICKER_SCHEME, request => stickerResponse({ readSticker }, request));
   // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.

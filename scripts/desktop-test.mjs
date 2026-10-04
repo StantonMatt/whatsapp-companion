@@ -100,6 +100,50 @@ try {
   });
   const viewRoles = await app.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(item => item.label === 'View').submenu.items.map(item => item.role));
   expect(viewRoles).not.toContain('zoomin'); expect(viewRoles).not.toContain('zoomout');
+  // Capture main-process templates/popups without opening a native menu. No
+  // fixture hook or additional API is exposed to either renderer.
+  try {
+    const syntheticMenus = await app.evaluate(({ BrowserWindow, Menu }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      const probe = globalThis.companionContextMenuTest = { originalBuild: Menu.buildFromTemplate, popups: [], events: 0 };
+      Menu.buildFromTemplate = template => ({ popup: ({ window }) => {
+        probe.popups.push({ items: template.map(item => item.label ?? item.type), owner: window === win });
+      } });
+      probe.remote = win.contentView.children[0].webContents;
+      probe.listener = () => { probe.events++; };
+      probe.remote.on('context-menu', probe.listener);
+      const params = { isEditable: true, selectionText: '', misspelledWord: '', dictionarySuggestions: [], spellcheckEnabled: false,
+        editFlags: { canCut: false, canCopy: false, canPaste: true, canSelectAll: true } };
+      for (const view of win.contentView.children) {
+        view.webContents.emit('context-menu', {}, params);
+        view.webContents.emit('context-menu', {}, { ...params, isEditable: false });
+      }
+      probe.events = 0;
+      return probe.popups;
+    });
+    expect(syntheticMenus).toEqual(Array.from({ length: 2 }, () => ({ items: ['Cut', 'Copy', 'Paste', 'separator', 'Select all'], owner: true })));
+    const contextComposer = remote.getByRole('textbox', { name: 'Type a message' });
+    await contextComposer.click({ button: 'right' });
+    await expect.poll(() => app.evaluate(() => globalThis.companionContextMenuTest.events)).toBe(1);
+    expect(await app.evaluate(() => globalThis.companionContextMenuTest.popups.at(-1))).toEqual({ items: ['Cut', 'Copy', 'Paste', 'separator', 'Select all'], owner: true });
+    await contextComposer.evaluate(element => element.addEventListener('contextmenu', event => {
+      event.preventDefault(); element.dataset.contextMenuPrevented = 'true';
+    }, { once: true }));
+    await contextComposer.click({ button: 'right' });
+    await expect(contextComposer).toHaveAttribute('data-context-menu-prevented', 'true');
+    expect(await app.evaluate(() => ({ events: globalThis.companionContextMenuTest.events, popups: globalThis.companionContextMenuTest.popups.length }))).toEqual({ events: 1, popups: 3 });
+    console.log('PASS both native edit menus and DOM preventDefault suppresses Electron context-menu');
+  } finally {
+    await remote.getByRole('textbox', { name: 'Type a message' }).evaluate(element => element.removeAttribute('data-context-menu-prevented'));
+    await app.evaluate(({ Menu }) => {
+      const probe = globalThis.companionContextMenuTest;
+      if (probe) {
+        Menu.buildFromTemplate = probe.originalBuild;
+        probe.remote.removeListener('context-menu', probe.listener);
+        delete globalThis.companionContextMenuTest;
+      }
+    });
+  }
   const originalSize = (await geometry()).size;
   for (const panelOpen of [false, true]) {
     if (panelOpen) await openPanel('settings');
