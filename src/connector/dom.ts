@@ -155,6 +155,7 @@ export class DomConnector {
   private lastContentKey = '';
   private lastAccountSafety: AccountSafetyReason | undefined;
   private popupMode: 'refine' | 'notice' = 'notice';
+  private popupKey?: string;
   private pending?: Extract<RemoteCommand, { type: 'refining' | 'thinking' }>;
   private fallbackDots?: HTMLElement;
   private dotsTimer?: ReturnType<typeof setInterval>;
@@ -308,14 +309,18 @@ export class DomConnector {
     this.button = this.doc.createElement('button'); this.button.className = 'trigger'; this.button.textContent = '✦'; this.button.title = 'Suggest reply'; this.button.setAttribute('aria-label', 'Suggest reply');
     this.button.setAttribute('aria-haspopup', 'dialog'); this.button.setAttribute('aria-expanded', 'false');
     this.button.addEventListener('click', event => { if (event.isTrusted) {
-      if (this.pending?.origin === 'auto') {
+      const intent = this.userIntent();
+      const snapshot = this.flushAction();
+      if (intent.pending?.origin === 'user') {
+        this.dismissPopup(intent.dismissal, snapshot); this.editor()?.focus();
+      }
+      else if (intent.pending?.origin === 'auto') {
         // Automatic empty-composer work keeps running; return focus so Tab and typing still reach the composer.
-        if (this.read().draft.trim()) { this.dismissPopup(); this.openPopup(); }
+        if (snapshot.draft.trim()) { this.dismissPopup(intent.dismissal, snapshot); this.openPopup(intent, snapshot); }
         else this.editor()?.focus();
       }
-      else if (this.pending) { this.dismissPopup(); this.editor()?.focus(); }
-      else if (!this.popup.hidden && this.popupMode === 'refine') { this.hidePopup(); this.editor()?.focus(); }
-      else this.openPopup();
+      else if (intent.popup === 'refine') { this.hidePopup(snapshot); this.editor()?.focus(); }
+      else this.openPopup(intent, snapshot);
     } });
     this.loadingStatus = this.doc.createElement('div'); this.loadingStatus.className = 'sr-status';
     this.loadingStatus.setAttribute('role', 'status'); this.loadingStatus.setAttribute('aria-live', 'polite');
@@ -426,7 +431,15 @@ export class DomConnector {
     }
   }
   private selectionChanged = () => this.scheduleRefresh();
-  private scroll = (event?: Event) => { this.dotsGeometry = undefined; this.syncGhostScroll(); if (event?.type === 'input') { this.layoutDirty = true; this.scheduleRefresh(); } };
+  private scroll = (event?: Event) => {
+    this.dotsGeometry = undefined;
+    if (event?.type === 'input') {
+      // Input/fill can precede observer delivery and the next animation frame.
+      // Dirty composer layout and its accessible trigger immediately.
+      this.layoutDirty = true; this.updateTrigger(); this.scheduleRefresh();
+    }
+    this.syncGhostScroll();
+  };
   private resize = () => { this.layoutDirty = true; this.refresh(); };
   private navigationEvent = (event: RemoteEvent) => {
     // Invalidate queued commands synchronously, before main can return a clear.
@@ -445,9 +458,10 @@ export class DomConnector {
   };
   private pointer = (event: Event) => {
     if (!event.isTrusted) return;
-    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event)) this.hidePopup();
+    const intent = this.userIntent();
+    if (!event.composedPath().includes(this.host) && !this.navigation?.contains(event) && intent.popup) this.hidePopup();
     const send = event.target instanceof Element ? event.target.closest('#main footer button, #main footer [role="button"]') : null;
-    if (this.pending && send?.querySelector('[data-icon="send"]')) this.takeover(true);
+    if (intent.pending && send?.querySelector('[data-icon="send"]')) this.takeover(true);
     else this.activity(event);
   };
   private compositionStart = (event: Event) => {
@@ -458,19 +472,28 @@ export class DomConnector {
     if (event.target instanceof Node && this.composingEditor?.contains(event.target)) { this.composingEditor = null; this.refresh(); }
   };
   private keydown = (event: KeyboardEvent) => {
-    if (!event.isTrusted || event.isComposing || this.composing || event.keyCode === 229) return;
+    if (!event.isTrusted) return;
+    // Escape and Tab target what is visible before reconciliation, even if
+    // refresh clears it or main synchronously republishes a newer item.
+    const intent = this.userIntent();
+    const wasShown = Boolean(intent.pending || intent.suggestion || intent.popup);
+    const snapshot = ['Escape', 'Tab'].includes(event.key) ? this.flushAction() : undefined;
+    if (event.isComposing || (snapshot?.composing ?? this.composing) || event.keyCode === 229) return;
     const editor = this.editor();
-    if (event.key === 'Escape' && (editor?.contains(event.target as Node) || event.composedPath().includes(this.host)) && (this.pending || this.suggestion || !this.popup.hidden)) {
-      event.preventDefault(); event.stopImmediatePropagation(); this.dismissPopup(); editor?.focus(); return;
+    if (event.key === 'Escape' && (editor?.contains(event.target as Node) || event.composedPath().includes(this.host)) && wasShown) {
+      event.preventDefault(); event.stopImmediatePropagation(); this.dismissPopup(intent.dismissal, snapshot); editor?.focus(); return;
     }
     if (event.target !== editor && !editor?.contains(event.target as Node)) {
       if (!['Shift', 'Control', 'Meta', 'Alt'].includes(event.key)) this.takeover();
       return;
     }
-    if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && this.suggestion && editor && caretAtEnd(editor)) {
-      if (suggestionKey(this.read()) !== this.suggestion.key) { this.clear(); return; }
+    if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && intent.suggestion && editor && snapshot?.focused && snapshot.caretAtEnd) {
+      if (suggestionKey(this.read()) !== intent.suggestion.key) {
+        if (this.suggestion === intent.suggestion) this.clear(snapshot);
+        return;
+      }
       event.preventDefault(); event.stopImmediatePropagation();
-      this.acceptSuggestion(); return;
+      this.acceptSuggestion(intent.suggestion, snapshot); return;
     }
     if (!['Shift', 'Control', 'Meta', 'Alt'].includes(event.key)) this.takeover(event.key === 'Enter');
   };
@@ -504,6 +527,7 @@ export class DomConnector {
     const snapshot = this.read();
     if (this.suggestion !== command || editor !== this.editor() || activity !== this.activityGeneration || command.key !== suggestionKey(snapshot) || !snapshot.ready || !snapshot.focused || snapshot.composing || snapshot.draftIssue || !this.wholeDraftSelected(editor)) {
       if (this.suggestion === command) this.clear();
+      else this.restoreReplacementSelection();
       return;
     }
     this.applySuggestion(command, () => this.insertAtSelection(command.text));
@@ -528,9 +552,11 @@ export class DomConnector {
       selection?.removeAllRanges(); selection?.addRange(originalRange);
     }
   }
-  private acceptSuggestion() {
-    const suggestion = this.suggestion, snapshot = this.read();
-    if (!suggestion || suggestion.key !== suggestionKey(snapshot) || !snapshot.ready || snapshot.composing || snapshot.draftIssue) return;
+  private acceptSuggestion(suggestion = this.userIntent().suggestion, snapshot = this.flushAction()) {
+    const current = this.read();
+    if (!suggestion || suggestion.key !== suggestionKey(current) || !current.ready || current.composing || current.draftIssue) return;
+    // Keep the displayed command's identity, including any active replacement.
+    if (suggestion.replace && this.suggestion !== suggestion) return;
     if (suggestion.replace && snapshot.draft.trim()) { void this.replaceDraft(suggestion); return; }
     this.applySuggestion(suggestion, () => this.insert(suggestion.text, suggestion.replace));
   }
@@ -554,31 +580,46 @@ export class DomConnector {
   }
 
   private hidePopup(snapshot?: Snapshot) {
-    this.popupRequest = undefined;
+    this.popupRequest = undefined; this.popupKey = undefined;
     if (this.popup.hidden) return;
     this.popup.hidden = true; this.button.setAttribute('aria-expanded', 'false'); this.updateTrigger(snapshot);
   }
-  private dismissPopup() {
+  private userIntent() {
+    return {
+      popup: this.popup.hidden ? undefined : this.popupMode,
+      pending: this.pending, suggestion: this.suggestion, dismissal: this.dismissalTarget()
+    };
+  }
+  private dismissalTarget() {
     const request = this.pending ? { id: this.pending.requestId } : !this.popup.hidden ? this.popupRequest : undefined;
     const offer = request ? undefined : this.suggestion;
+    return { request, offer };
+  }
+  private dismissPopup(target = this.dismissalTarget(), snapshot = this.flushAction()) {
+    const { request, offer } = target;
     const id = request?.id ?? offer?.id;
     if (id) {
       this.dismissedIds.add(id);
       if (offer?.requestId) this.dismissedIds.add(offer.requestId);
       while (this.dismissedIds.size > 50) this.dismissedIds.delete(this.dismissedIds.values().next().value!);
-    } else this.dismissedKey = offer?.key ?? suggestionKey(this.read());
+    } else this.dismissedKey = offer?.key ?? suggestionKey(snapshot);
     // Clear locally before main can synchronously publish a newer item.
-    this.clear(); this.hidePopup();
+    this.clear(snapshot); this.hidePopup(snapshot);
     this.emit({ type: 'dismiss', ...(request ? { requestId: request.id } : offer?.id ? { suggestionId: offer.id, key: offer.key } : {}) });
     this.takeover();
   }
-  private popupShell(mode: typeof this.popupMode, title: string) {
-    this.popupRequest = undefined; this.popupMode = mode; this.popup.replaceChildren(); this.popup.className = `popup ${mode}`;
+  private popupShell(mode: typeof this.popupMode, title: string, key: string) {
+    this.popupKey = key; this.popupRequest = undefined; this.popupMode = mode; this.popup.replaceChildren(); this.popup.className = `popup ${mode}`;
     this.popup.hidden = false; this.popup.setAttribute('aria-label', title); this.button.setAttribute('aria-expanded', 'true');
     const header = this.doc.createElement('div'); header.className = 'popup-header';
     const label = this.doc.createElement('span'); label.textContent = title;
     const close = this.doc.createElement('button'); close.className = 'close'; close.textContent = '×'; close.setAttribute('aria-label', 'Close reply assistance');
-    close.addEventListener('click', event => { if (!event.isTrusted) return; this.dismissPopup(); this.editor()?.focus(); });
+    close.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      const target = this.dismissalTarget();
+      const snapshot = this.flushAction();
+      this.dismissPopup(target, snapshot); this.editor()?.focus();
+    });
     header.append(label, close); this.popup.append(header);
   }
   private clear(snapshot?: Snapshot) {
@@ -598,7 +639,32 @@ export class DomConnector {
     this.updateTrigger(snapshot);
   }
   private stickerReadiness = new StickerReadiness();
-  private refresh() {
+  private flushAction(): Snapshot {
+    // Call once after capturing the visible target. Fresh reads write through
+    // extraction caches; reconciliation consumes pre-action DOM changes now.
+    return this.refresh(false, true) ?? this.read();
+  }
+  private publishSnapshot(snapshot: Snapshot, key: string, contentKey: string) {
+    // A popup belongs to its creation context, not the last publication.
+    if (this.popupKey !== undefined && this.popupKey !== contentKey) this.hidePopup(snapshot);
+    if (key !== this.lastKey && !(this.dispatch && this.dispatchMatches(this.dispatch, snapshot))) {
+      this.lastKey = key;
+      if ((this.suggestion && this.suggestion.key !== contentKey) || (this.pending && this.pending.key !== contentKey)) this.clear(snapshot);
+      this.lastContentKey = contentKey;
+      this.emit({ type: 'snapshot', snapshot });
+    }
+  }
+  private refreshRequest(): Snapshot {
+    // Focus/selection/activity can change in the handler body after its one
+    // action flush. Publish fresh evidence immediately before the request, using
+    // the same reconciliation as refresh without a second action/layout flush.
+    this.mutations(this.observer?.takeRecords() ?? [], false);
+    const snapshot = this.read();
+    this.publishSnapshot(snapshot, snapshotKey(snapshot), suggestionKey(snapshot));
+    this.updateTrigger(snapshot);
+    return snapshot;
+  }
+  private refresh(replace = true, fresh = false) {
     if (this.stopped) return;
     if (this.refreshFrame !== undefined) this.doc.defaultView?.cancelAnimationFrame(this.refreshFrame);
     this.refreshFrame = undefined;
@@ -610,7 +676,7 @@ export class DomConnector {
       this.lastAccountSafety = reason;
       this.emit({ type: 'accountSafety', reason });
     }
-    const snapshot = this.read(false), keys = this.snapshotKeys.keys(snapshot), key = keys.snapshot;
+    const snapshot = this.read(fresh), keys = fresh ? { snapshot: snapshotKey(snapshot), suggestion: suggestionKey(snapshot) } : this.snapshotKeys.keys(snapshot), key = keys.snapshot;
     // Read composer geometry/style before navigation, picker and overlay writes.
     const editor = this.editor(), rect = this.layoutDirty ? editor?.getBoundingClientRect() : undefined;
     const editorStyle = rect && editor ? getComputedStyle(editor) : undefined;
@@ -627,13 +693,7 @@ export class DomConnector {
     if (dark !== this.theme) for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', muted: '#9babae', line: '#373b3c', hover: '#2e2f2f' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', muted: '#667781', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
     this.theme = dark;
     const contentKey = keys.suggestion;
-    if (key !== this.lastKey && !(this.dispatch && this.dispatchMatches(this.dispatch, snapshot))) {
-      this.lastKey = key;
-      if ((this.suggestion && this.suggestion.key !== contentKey) || (this.pending && this.pending.key !== contentKey)) this.clear(snapshot);
-      if (contentKey !== this.lastContentKey) this.hidePopup(snapshot);
-      this.lastContentKey = contentKey;
-      this.emit({ type: 'snapshot', snapshot });
-    }
+    this.publishSnapshot(snapshot, key, contentKey);
     this.button.hidden = !snapshot.ready; this.updateTrigger(snapshot);
     if (geometry && editor) {
       const { rect, css, clientLeft, clientTop, clientWidth, clientHeight, width, height } = geometry;
@@ -651,11 +711,12 @@ export class DomConnector {
       if (due > 0) this.settleTimer = setTimeout(() => { this.layoutDirty = true; this.scheduleRefresh(); }, due);
     }
     if (this.stickersDirty) { this.stickersDirty = false; void this.indexStickers(); }
-    if (snapshot.focused && snapshot.draft.trim() && this.suggestion?.replace && !this.replacement) void this.replaceDraft(this.suggestion);
+    if (replace && snapshot.focused && snapshot.draft.trim() && this.suggestion?.replace && !this.replacement) void this.replaceDraft(this.suggestion);
+    return snapshot;
   }
-  private openPopup() {
-    const snapshot = this.read(), key = suggestionKey(snapshot);
-    const suggested = this.suggestion?.key === key ? this.suggestion : undefined;
+  private openPopup(intent = this.userIntent(), snapshot = this.flushAction()) {
+    const key = suggestionKey(snapshot);
+    const suggested = intent.suggestion?.key === key ? intent.suggestion : undefined;
     const hasText = Boolean(snapshot.draft.trim() || suggested);
     if (suggested?.replace && snapshot.draft.trim()) this.clear();
     this.takeover();
@@ -665,19 +726,29 @@ export class DomConnector {
       this.hidePopup();
       const editor = this.editor();
       if (editor) { editor.focus(); const range = this.doc.createRange(); range.selectNodeContents(editor); range.collapse(false); const selection = this.doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); }
-      this.refresh(); this.emit({ type: 'request', instruction, ...(operation ? { operation } : {}), key, ...(instruction && !snapshot.draft.trim() && suggested?.id ? { suggestionId: suggested.id } : {}) });
+      const current = this.refreshRequest();
+      if (suggestionKey(current) !== key) return;
+      this.emit({ type: 'request', instruction, ...(operation ? { operation } : {}), key: suggestionKey(current), ...(instruction && !snapshot.draft.trim() && suggested?.id ? { suggestionId: suggested.id } : {}) });
     };
     if (!hasText) {
       request(); return;
     }
-    this.popupShell('refine', snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion');
+    this.popupShell('refine', snapshot.draft.trim() ? 'Refine draft' : 'Refine suggestion', key);
     const row = this.doc.createElement('div'); row.className = 'actions';
     let translating = false;
     for (const label of [...Object.keys(refinements), 'Translate…']) {
       const b = this.doc.createElement('button'); b.className = 'action'; b.textContent = label;
       b.addEventListener('click', e => {
         if (!e.isTrusted) return;
-        if (label === 'Translate…') { translating = true; instruction.value = ''; instruction.placeholder = 'Language, e.g. Spanish'; instruction.setAttribute('aria-label', 'Translation language'); apply.disabled = true; instruction.focus(); }
+        // The clicked option belongs to this visible popup, not any popup
+        // main may republish while the composer is flushed.
+        const intent = this.userIntent();
+        const current = this.flushAction();
+        if (intent.popup !== 'refine' || suggestionKey(this.read()) !== key) { this.hidePopup(current); return; }
+        if (label === 'Translate…') {
+          translating = true; instruction.value = ''; instruction.placeholder = 'Language, e.g. Spanish';
+          instruction.setAttribute('aria-label', 'Translation language'); apply.disabled = true; instruction.focus();
+        }
         else request(refinements[label]);
       }); row.append(b);
     }
@@ -687,14 +758,21 @@ export class DomConnector {
     const icon = this.doc.createElementNS(svgNS, 'svg'); icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('aria-hidden', 'true');
     const path = this.doc.createElementNS(svgNS, 'path'); path.setAttribute('fill', 'currentColor'); path.setAttribute('d', 'M2.01 21 23 12 2.01 3 2 10l15 2-15 2z');
     icon.append(path); apply.append(icon);
-    const submit = () => { const text = instruction.value.trim(); if (text) request(translating ? `Translate the draft to ${text}.` : text, translating ? 'translate' : undefined); };
+    const submit = (event?: KeyboardEvent) => {
+      // Read instruction and translation mode before request flushes the popup.
+      const intent = this.userIntent(), text = instruction.value.trim(), translate = translating;
+      const current = this.flushAction();
+      event?.preventDefault(); event?.stopPropagation();
+      if (intent.popup !== 'refine' || suggestionKey(this.read()) !== key) { this.hidePopup(current); return; }
+      if (text) request(translate ? `Translate the draft to ${text}.` : text, translate ? 'translate' : undefined);
+    };
     instruction.addEventListener('input', () => { apply.disabled = !instruction.value.trim(); });
     apply.addEventListener('click', e => { if (e.isTrusted) submit(); });
-    instruction.addEventListener('keydown', e => { if (e.isTrusted && e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); e.stopPropagation(); submit(); } });
+    instruction.addEventListener('keydown', e => { if (e.isTrusted && e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { submit(e); } });
     field.append(instruction, apply); this.popup.append(row, field); instruction.focus();
   }
   command(command: RemoteCommand) {
-    if (command.type === 'snapshot') { this.dismissedKey = undefined; this.refresh(); this.emit({ type: 'snapshot', snapshot: this.read(), nonce: command.nonce }); return; }
+    if (command.type === 'snapshot') { this.dismissedKey = undefined; const snapshot = this.refresh(true, true) ?? this.read(); this.emit({ type: 'snapshot', snapshot, nonce: command.nonce }); return; }
     if (command.type === 'captureStickerPickerLayout') { this.emit({ type: 'stickerPickerLayout', nonce: command.nonce, result: captureStickerPicker(this.doc) }); return; }
     if (command.type === 'makeSticker') { void this.stickerTransfer?.make(command, command.image); return; }
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
@@ -705,18 +783,22 @@ export class DomConnector {
     if (command.type === 'notice') {
       if ((command.requestId && this.dismissedIds.has(command.requestId)) || (command.retryKey && command.retryKey !== suggestionKey(this.read()))) return;
       if (this.pending) this.clear();
-      this.popupShell('notice', 'Reply assistance');
+      this.popupShell('notice', 'Reply assistance', command.retryKey ?? suggestionKey(this.read()));
       if (command.requestId) this.popupRequest = { id: command.requestId };
       const text = this.doc.createElement('div'); text.className = 'notice-text'; text.textContent = command.text; text.setAttribute('role', 'status'); this.popup.append(text);
       if (command.retryKey) {
         const retry = this.doc.createElement('button'); retry.className = 'action'; retry.textContent = 'Try again';
         retry.addEventListener('click', event => {
-          if (!event.isTrusted || command.retryKey !== suggestionKey(this.read())) return;
+          if (!event.isTrusted) return;
+          const intent = this.userIntent(), retryKey = command.retryKey!;
+          this.flushAction();
+          if (intent.popup !== 'notice' || suggestionKey(this.read()) !== retryKey) return;
           this.dismissedKey = undefined; this.hidePopup();
           const editor = this.editor();
           if (editor) { editor.focus(); const range = this.doc.createRange(); range.selectNodeContents(editor); range.collapse(false); const selection = this.doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); }
-          this.refresh();
-          this.emit({ type: 'request', operation: 'retry', key: command.retryKey });
+          const current = this.refreshRequest();
+          if (suggestionKey(current) !== retryKey) return;
+          this.emit({ type: 'request', operation: 'retry', key: suggestionKey(current) });
         }); this.popup.append(retry);
       }
       return;
