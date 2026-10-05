@@ -1,9 +1,9 @@
 import { StickerGroupToggles, useStickerGroups } from './sticker-groups';
 import { stickerURL } from '../shared/sticker-url';
-import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Status, Sticker } from '../shared/model';
 import type { StickerSend } from '../shared/sticker-transfer';
-import { searchStickers } from '../core/stickers';
+import { useStickerViewport } from './sticker-grid';
 import type { Act } from './index';
 import { BackIcon, EditIcon } from './icons';
 
@@ -39,7 +39,7 @@ const CheckIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="
 type Exit = 'done' | 'panel' | 'settings';
 type Editor = { id: string; prompt?: { next: string | null; exit?: Exit } };
 type Draft = Editor & { text: string };
-type FocusTarget = { id: string; button: 'tile' | 'offer' } | 'search'
+type FocusTarget = { id: string; button: 'tile' | 'offer' | 'last' } | 'search'
   | { id: string; field: 'textarea' | 'keep'; open?: boolean; scroll?: boolean };
 
 export function Stickers({ status, act }: { status: Status; act: Act }) {
@@ -48,7 +48,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const [query, setQuery] = useState('');
   const [editMode, setEditMode] = useState(false);
   const groups = useStickerGroups(status.state, act, editMode);
-  const [columns, setColumns] = useState(1);
+  const [columns, setColumns] = useState(3);
   const [busyNotice, setBusyNotice] = useState('');
   const [dismissedStop, setDismissedStop] = useState<number | null>(null);
   const countId = useId();
@@ -69,11 +69,33 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const [focus, setFocus] = useState<FocusTarget | null>(null);
   const locating = useRef<{ id: string; source: Element | null; state: Status['stickerLocation'] } | null>(null);
   const all = status.state.stickers;
-  // The order is fixed while the panel is open, so a send or lookup that updates lastSeen never moves a card from under the pointer.
-  const rank = useMemo(() => new Map(searchStickers(all, '').map((s, i) => [s.id, i])), [query]);
-  for (const sticker of searchStickers(all, '')) if (!rank.has(sticker.id)) rank.set(sticker.id, rank.size);
-  const stickers = searchStickers(all, query, groups.filter).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
-  const visible = useRef(new Set<string>()); visible.current = new Set(stickers.map(s => s.id));
+  // Status updates preserve order, so a send/lookup never moves a card under the pointer. A new query refreshes the lastSeen order.
+  const order = useRef<{ query: string; ids: string[] }>({ query, ids: [] });
+  const ordered = useMemo(() => {
+    const byId = new Map(all.map(sticker => [sticker.id, sticker]));
+    const known = new Set(query === order.current.query ? order.current.ids : []);
+    const added = all.filter(sticker => !known.has(sticker.id)).sort((a, b) => b.lastSeen - a.lastSeen);
+    order.current = { query, ids: [...order.current.ids.filter(id => known.has(id) && byId.has(id)), ...added.map(sticker => sticker.id)] };
+    return order.current.ids.map(id => byId.get(id)!);
+  }, [all, query]);
+  const searchText = useRef(new Map<string, { source: string; normalized: string }>());
+  const indexed = useMemo(() => {
+    const next = new Map<string, { source: string; normalized: string }>();
+    const entries = ordered.map(sticker => {
+      const cached = searchText.current.get(sticker.id);
+      const text = cached?.source === sticker.searchTerms ? cached : { source: sticker.searchTerms, normalized: normalizeSearch(sticker.searchTerms) };
+      next.set(sticker.id, text);
+      return { sticker, text: text.normalized };
+    });
+    searchText.current = next;
+    return entries;
+  }, [ordered]);
+  const stickers = useMemo(() => {
+    const terms = query.match(/"[^"]+"|\S+/g)?.map(term => normalizeSearch(term.replace(/^"|"$/g, ''))) ?? [];
+    return indexed.filter(({ sticker, text }) => (!groups.filter || sticker.groups.includes(groups.filter)) && terms.every(term => text.includes(term))).map(entry => entry.sticker);
+  }, [indexed, query, groups.filter]);
+  const visibleIds = useMemo(() => new Set(stickers.map(sticker => sticker.id)), [stickers]);
+  const visible = useRef(visibleIds); visible.current = visibleIds;
 
   const live = status.stickerSend ?? null;
   // The card reacts in the same frame as the click, before the desktop process has chosen a route.
@@ -99,6 +121,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const visibleEditing = editing && visible.current.has(editing.id) ? editing : null;
   const detailId = visibleEditing?.id ?? (editing?.prompt ? null : message?.id);
   const detailIndex = stickers.findIndex(s => s.id === detailId);
+  const viewport = useStickerViewport(grid, stickers.length, columns, detailIndex, editMode);
   const lastChat = useRef(status.chat);
   useEffect(() => {
     const previous = lastChat.current;
@@ -123,7 +146,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     observer?.observe(element); window.addEventListener('resize', measure);
     return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
   }, []);
-  useLayoutEffect(() => { grid.current?.closest<HTMLElement>('.panel')?.scrollTo({ top: 0 }); }, [query, groups.filter]);
+  useLayoutEffect(() => { grid.current?.closest<HTMLElement>('.panel')?.scrollTo({ top: 0 }); viewport.refresh(); }, [query, groups.filter]);
   useEffect(() => { queryRevision.current++; locating.current = null; setFocus(null); }, [groups.filter]);
   useEffect(() => { if (!busy && status.chat.stickerSendBlockedReason !== 'busy') setBusyNotice(''); }, [busy?.nonce, busy?.state, status.chat.stickerSendBlockedReason]);
   useEffect(() => { if (local && live?.nonce === local.nonce) setLocal(null); }, [local, live?.nonce]);
@@ -150,7 +173,8 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   }, [send?.nonce, send?.state, send?.reason, send?.detail]);
   useLayoutEffect(() => {
     const target = focus; if (!target) return;
-    // Consume each explicit action once, even if its target is filtered out.
+    // Mount an offscreen focus target before consuming the explicit action.
+    if (target !== 'search' && viewport.reveal(stickers.findIndex(sticker => sticker.id === target.id))) return;
     setFocus(null);
     const row = grid.current?.querySelector<HTMLElement>('.sticker-detail');
     const card = target !== 'search' ? grid.current?.querySelector<HTMLElement>(`[data-sticker="${target.id}"]`) : null;
@@ -158,13 +182,14 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     const element = (target === 'search' ? search.current
       : 'field' in target ? editing?.id === target.id ? row?.querySelector<HTMLElement>(target.field === 'textarea' ? 'textarea' : '.discard button') : null
       : target.button === 'offer' ? row?.querySelector<HTMLElement>('.msg button')
+      : target.button === 'last' ? [...(card?.querySelectorAll<HTMLElement>('button') ?? [])].at(-1)
       : card?.querySelector<HTMLElement>('.sticker-art')) ?? fallback;
     element?.focus({ preventScroll: target !== 'search' && 'field' in target && !!target.open });
     if (element && target !== 'search' && 'field' in target) {
       if (target.open && element instanceof HTMLTextAreaElement) element.setSelectionRange(element.value.length, element.value.length);
       if (target.scroll) row?.scrollIntoView({ block: 'nearest' });
     }
-  }, [focus]);
+  }, [focus, viewport.first, viewport.last]);
   useLayoutEffect(() => {
     const request = locating.current, location = status.stickerLocation;
     if (!request || location?.id !== request.id || (location.state === request.state?.state && location.id === request.state?.id)) return;
@@ -299,6 +324,86 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     return null;
   };
 
+  // Stable tile handlers read the latest panel state, including send permissions.
+  // Editor/group input changes therefore never invalidate healthy tile props.
+  const tileActions = useRef({ click: (_event: React.MouseEvent, _id: string) => {}, select: (_id: string) => {}, image: (_id: string, _ok: boolean) => {}, cancel });
+  tileActions.current = {
+    click: (event, id) => {
+      if (!editMode && (busy || status.chat.stickerSendBlockedReason === 'busy')) { start(event, id); return; }
+      if (editMode) { if (event.ctrlKey || event.metaKey) groups.toggleSelection(id); else toggle(id); return; }
+      if (broken.has(id)) { setImageRevisions(previous => new Map(previous).set(id, (previous.get(id) ?? 0) + 1)); return; }
+      start(event, id);
+    },
+    select: groups.toggleSelection,
+    image: (id, ok) => setBroken(previous => {
+      if (previous.has(id) === !ok) return previous;
+      const next = new Set(previous); if (ok) next.delete(id); else next.add(id); return next;
+    }), cancel
+  };
+  const handlers = useMemo<TileHandlers>(() => ({
+    click: (event, id) => tileActions.current.click(event, id),
+    select: id => tileActions.current.select(id),
+    image: (id, ok) => tileActions.current.image(id, ok),
+    cancel: () => tileActions.current.cancel()
+  }), []);
+  const navigate = (event: React.KeyboardEvent) => {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
+    const button = event.target as HTMLElement;
+    const detailRow = button.closest('.sticker-detail');
+    if (detailRow && event.key === 'Tab' && detailIndex >= 0) {
+      const controls = [...detailRow.querySelectorAll<HTMLElement>(':is(button, input, textarea):not(:disabled)')];
+      const edge = button === controls[event.shiftKey ? 0 : controls.length - 1];
+      const rowEnd = Math.min(detailIndex - detailIndex % columns + columns - 1, stickers.length - 1);
+      const next = event.shiftKey ? rowEnd : rowEnd + 1;
+      if (edge && next < stickers.length && !grid.current?.querySelector(`[data-sticker="${stickers[next].id}"]`)) {
+        event.preventDefault(); setFocus({ id: stickers[next].id, button: event.shiftKey ? 'last' : 'tile' });
+      }
+      return;
+    }
+    if (!button.matches('.sticker-art, .sticker-pick, .cancel-send')) return;
+    const index = stickers.findIndex(sticker => sticker.id === button.closest<HTMLElement>('[data-sticker]')?.dataset.sticker);
+    const step = event.key === 'ArrowDown' ? columns : event.key === 'ArrowUp' ? -columns : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    if (step) {
+      const next = Math.max(0, Math.min(stickers.length - 1, index + step));
+      event.preventDefault(); setFocus({ id: stickers[next].id, button: 'tile' });
+    } else if (event.key === 'Tab') {
+      // Preserve native tab order within a card/detail. Bridge only a window edge.
+      const direction = event.shiftKey ? -1 : 1, next = index + direction;
+      const siblings = [...button.closest<HTMLElement>('[data-sticker]')!.querySelectorAll<HTMLElement>('button')];
+      const edge = button === siblings[event.shiftKey ? 0 : siblings.length - 1];
+      const detailBetween = detailIndex >= 0 && (event.shiftKey ? Math.floor(next / columns) : Math.floor(index / columns)) === Math.floor(detailIndex / columns) && (event.shiftKey ? next % columns === columns - 1 : (index + 1) % columns === 0);
+      if (edge && !detailBetween && next >= 0 && next < stickers.length && !grid.current?.querySelector(`[data-sticker="${stickers[next].id}"]`)) {
+        event.preventDefault(); setFocus({ id: stickers[next].id, button: event.shiftKey ? 'last' : 'tile' });
+      }
+    }
+  };
+  const gridContent = useMemo(() => {
+    const nodes: React.ReactNode[] = [];
+    const detailRow = detailIndex < 0 ? -1 : Math.floor(detailIndex / columns);
+    let skipped = 0;
+    const flush = (key: number) => {
+      if (skipped) nodes.push(<div key={`space-${key}`} className="sticker-spacer" aria-hidden="true" style={{ height: skipped * viewport.stride - 8 }}/>);
+      skipped = 0;
+    };
+    for (let row = 0; row < viewport.rows; row++) {
+      if (row >= viewport.first && row < viewport.last) {
+        flush(row);
+        for (let i = row * columns; i < Math.min((row + 1) * columns, stickers.length); i++) {
+          const sticker = stickers[i];
+          nodes.push(<StickerTile key={sticker.id} sticker={sticker} handlers={handlers} editMode={editMode} selected={groups.selected.has(sticker.id)} attached={detailId === sticker.id} expanded={visibleEditing?.id === sticker.id}
+            imageBroken={broken.has(sticker.id)} imageRevision={imageRevisions.get(sticker.id) ?? 0} feedback={shown?.id === sticker.id ? shown.state : null} sentName={shown?.id === sticker.id ? shown.name : ''}
+            busyState={busy?.id === sticker.id ? busy.state : null} canCancel={cancellable(busy) && busy?.id === sticker.id}
+            tileDisabled={!broken.has(sticker.id) && !editMode && !busy && (!status.chat.canSendSticker || !status.chat.destinationToken) && status.chat.stickerSendBlockedReason !== 'busy'}/>);
+        }
+      } else skipped++;
+      if (row === detailRow) { flush(row + 1); nodes.push('detail'); }
+    }
+    flush(viewport.rows);
+    return nodes;
+  }, [stickers, columns, viewport.first, viewport.last, viewport.rows, viewport.stride, detailIndex, detailId, handlers, editMode, groups.selected,
+    visibleEditing?.id, broken, imageRevisions, shown?.id, shown?.state, shown?.name, busy?.id, busy?.state,
+    status.chat.canSendSticker, status.chat.destinationToken, status.chat.stickerSendBlockedReason]);
+
   const stopReason = status.state.global.directStickerDisabledReason;
   const stopAt = status.state.global.directStickerDisabledAt ?? 0;
   const stopReasons = { 'logged-out': 'WhatsApp logged out.', 'account-warning': 'WhatsApp showed an account warning.', 'send-error': 'a direct send failed.', 'whatsapp-changed': 'WhatsApp changed.' };
@@ -325,40 +430,40 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
       {status.pending && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
       <p className="sr-only" aria-live="polite">{busyNotice || (shown ? announcement(shown) : '')}</p>
       {!stickers.length && <div className="empty"><span aria-hidden="true">▧</span><p>{groupName ? `${query ? 'No matches' : 'No stickers'} in ${groupName}` : query ? 'No matching stickers' : 'Your stickers will appear here'}</p>{groups.filter ? <button onClick={groups.showAll}>{query ? 'Search all groups' : 'Show all groups'}</button> : <small>{query ? 'Try another word or phrase.' : 'Open WhatsApp’s sticker picker and select Favorites. Wait for your stickers to load.'}</small>}</div>}
-      <div className="sticker-grid" ref={grid} style={{ '--cols': columns } as React.CSSProperties}>{stickers.flatMap((sticker, i) => {
-        const own = shown?.id === sticker.id ? shown.state : null;
-        const ownBusy = busy?.id === sticker.id ? busy.state : null;
-        const expanded = visibleEditing?.id === sticker.id;
-        const imageBroken = broken.has(sticker.id);
-        const name = sticker.searchTerms.slice(0, 120) || 'Sticker without search terms';
-        const label = editMode ? name : ownBusy ? 'Sending sticker…' : own === 'sent' ? `Sent to ${shown!.name}` : own === 'cancelled' ? 'Cancelled' : imageBroken ? 'Image unavailable. Retry' : name;
-        const tileDisabled = !imageBroken && !editMode && !busy && (!status.chat.canSendSticker || !status.chat.destinationToken) && status.chat.stickerSendBlockedReason !== 'busy';
-        const card = <div key={sticker.id} className="sticker" role="group" data-sticker={sticker.id} aria-label={sticker.searchTerms.slice(0, 120) || 'Sticker without search terms'} data-selected={groups.selected.has(sticker.id) ? '' : undefined} data-attached={detailId === sticker.id ? '' : undefined}>
-          <button className={`sticker-art${!sticker.searchTerms.trim() ? ' untagged' : ''}`} aria-label={label} title={sticker.searchTerms || undefined}
-            aria-expanded={editMode ? expanded : undefined} aria-disabled={tileDisabled || undefined} data-busy={ownBusy ? '' : undefined} data-sent={own === 'sent' ? '' : undefined} data-cancelled={own === 'cancelled' ? '' : undefined} data-broken={imageBroken || undefined}
-            onClick={e => {
-              if (!editMode && (busy || status.chat.stickerSendBlockedReason === 'busy')) { start(e, sticker.id); return; }
-              if (editMode) { if (e.ctrlKey || e.metaKey) groups.toggleSelection(sticker.id); else toggle(sticker.id); return; }
-              if (imageBroken) { setImageRevisions(previous => new Map(previous).set(sticker.id, (previous.get(sticker.id) ?? 0) + 1)); return; }
-              start(e, sticker.id);
-            }}>
-            <img key={`${sticker.id}-${imageRevisions.get(sticker.id) ?? 0}`} src={stickerURL(sticker.id)} loading="lazy" alt="" draggable={false} onError={() => setBroken(previous => previous.has(sticker.id) ? previous : new Set(previous).add(sticker.id))} onLoad={() => setBroken(previous => { if (!previous.has(sticker.id)) return previous; const next = new Set(previous); next.delete(sticker.id); return next; })}/>
-            {imageBroken && !ownBusy && own !== 'sent' && own !== 'cancelled' && <span className="sticker-overlay broken" aria-hidden="true"><svg viewBox="0 0 24 24"><path fill="none" stroke="currentColor" strokeWidth="1.6" d="M4 5.5h16v13H4zM4 15l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/></svg><b>Retry</b></span>}
-            {ownBusy && <span className="sticker-overlay" aria-hidden="true"><span className="spinner"/>Sending…</span>}
-            {own === 'sent' && <span className="sticker-overlay" aria-hidden="true"><span className="done"><CheckIcon/></span>Sent</span>}
-            {own === 'cancelled' && <span className="sticker-overlay muted" aria-hidden="true">Cancelled</span>}
-            {(own === 'failed' || own === 'missing') && <span className="mark" aria-hidden="true">!</span>}
-          </button>
-          {editMode && <button className="sticker-pick" role="checkbox" aria-checked={groups.selected.has(sticker.id)} aria-label={`Select ${name}`} onClick={() => groups.toggleSelection(sticker.id)}><CheckIcon/></button>}
-          {cancellable(busy) && busy?.id === sticker.id && <button className="cancel-send" aria-label="Cancel sending" title="Cancel sending" onClick={cancel}>×</button>}
-        </div>;
-        const rowEnd = Math.min(detailIndex - detailIndex % columns + columns - 1, stickers.length - 1);
-        return detailIndex >= 0 && i === rowEnd ? [card, detail(detailIndex)] : [card];
-      })}{editing?.prompt && !visibleEditing && detail(0)}</div>
+      <div className="sticker-grid" ref={grid} style={{ '--cols': columns } as React.CSSProperties} onKeyDown={navigate}>
+        {gridContent.map(node => node === 'detail' ? detail(detailIndex) : node)}
+        {editing?.prompt && !visibleEditing && detail(0)}
+      </div>
     </div>
     {groups.bar(stickers)}
   </>;
 }
+
+const normalizeSearch = (text: string) => text.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
+type TileHandlers = { click: (event: React.MouseEvent, id: string) => void; select: (id: string) => void; image: (id: string, ok: boolean) => void; cancel: () => void };
+const StickerTile = memo(function StickerTile({ sticker, handlers, editMode, selected, attached, expanded, imageBroken, imageRevision, feedback, sentName, busyState, canCancel, tileDisabled }: {
+  sticker: Sticker; handlers: TileHandlers; editMode: boolean; selected: boolean; attached: boolean; expanded: boolean; imageBroken: boolean; imageRevision: number;
+  feedback: StickerSend['state'] | null; sentName: string; busyState: StickerSend['state'] | null; canCancel: boolean; tileDisabled: boolean;
+}) {
+  const own = feedback;
+  const ownBusy = busyState;
+  const name = sticker.searchTerms.slice(0, 120) || 'Sticker without search terms';
+  const label = editMode ? name : ownBusy ? 'Sending sticker…' : own === 'sent' ? `Sent to ${sentName}` : own === 'cancelled' ? 'Cancelled' : imageBroken ? 'Image unavailable. Retry' : name;
+  return <div className="sticker" role="group" data-sticker={sticker.id} aria-label={sticker.searchTerms.slice(0, 120) || 'Sticker without search terms'} data-selected={selected ? '' : undefined} data-attached={attached ? '' : undefined}>
+    <button className={`sticker-art${!sticker.searchTerms.trim() ? ' untagged' : ''}`} aria-label={label} title={sticker.searchTerms || undefined}
+      aria-expanded={editMode ? expanded : undefined} aria-disabled={tileDisabled || undefined} data-busy={ownBusy ? '' : undefined} data-sent={own === 'sent' ? '' : undefined} data-cancelled={own === 'cancelled' ? '' : undefined} data-broken={imageBroken || undefined}
+      onClick={e => handlers.click(e, sticker.id)}>
+      <img key={`${sticker.id}-${imageRevision}`} src={stickerURL(sticker.id)} loading="lazy" decoding="async" alt="" draggable={false} onError={() => handlers.image(sticker.id, false)} onLoad={() => handlers.image(sticker.id, true)}/>
+      {imageBroken && !ownBusy && own !== 'sent' && own !== 'cancelled' && <span className="sticker-overlay broken" aria-hidden="true"><svg viewBox="0 0 24 24"><path fill="none" stroke="currentColor" strokeWidth="1.6" d="M4 5.5h16v13H4zM4 15l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/></svg><b>Retry</b></span>}
+      {ownBusy && <span className="sticker-overlay" aria-hidden="true"><span className="spinner"/>Sending…</span>}
+      {own === 'sent' && <span className="sticker-overlay" aria-hidden="true"><span className="done"><CheckIcon/></span>Sent</span>}
+      {own === 'cancelled' && <span className="sticker-overlay muted" aria-hidden="true">Cancelled</span>}
+      {(own === 'failed' || own === 'missing') && <span className="mark" aria-hidden="true">!</span>}
+    </button>
+    {editMode && <button className="sticker-pick" role="checkbox" aria-checked={selected} aria-label={`Select ${name}`} onClick={() => handlers.select(sticker.id)}><CheckIcon/></button>}
+    {canCancel && <button className="cancel-send" aria-label="Cancel sending" title="Cancel sending" onClick={handlers.cancel}>×</button>}
+  </div>;
+});
 
 function MessageBody({ message, retry, sendBlocked, dismiss }: { message: StickerSend; retry: (event: React.MouseEvent, send: StickerSend, original?: boolean) => void; sendBlocked: boolean; dismiss?: () => void }) {
   const action = offer(message);
