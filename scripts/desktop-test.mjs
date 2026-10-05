@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
 const dir = await mkdtemp(join(tmpdir(), 'companion-desktop-'));
+// Main-only state (forgotten ids, fingerprints) is not sent to the controls view; read it from the saved manifest.
+const savedState = async (dataDir = dir) => JSON.parse(await readFile(join(dataDir, 'companion.json'), 'utf8'));
 await mkdir('.local/screenshots', { recursive: true });
 let app;
 try {
@@ -1373,14 +1375,14 @@ try {
   await observeFixtureImage(app, forgottenFixtureImage);
   await remote.waitForTimeout(750);
   expect((await local.evaluate(() => window.companion.status())).state.stickers.map(s => s.id)).toEqual([firstStickerId]);
-  expect((await local.evaluate(() => window.companion.status())).state.forgottenStickers).toContain(otherStickerId);
+  expect((await savedState()).forgottenStickers).toContain(otherStickerId);
   console.log('PASS a forgotten sticker is ignored when observed again');
 
   const dedupeFixtures = JSON.parse(await readFile('tests/fixtures/sticker-dedupe/images.json', 'utf8'));
   await observeFixtureImage(app, dedupeFixtures.original.image);
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(2);
   const dedupeOriginal = (await local.evaluate(() => window.companion.status())).state.stickers.find(s => s.id !== firstStickerId);
-  expect(dedupeOriginal.fingerprint).toMatchObject({ version: 1, animated: false });
+  expect((await savedState()).stickers.find(s => s.id === dedupeOriginal.id).fingerprint).toMatchObject({ version: 1, animated: false });
   await local.evaluate(id => window.companion.action({ type: 'sticker', id, searchTerms: 'dedupe original' }), dedupeOriginal.id);
   await observeFixtureImage(app, dedupeFixtures.reencoded.image);
   // Adding a different image in the same batch also establishes that intake has
@@ -1390,7 +1392,7 @@ try {
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(4);
   const deduped = (await local.evaluate(() => window.companion.status())).state.stickers;
   expect(deduped.filter(s => s.searchTerms === 'dedupe original')).toHaveLength(1);
-  expect(deduped.filter(s => s.fingerprint?.animated)).toHaveLength(2);
+  expect((await savedState()).stickers.filter(s => s.fingerprint?.animated)).toHaveLength(2);
   for (const saved of deduped.filter(s => s.id !== firstStickerId)) {
     expect((await local.evaluate(id => window.companion.action({ type: 'forgetSticker', id }), saved.id)).ok).toBe(true);
   }
@@ -2194,6 +2196,10 @@ try {
     window.transientChecks = [];
     window.companion.subscribe(update => window.transientChecks.push({ includesState: Object.hasOwn(update, 'state'), bytes: JSON.stringify(update).length }));
   });
+  // A new subscriber's first delivery is a complete status; only the updates after it must stay transient.
+  await editor.fill('Typing');
+  await expect.poll(async () => local.evaluate(() => window.transientChecks.length)).toBeGreaterThan(0);
+  await local.evaluate(() => { window.transientChecks.length = 0; });
   await editor.fill('Typing after indexing stickers');
   await expect.poll(async () => local.evaluate(() => window.transientChecks.length)).toBeGreaterThan(0);
   expect(await local.evaluate(() => window.transientChecks.every(update => !update.includesState && update.bytes < 5000))).toBe(true);
@@ -2501,7 +2507,7 @@ try {
   console.log('PASS direct sticker opt-in survives unrelated preference patches and actual application restart');
   await reopened.getByLabel('Close panel').click();
   const remoteReopened = (await app.windows()).find(p => p.url().endsWith('fixture.html'));
-  expect(reopenedState.forgottenStickers).toContain(otherStickerId);
+  expect((await savedState()).forgottenStickers).toContain(otherStickerId);
   await observeFixtureImage(app, forgottenFixtureImage);
   await remoteReopened.waitForTimeout(750);
   expect((await reopened.evaluate(() => window.companion.status())).state.stickers.map(s => s.id)).toEqual([firstStickerId]);

@@ -1,14 +1,19 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initialState, legacyStateSchema, stateSchema, stickerSchema, type DiscoveredSticker } from '../src/shared/model';
 import { Store } from '../src/main/store';
 import { stickerResponse } from '../src/main/sticker-protocol';
+import { StickerFiles } from '../src/main/sticker-files';
+import * as stickerBytes from '../src/main/sticker-bytes';
 import { StickerInbox } from '../src/main/sticker-inbox';
 import { upsertSticker } from '../src/core/stickers';
 import { MAX_LIBRARY_BYTES, MAX_LIBRARY_STICKERS, MAX_STICKER_BYTES } from '../src/shared/sticker-limits';
+
+vi.mock('node:fs/promises', async importOriginal => ({ ...await importOriginal<typeof import('node:fs/promises')>() }));
 
 const fixtures = JSON.parse(readFileSync(new URL('./fixtures/sticker-dedupe/images.json', import.meta.url), 'utf8'));
 function observation(name = 'original'): DiscoveredSticker {
@@ -179,24 +184,24 @@ test('invalid manifests never trigger GC', () => {
   writeFileSync(manifest(dir), '{}');
   expect(() => new Store(dir)).toThrow(); expect(existsSync(blob(dir))).toBe(true);
 });
-test.each(['missing', 'corrupt', 'symlink'])('missing/damaged blobs (%s) retain metadata and fail closed', failure => {
+test.each(['missing', 'corrupt', 'symlink'])('missing/damaged blobs (%s) retain metadata and fail closed', async failure => {
   const dir = directory(); seed(dir); const store = new Store(dir), entry = structuredClone(store.state.stickers[0]);
   unlinkSync(blob(dir));
   if (failure === 'corrupt') writeFileSync(blob(dir), 'corrupt');
   if (failure === 'symlink') symlinkSync(blob(dir, observation('animated').id), blob(dir));
   expect(() => store.readSticker(entry.id)).toThrow('Restore the file from a backup, or let the app rediscover the sticker.');
-  const response = stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' });
+  const response = await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' });
   expect(response.status).toBe(404); expect(response.headers.get('Cache-Control')).toBe('no-store');
   expect(new Store(dir).state.stickers[0]).toEqual(entry);
 });
 test('protocol serves only canonical current references with re-verified WebP bytes', async () => {
   const dir = directory(); seed(dir); const store = new Store(dir), id = observation().id;
-  const response = stickerResponse(store, { url: `companion-sticker://${id}`, method: 'GET' });
-  expect(response.headers.get('Content-Type')).toBe('image/webp'); expect(response.headers.get('Cache-Control')).toBe('no-store');
+  const response = await stickerResponse(store, { url: `companion-sticker://${id}`, method: 'GET' });
+  expect(response.headers.get('Content-Type')).toBe('image/webp'); expect(response.headers.get('Cache-Control')).toBe('private, no-cache');
   expect(Buffer.from(await response.arrayBuffer())).toEqual(readFileSync(blob(dir)));
-  for (const url of [`companion-sticker://${id}/..`, `companion-sticker://${id}?x`, `companion-sticker://${id}/foo`, `companion-sticker://user@${id}`, `companion-sticker://${id.toUpperCase()}`, 'companion-sticker://../companion.json', `companion-sticker://${'e'.repeat(64)}`]) expect(stickerResponse(store, { url, method: 'GET' }).status).toBe(404);
-  expect(stickerResponse(store, { url: `companion-sticker://${id}`, method: 'POST' }).status).toBe(404);
-  store.forgetSticker(id); expect(stickerResponse(store, { url: `companion-sticker://${id}`, method: 'GET' }).status).toBe(404);
+  for (const url of [`companion-sticker://${id}/..`, `companion-sticker://${id}?x`, `companion-sticker://${id}/foo`, `companion-sticker://user@${id}`, `companion-sticker://${id.toUpperCase()}`, 'companion-sticker://../companion.json', `companion-sticker://${'e'.repeat(64)}`]) expect((await stickerResponse(store, { url, method: 'GET' })).status).toBe(404);
+  expect((await stickerResponse(store, { url: `companion-sticker://${id}`, method: 'POST' })).status).toBe(404);
+  store.forgetSticker(id); expect((await stickerResponse(store, { url: `companion-sticker://${id}`, method: 'GET' })).status).toBe(404);
 });
 test('schema v2 strictly rejects inline images, missing size/kind, duplicates and excess bytes; v1 remains explicit', () => {
   const entry = observation(), dir = directory(); const store = new Store(dir), metadata = store.stickerFiles.write(entry);
@@ -266,13 +271,13 @@ test('pending intake has its own bound and reports overflow while retaining the 
   expect(inbox.issue).toBe('Sticker library is full'); expect(changed).toHaveBeenCalled();
 });
 
-test('a failed orphan unlink still publishes a successful durable Forget, then GC retries', () => {
+test('a failed orphan unlink still publishes a successful durable Forget, then GC retries', async () => {
   const dir = directory(); seed(dir); const store = new Store(dir), id = observation().id;
   vi.spyOn(store.stickerFiles, 'remove').mockImplementationOnce(() => { throw new Error('unlink failed'); });
   expect(() => store.forgetSticker(id)).not.toThrow();
   expect(store.state.stickers.some(sticker => sticker.id === id)).toBe(false);
   expect(load(dir).forgottenStickers).toContain(id); expect(existsSync(blob(dir))).toBe(true);
-  expect(stickerResponse(store, { url: `companion-sticker://${id}`, method: 'GET' }).status).toBe(404);
+  expect((await stickerResponse(store, { url: `companion-sticker://${id}`, method: 'GET' })).status).toBe(404);
   new Store(dir); expect(existsSync(blob(dir))).toBe(false);
 });
 
@@ -562,3 +567,262 @@ test('Forget recomputes a full-library hint from dropped intake after releasing 
 });
 
 function legacyInitialState() { const { stickerGroups: _groups, ...state } = initialState(); return state; }
+
+test('async byte reads coalesce and reuse verification without base64 or synchronous reads', async () => {
+  const dir = directory(); seed(dir); const store = new Store(dir), id = observation().id;
+  const verify = vi.spyOn(stickerBytes, 'verifyStickerBytes'), sync = vi.spyOn(store.stickerFiles, 'read');
+  const reads = await Promise.all(Array.from({ length: 8 }, () => store.readStickerBytes(id)));
+  expect(verify).toHaveBeenCalledTimes(1); expect(sync).not.toHaveBeenCalled();
+  expect(reads.every(read => read === reads[0])).toBe(true); expect(reads[0]).not.toHaveProperty('image');
+  expect(await store.readStickerBytes(id)).toBe(reads[0]); expect(verify).toHaveBeenCalledTimes(1);
+  // Sending remains authoritative even after a display cache hit.
+  expect(store.readSticker(id).image).toBe(observation().image); expect(verify).toHaveBeenCalledTimes(2);
+});
+
+test('verified byte cache has a byte-budget LRU and oversized entries are not retained', async () => {
+  const dir = directory(), files = new StickerFiles(dir, undefined, 48);
+  function tiny(index: number) {
+    const bytes = Buffer.alloc(24); bytes.write('RIFF'); bytes.writeUInt32LE(16, 4); bytes.write('WEBP', 8);
+    bytes.write('TEST', 12); bytes.writeUInt32LE(4, 16); bytes.writeUInt32LE(index, 20);
+    return { ...observation(), id: createHash('sha256').update(bytes).digest('hex'), image: `data:image/webp;base64,${bytes.toString('base64')}` };
+  }
+  const entries = [tiny(1), tiny(2), tiny(3)]; entries.forEach(entry => files.write(entry));
+  const verify = vi.spyOn(stickerBytes, 'verifyStickerBytes');
+  const first = await files.readBytes(entries[0].id); await files.readBytes(entries[1].id); await files.readBytes(entries[0].id);
+  await files.readBytes(entries[2].id); expect(await files.readBytes(entries[0].id)).toBe(first);
+  expect(verify).toHaveBeenCalledTimes(3); await files.readBytes(entries[1].id); expect(verify).toHaveBeenCalledTimes(4);
+  const tooSmall = new StickerFiles(dir, undefined, 23); verify.mockClear();
+  await tooSmall.readBytes(entries[0].id); await tooSmall.readBytes(entries[0].id); expect(verify).toHaveBeenCalledTimes(2);
+});
+
+test.each(['missing', 'corrupt', 'symlink'])('cached display detects later %s damage and restoration retries successfully', async failure => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  expect((await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' })).status).toBe(200);
+  const original = readFileSync(blob(dir));
+  if (failure === 'corrupt') { const changed = Buffer.from(original); changed[changed.length - 1] ^= 1; writeFileSync(blob(dir), changed); }
+  else { unlinkSync(blob(dir)); if (failure === 'symlink') symlinkSync(blob(dir, observation('animated').id), blob(dir)); }
+  expect((await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' })).status).toBe(404);
+  if (failure === 'symlink') unlinkSync(blob(dir));
+  writeFileSync(blob(dir), original);
+  expect((await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' })).status).toBe(200);
+});
+
+test('identical rediscovery retains cached bytes; actual repair replaces them', async () => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  const first = await store.readStickerBytes(entry.id);
+  store.stickerFiles.write(entry, true);
+  expect(await store.readStickerBytes(entry.id)).toBe(first);
+  writeFileSync(blob(dir), 'damaged'); store.stickerFiles.write(entry, true);
+  expect(await store.readStickerBytes(entry.id)).not.toBe(first);
+  const pending = store.readStickerBytes(entry.id), rejected = expect(pending).rejects.toThrow();
+  store.forgetSticker(entry.id); await rejected;
+  expect((await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' })).status).toBe(404);
+});
+
+// Hold a real handle at an explicit async boundary, so writes/removals race
+// against both an opened inode and shared verification work deterministically.
+function pauseStickerRead(at: 'open' | 'read' | 'close' = 'open') {
+  let release!: () => void, reached!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const paused = new Promise<void>(resolve => { reached = resolve; });
+  const open = fsPromises.open;
+  vi.spyOn(fsPromises, 'open').mockImplementationOnce(async (path, flags, mode) => {
+    const handle = await open(path, flags, mode);
+    if (at === 'open') { reached(); await waiting; }
+    else if (at === 'read') {
+      const read = handle.read.bind(handle);
+      vi.spyOn(handle, 'read').mockImplementationOnce(async (...args: Parameters<typeof handle.read>) => {
+        const result = await read(...args); reached(); await waiting; return result;
+      });
+    } else {
+      const close = handle.close.bind(handle);
+      vi.spyOn(handle, 'close').mockImplementationOnce(async () => { await close(); reached(); await waiting; });
+    }
+    return handle;
+  });
+  return { paused, release };
+}
+
+test.each(['write', 'rediscovery', 'GC', 'migration', 'recovery'] as const)('%s preserves cached and shared in-flight reads of healthy blobs', async source => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  const warm = await store.readStickerBytes(entry.id);
+  const change = async () => {
+    if (source === 'write') store.stickerFiles.write(entry, true);
+    else if (source === 'GC') {
+      // Removing an interrupted temp for the same hash must not cancel reads.
+      writeFileSync(`${blob(dir)}.tmp`, 'partial');
+      store.stickerFiles.gc(store.state.stickers.map(s => s.id));
+    } else if (source === 'migration') {
+      seed(dir); expect(new Store(dir).state.version).toBe(2);
+    } else if (source === 'recovery') {
+      unlinkSync(manifest(dir)); const recovered = new Store(dir);
+      expect(recovered.recoveryHint).toContain('preserved');
+      recovered.update(state => { state.stickers = store.state.stickers; });
+      expect(recovered.recoveryHint).toBeUndefined();
+    } else {
+      const inbox = new StickerInbox(store, vi.fn(), vi.fn());
+      inbox.add({ ...entry, lastSeen: 789 }); expect(await inbox.flush()).toBe(true); await inbox.close();
+    }
+  };
+  const cachedGate = pauseStickerRead(), cached = store.readStickerBytes(entry.id);
+  await cachedGate.paused; await change(); cachedGate.release();
+  expect(await cached).toBe(warm); expect(await store.readStickerBytes(entry.id)).toBe(warm);
+  // A separate cache starts cold; pause after shared verification is registered.
+  const files = new StickerFiles(dir), gate = pauseStickerRead('read');
+  const first = files.readBytes(entry.id); await gate.paused;
+  const second = files.readBytes(entry.id);
+  if (source === 'GC') files.gc(store.state.stickers.map(s => s.id));
+  else if (source === 'write') files.write(entry, true);
+  else await change();
+  const verify = vi.spyOn(stickerBytes, 'verifyStickerBytes'); verify.mockClear();
+  gate.release(); const reads = await Promise.all([first, second]);
+  expect(reads[0]).toBe(reads[1]); expect(await files.readBytes(entry.id)).toBe(reads[0]);
+  expect(verify).toHaveBeenCalledTimes(1);
+});
+
+test.each(['open', 'read', 'close'] as const)('display retries a real repair during %s, including coalesced readers', async at => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  const gate = pauseStickerRead(at);
+  const response = stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' });
+  await gate.paused;
+  const second = store.readStickerBytes(entry.id);
+  writeFileSync(blob(dir), 'damaged'); store.stickerFiles.write(entry, true);
+  gate.release();
+  const result = await response;
+  expect(result.status).toBe(200);
+  expect(Buffer.from(await result.arrayBuffer())).toEqual(Buffer.from(entry.image.split(',')[1], 'base64'));
+  expect((await second).bytes).toEqual(store.readSticker(entry.id).bytes);
+});
+
+test.each(['missing', 'corrupt', 'symlink'] as const)('an opened %s blob retries after repair instead of reporting damage', async damage => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  if (damage === 'missing') unlinkSync(blob(dir));
+  else if (damage === 'corrupt') writeFileSync(blob(dir), 'damaged');
+  else { unlinkSync(blob(dir)); symlinkSync(blob(dir, observation('animated').id), blob(dir)); }
+  // Pause before open as missing/symlink files cannot produce a handle.
+  const lstat = fsPromises.lstat;
+  let release!: () => void, reached!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; }), paused = new Promise<void>(resolve => { reached = resolve; });
+  vi.spyOn(fsPromises, 'lstat').mockImplementationOnce(async (...args: Parameters<typeof fsPromises.lstat>) => {
+    const stat = await lstat(...args); reached(); await waiting; return stat;
+  });
+  const response = stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' });
+  await paused; store.stickerFiles.write(entry, true); release();
+  expect((await response).status).toBe(200);
+});
+
+test.each(['Forget', 'remove', 'GC'] as const)('%s terminates only affected reads even if the blob is restored', async source => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation(), other = observation('animated');
+  const retained = await store.readStickerBytes(other.id);
+  const gate = pauseStickerRead('close'), pending = store.stickerFiles.readBytes(entry.id);
+  const rejected = expect(pending).rejects.toThrow();
+  await gate.paused;
+  if (source === 'Forget') store.forgetSticker(entry.id);
+  else if (source === 'remove') store.stickerFiles.remove(entry.id);
+  else store.stickerFiles.gc([other.id]);
+  store.stickerFiles.write(entry, true); gate.release(); await rejected;
+  expect(await store.readStickerBytes(other.id)).toBe(retained);
+  if (source === 'Forget') {
+    expect((await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' })).status).toBe(404);
+    expect(() => store.readSticker(entry.id)).toThrow('no longer indexed');
+  }
+});
+
+test.each(['hash', 'all'] as const)('non-removal %s invalidation retries once and repeated invalidation remains an error', async scope => {
+  const dir = directory(); seed(dir); const store = new Store(dir), id = observation().id;
+  const open = fsPromises.open;
+  const attempts = vi.spyOn(fsPromises, 'open').mockImplementation(async (path, flags, mode) => {
+    const handle = await open(path, flags, mode); store.stickerFiles.invalidate(scope === 'hash' ? id : undefined); return handle;
+  });
+  await expect(store.readStickerBytes(id)).rejects.toThrow('missing or damaged');
+  expect(attempts).toHaveBeenCalledTimes(2);
+  attempts.mockRestore(); expect((await store.readStickerBytes(id)).bytes).toEqual(store.readSticker(id).bytes);
+});
+
+test('Forget rejects pending display reads while retaining the blob after a durability warning', async () => {
+  const dir = directory(); seed(dir); const entry = observation();
+  let fail = false;
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const store = new Store(dir, step => { if (fail && step === 'manifest:directory-sync') throw new Error('sync failed'); });
+  const gate = pauseStickerRead(), pending = stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' });
+  await gate.paused; fail = true; store.forgetSticker(entry.id); gate.release();
+  expect((await pending).status).toBe(404); expect(existsSync(blob(dir))).toBe(true);
+  expect(() => store.readSticker(entry.id)).toThrow('no longer indexed');
+});
+
+test.each(['rediscovery', 'repair', 'Forget', 'GC', 'migration', 'recovery'] as const)('authoritative sendable reads remain verified after %s', async source => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  await store.readStickerBytes(entry.id); // Display cache must not bypass sending verification.
+  if (source === 'rediscovery') store.stickerFiles.write(entry, true);
+  else if (source === 'repair') { writeFileSync(blob(dir), 'damaged'); store.stickerFiles.write(entry, true); }
+  else if (source === 'Forget') store.forgetSticker(entry.id);
+  else if (source === 'GC') store.stickerFiles.gc([observation('animated').id]);
+  else if (source === 'migration') { seed(dir); new Store(dir); }
+  else { unlinkSync(manifest(dir)); new Store(dir); }
+  const verify = vi.spyOn(stickerBytes, 'verifyStickerBytes');
+  if (source === 'Forget' || source === 'GC') expect(() => store.readSticker(entry.id)).toThrow();
+  else {
+    expect(store.readSticker(entry.id).image).toBe(entry.image); expect(verify).toHaveBeenCalledTimes(1);
+    writeFileSync(blob(dir), 'damaged'); expect(() => store.readSticker(entry.id)).toThrow('missing or damaged');
+  }
+});
+
+test('identical writes that restore permissions retry signature changes without discarding healthy content', async () => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  chmodSync(blob(dir), 0o644);
+  const gate = pauseStickerRead('read'), pending = store.readStickerBytes(entry.id);
+  await gate.paused; store.stickerFiles.write(entry); gate.release();
+  expect((await pending).bytes).toEqual(store.readSticker(entry.id).bytes);
+  expect(statSync(blob(dir)).mode & 0o777).toBe(0o600);
+});
+
+test('rejected incoming bytes and failed GC leave healthy cached and in-flight reads intact', async () => {
+  const dir = directory(); seed(dir); new Store(dir); const entry = observation();
+  const files = new StickerFiles(dir, step => { if (step.startsWith('gc:')) throw new Error('cleanup failed'); });
+  const warm = await files.readBytes(entry.id), gate = pauseStickerRead(), pending = files.readBytes(entry.id);
+  await gate.paused;
+  expect(() => files.write({ ...entry, image: observation('different').image }, true)).toThrow();
+  files.gc([]); gate.release();
+  expect(await pending).toBe(warm); expect(await files.readBytes(entry.id)).toBe(warm);
+});
+
+test('an unsuccessful repair does not invalidate bytes that were never replaced', async () => {
+  const dir = directory(); seed(dir); new Store(dir); const entry = observation();
+  writeFileSync(blob(dir), 'damaged');
+  const files = new StickerFiles(dir, step => { if (step.endsWith(':replace')) throw new Error('replacement failed'); });
+  const invalidate = vi.spyOn(files, 'invalidate');
+  expect(() => files.write(entry, true)).toThrow('replacement failed');
+  expect(invalidate).not.toHaveBeenCalled();
+  await expect(files.readBytes(entry.id)).rejects.toThrow();
+});
+
+test('async display rejects metadata mismatches, oversized files and directory symlinks', async () => {
+  const dir = directory(); seed(dir); const store = new Store(dir), id = observation().id;
+  store.update(s => { s.stickers[0].size++; }); await expect(store.readStickerBytes(id)).rejects.toThrow('missing or damaged');
+  store.update(s => { s.stickers[0].size--; });
+  writeFileSync(blob(dir), Buffer.alloc(MAX_STICKER_BYTES + 1)); await expect(store.readStickerBytes(id)).rejects.toThrow('missing or damaged');
+  const other = directory(); mkdirSync(join(other, 'blobs'));
+  rmSync(join(dir, 'stickers'), { recursive: true }); symlinkSync(join(other, 'blobs'), join(dir, 'stickers'));
+  await expect(store.readStickerBytes(id)).rejects.toThrow('missing or damaged');
+});
+
+test('no-op updates preserve state identity and avoid writes', () => {
+  const steps: string[] = [], store = new Store(directory(), step => steps.push(step));
+  const before = store.state; steps.length = 0;
+  store.update(s => { s.provider = 'openai'; }); expect(store.state).toBe(before); expect(steps).toEqual([]);
+  store.update(s => { s.provider = 'anthropic'; }); expect(store.state).not.toBe(before); expect(steps).toContain('manifest:write');
+  steps.length = 0; const saved = store.state;
+  store.update(s => { s.provider = 'anthropic'; }); expect(store.state).toBe(saved); expect(steps).toEqual([]);
+});
+
+
+test('no-op saves still retry outstanding directory durability warnings', () => {
+  let fail = true; const steps: string[] = [];
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const store = new Store(directory(), step => { steps.push(step); if (fail && step === 'manifest:directory-sync') throw new Error('sync unavailable'); });
+  store.update(s => { s.provider = 'anthropic'; }); expect(store.durabilityWarning).toBe(true);
+  const state = store.state; fail = false; steps.length = 0;
+  store.update(s => { s.provider = 'anthropic'; });
+  expect(store.state).toBe(state); expect(store.durabilityWarning).toBe(false);
+  expect(steps).toContain('manifest:retry:directory-sync'); expect(steps).not.toContain('manifest:write'); warning.mockRestore();
+});

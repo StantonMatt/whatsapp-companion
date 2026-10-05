@@ -160,7 +160,9 @@ export type Status = {
   keys: Record<Provider, boolean>; secureStorage: boolean; fixture: boolean;
   message: string; pending: { text: string; due: number } | null;
 };
-export type StatusUpdate = Omit<Status, 'state'> & { state?: Omit<State, 'stickers'>; stickerChanges?: { upsert: Sticker[]; removed: string[] } };
+// Controls receive only changed UI fields; main-only durable records never cross IPC.
+export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenStickers' | 'stickers'> & { stickers: Omit<Sticker, 'fingerprint'>[] };
+export type StatusUpdate = Partial<Omit<Status, 'state' | 'sequence' | 'stickerShield'>> & { sequence: number; state?: Partial<ControlsState>; stickerShield?: Omit<StickerShield, 'image'> & { image?: string } | null; stickerChanges?: { upsert: Omit<Sticker, 'fingerprint'>[]; removed: string[] } };
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()
     .refine(action => action.scope === 'global' || action.patch.directStickerSend === undefined),

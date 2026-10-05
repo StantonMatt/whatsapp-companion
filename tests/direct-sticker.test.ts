@@ -64,7 +64,7 @@ test('preference patches preserve omitted fields and direct opt-in survives stat
     expect(action.patch).toEqual({ directStickerSend: enabled });
     store.update(s => setPreferences(s, action.scope, action.patch));
     const next = status(previous.sequence + 1), update = statusUpdate(next, previous.state);
-    expect(update.state?.global.directStickerSend).toBe(enabled);
+    expect(update.state?.global?.directStickerSend).toBe(enabled);
     expect(cache.accept(update)?.state.global.directStickerSend).toBe(enabled);
     previous = next;
     for (const scope of ['global', '123@c.us', 'local:550e8400-e29b-41d4-a716-446655440000']) {

@@ -10,14 +10,15 @@ import { buildPrompt } from '../src/main/providers';
 import { Assistant } from '../src/main/assistant';
 import type { Vault } from '../src/main/vault';
 const dirs: string[] = [];
-afterEach(() => { dirs.forEach(dir => rmSync(dir, { recursive: true, force: true })); dirs.length = 0; });
-const setup = () => { const dir = mkdtempSync(join(tmpdir(), 'companion-conversations-')); dirs.push(dir); const store = new Store(dir); return { dir, store, registry: new Conversations(store) }; };
+const registries: Conversations[] = [];
+afterEach(() => { registries.splice(0).forEach(registry => registry.close()); dirs.forEach(dir => rmSync(dir, { recursive: true, force: true })); dirs.length = 0; });
+const setup = () => { const dir = mkdtempSync(join(tmpdir(), 'companion-conversations-')); dirs.push(dir); const store = new Store(dir); const registry = new Conversations(store); registries.push(registry); return { dir, store, registry }; };
 const snapshot = (ids: string[], name = 'Same display name'): Snapshot => ({ ...emptySnapshot, kind: 'unknown', conversationOpen: true, ready: true, name, messages: ids.map(id => ({ id, text: 'PRIVATE MESSAGE CONTENT', outgoing: true })) });
 test('recognition persists across restart and rename, without names or message content', () => {
   const { store, registry, dir } = setup();
   const id = registry.identify(snapshot(['OPAQUE111', 'OPAQUE222']))!;
   store.update(s => setPreferences(s, id, { tone: 'professional' }));
-  const reopened = new Store(dir), next = new Conversations(reopened);
+  const reopened = new Store(dir), next = new Conversations(reopened); registries.push(next);
   expect(next.identify(snapshot(['OPAQUE222', 'OPAQUE333'], 'Renamed'))).toBe(id);
   expect(resolveSettings(reopened.state, 'unknown', id).values.tone).toBe('professional');
   const data = readFileSync(join(dir, 'companion.json'), 'utf8');
@@ -56,6 +57,7 @@ test('only new anchors write to disk, anchors are bounded, and capacity does not
   registry.identify(snapshot(['FIRST001'])); expect(update).not.toHaveBeenCalled();
   let previous = 'FIRST001';
   for (let i = 0; i < 220; i++) { const next = `NEXT${String(i).padStart(6, '0')}`; expect(registry.identify(snapshot([previous, next]))).toBe(first); previous = next; }
+  registry.flush();
   expect(store.state.conversations[first]).toHaveLength(200);
   for (let i = 1; i < 2000; i++) store.state.conversations[`local:capacity-${i}`] = [];
   expect(registry.identify(snapshot(['UNSEEN001']))).toBeNull();
@@ -73,4 +75,29 @@ test('local identity scopes preferences/style, cannot be supplied by remote or a
   expect(store.state.auto).toEqual({});
   store.update(s => resetPreferences(s, id));
   expect(resolveSettings(store.state, 'unknown', id).values.tone).toBe('natural');
+});
+
+
+test('anchor observations coalesce, remain usable for overlap before flush and drain on close', async () => {
+  vi.useFakeTimers();
+  try {
+    const { registry, store, dir } = setup(), first = registry.identify(snapshot(['FIRST001']))!;
+    const update = vi.spyOn(store, 'update');
+    expect(registry.identify(snapshot(['FIRST001', 'SECOND001']))).toBe(first);
+    expect(registry.identify(snapshot(['SECOND001', 'THIRD001']))).toBe(first);
+    expect(update).not.toHaveBeenCalled(); await vi.advanceTimersByTimeAsync(250);
+    expect(update).toHaveBeenCalledTimes(1); expect(store.state.conversations[first]).toHaveLength(3);
+    registry.identify(snapshot(['THIRD001', 'FOURTH001'])); registry.close();
+    expect(update).toHaveBeenCalledTimes(2); expect(new Store(dir).state.conversations[first]).toHaveLength(4);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
+
+test('failed observation saves retain anchors for retry without merging identities', () => {
+  const { registry, store } = setup(), first = registry.identify(snapshot(['FIRST001']))!;
+  registry.identify(snapshot(['FIRST001', 'SECOND001']));
+  const update = vi.spyOn(store, 'update').mockImplementationOnce(() => { throw new Error('disk full'); });
+  expect(() => registry.flush()).toThrow('disk full');
+  expect(registry.identify(snapshot(['SECOND001']))).toBe(first);
+  update.mockRestore(); registry.flush(); expect(store.state.conversations[first]).toHaveLength(2);
 });

@@ -59,6 +59,36 @@ describe('forgotten stickers', () => {
 });
 
 describe('perceptual sticker intake', () => {
+  test.each(['rediscovery', 'repair', 'Forget', 'GC', 'migration', 'recovery'] as const)('fingerprint backfill handles concurrent %s while decoding verified bytes', async source => {
+    const saved = store(), original = sticker('original'), incoming = sticker('reencoded'), dir = directories.at(-1)!;
+    saved.update(state => { state.stickers.push(saved.stickerFiles.write(original)); });
+    let release!: () => void, reached!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; }), paused = new Promise<void>(resolve => { reached = resolve; });
+    const inbox = new StickerInbox(saved, vi.fn(), vi.fn(), async image => {
+      if (image === original.image) { reached(); await waiting; }
+      return decode(image);
+    });
+    inbox.add(incoming); const flushing = inbox.flush(); await paused;
+    const path = join(dir, 'stickers', `${original.id}.webp`);
+    if (source === 'rediscovery') saved.stickerFiles.write(original, true);
+    else if (source === 'repair') { writeFileSync(path, 'damaged'); saved.stickerFiles.write(original, true); }
+    else if (source === 'Forget') { saved.forgetSticker(original.id); inbox.discard(original.id); }
+    else if (source === 'GC') saved.stickerFiles.gc([]);
+    else if (source === 'migration') {
+      const { stickerGroups: _groups, ...legacy } = initialState();
+      writeFileSync(join(dir, 'companion.json'), JSON.stringify({ ...legacy, version: 1, stickers: [original] })); new Store(dir);
+    } else { unlinkSync(join(dir, 'companion.json')); new Store(dir); }
+    release(); expect(await flushing).toBe(true);
+    // Immutable verified pixels are still valid after harmless rewrites/repair.
+    // A removed or forgotten candidate cannot suppress or replace new intake.
+    const retained = source === 'Forget' || source === 'GC' ? incoming : original;
+    expect(saved.state.stickers.find(s => s.id === retained.id)?.fingerprint).toBeDefined();
+    expect(saved.readSticker(retained.id).image).toBe(retained.image);
+    if (source === 'Forget') expect(saved.state.stickers.some(s => s.id === original.id)).toBe(false);
+    if (source === 'GC') expect(saved.state.stickers.map(s => s.id)).toEqual([original.id, incoming.id]);
+    else expect(saved.state.stickers).toHaveLength(1);
+    await inbox.close();
+  });
   test.each(['missing', 'corrupt', 'metadata'])('retains a healthy re-encoding when a matching fingerprint belongs to a %s blob', async damage => {
     const saved = store(), original = sticker('original', 'keep tags'), incoming = sticker('reencoded');
     const fingerprint = await fingerprintSticker(original, decode);
@@ -278,10 +308,10 @@ describe('perceptual sticker intake', () => {
     await expect(fingerprintSticker({ ...sticker('animated'), image, id }, decode)).rejects.toThrow('dimensions');
     expect(decode).not.toHaveBeenCalled();
   });
-  test('fingerprint migration is published, while cloning identical fingerprints produces no sticker delta', async () => {
+  test('fingerprint migration remains main-only and produces no controls sticker delta', async () => {
     const previous = initialState(); previous.stickers = [store().stickerFiles.write(sticker('original'))];
     const state = structuredClone(previous); state.stickers[0].fingerprint = await fingerprintSticker(sticker('original'), decode);
-    expect(statusUpdate({ state } as Status, previous).stickerChanges?.upsert).toEqual(state.stickers);
+    expect(statusUpdate({ state } as Status, previous).stickerChanges).toBeUndefined();
     expect(statusUpdate({ state: structuredClone(state) } as Status, state).stickerChanges).toBeUndefined();
   });
   test('closing drains observations queued during a decode and stops further discovery', async () => {

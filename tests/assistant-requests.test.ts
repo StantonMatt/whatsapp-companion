@@ -1647,3 +1647,25 @@ describe('composer loading command mapping', () => {
     expect(generator).toHaveBeenCalledOnce(); assistant.cancel(true);
   });
 });
+
+
+test('repeated controls activity publishes only observable changes and empty edits coalesce clears', () => {
+  const { assistant, state, changed, commands } = setup(); state.global.suggestions = false;
+  assistant.receive(snap()); changed.mockClear(); commands.length = 0;
+  for (let i = 0; i < 20; i++) { assistant.activity(); assistant.activity(true); }
+  expect(changed).not.toHaveBeenCalled(); expect(commands.filter(command => command.type === 'clear')).toHaveLength(0);
+  state.auto[a] = { ...defaultAuto, enabled: true, paused: false };
+  assistant.activity(); expect(state.auto[a].paused).toBe(true); expect(assistant.isRuntimePaused()).toBe(true);
+  expect(changed).toHaveBeenCalledTimes(1);
+  for (let i = 0; i < 20; i++) assistant.activity(); expect(changed).toHaveBeenCalledTimes(1);
+  assistant.cancel(true);
+});
+
+test('a failed takeover save pauses immediately without retrying or publishing for every subsequent activity', () => {
+  const { assistant, state, store, changed } = setup(); state.global.suggestions = false;
+  assistant.receive(snap()); state.auto[a] = { ...defaultAuto, enabled: true, paused: false };
+  const update = vi.spyOn(store, 'update').mockImplementation(() => { throw new Error('disk full'); }); changed.mockClear();
+  assistant.activity(); expect(assistant.isRuntimePaused()).toBe(true); expect(changed).toHaveBeenCalledTimes(1);
+  for (let i = 0; i < 20; i++) assistant.activity();
+  expect(update).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledTimes(1); assistant.cancel(true);
+});
