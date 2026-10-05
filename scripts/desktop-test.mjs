@@ -101,6 +101,25 @@ try {
       return ui.popupHidden && ui.ghost.startsWith(draft) && /^\.{1,3}$/.test(ui.ghost.slice(draft.length));
     }, { intervals: [20, 40, 80] }).toBe(true);
   };
+  const ghostLayout = async (measure) => {
+    const session = await remote.context().newCDPSession(remote);
+    try {
+      const { root } = await session.send('DOM.getDocument', { depth: -1, pierce: true });
+      const findGhost = node => {
+        const index = node.attributes?.indexOf('class');
+        if (index >= 0 && node.attributes[index + 1].split(' ').includes('ghost')) return node;
+        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) {
+          const found = findGhost(child); if (found) return found;
+        }
+      };
+      const { object } = await session.send('DOM.resolveNode', { nodeId: findGhost(root).nodeId });
+      const { result, exceptionDetails } = await session.send('Runtime.callFunctionOn', {
+        objectId: object.objectId, returnByValue: true, functionDeclaration: measure.toString()
+      });
+      if (exceptionDetails) throw new Error(exceptionDetails.text);
+      return result.value;
+    } finally { await session.detach(); }
+  };
   const openPanel = async (panel, page = remote) => {
     // Closing a native view crosses IPC; wait before toggling the same panel again.
     await expect.poll(async () => (await local.evaluate(() => window.companion.status())).panel).not.toBe(panel);
@@ -475,6 +494,51 @@ try {
   await expect(statusText).not.toHaveText('Tab to accept · Esc to dismiss');
   expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
   console.log('PASS Escape cancels pending refinement without a late preview or draft changes');
+  // Leave just a few pixels on the first line, so the continuation wraps while
+  // the actual draft still occupies a single line and has not grown the editor.
+  const clippingDraft = await editor.evaluate(el => {
+    const css = getComputedStyle(el), canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d'); context.font = `${css.fontSize} ${css.fontFamily}`;
+    const width = el.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+    let draft = 'Clipping vasos';
+    for (let count = 1; count < 1000; count++) {
+      const next = `Clipping ${'i'.repeat(count)} vasos`;
+      if (context.measureText(next).width > width - 2) break;
+      draft = next;
+    }
+    return draft;
+  });
+  await editor.fill(clippingDraft);
+  await expect(statusText).toHaveText('Tab to accept · Esc to dismiss');
+  await expect.poll(async () => (await assistantUi()).ghost).toBe(clippingDraft + ' see you then!');
+  const clipping = await ghostLayout(function () {
+    const editor = document.querySelector('#main footer [contenteditable=true]'), css = getComputedStyle(editor);
+    const rect = editor.getBoundingClientRect(), viewport = this.getBoundingClientRect();
+    const clip = getComputedStyle(this).clipPath, inset = /^inset\(([^)]+)\)$/.exec(clip)?.[1].split(/\s+/).map(parseFloat);
+    const visibleBottom = viewport.bottom - (inset ? inset[inset.length > 2 ? 2 : 0] : 0);
+    const contentBottom = rect.top + editor.clientTop + editor.clientHeight - parseFloat(css.paddingBottom);
+    const range = document.createRange(), glyphs = [], node = this.lastElementChild.firstChild;
+    for (let index = 0; index < node.length; index++) {
+      if (/\s/.test(node.textContent[index])) continue;
+      range.setStart(node, index); range.setEnd(node, index + 1);
+      for (const glyph of range.getClientRects()) glyphs.push({ top: glyph.top, bottom: glyph.bottom });
+    }
+    const visibleGlyphs = glyphs.filter(glyph => glyph.bottom > viewport.top && glyph.top < visibleBottom)
+      .map(glyph => ({ top: Math.max(glyph.top, viewport.top), bottom: Math.min(glyph.bottom, visibleBottom) }));
+    range.selectNodeContents(editor);
+    return { clip, visibleBottom, contentBottom, paddingBottom: parseFloat(css.paddingBottom),
+      oneLine: editor.clientHeight - parseFloat(css.paddingTop) - parseFloat(css.paddingBottom) <= parseFloat(css.lineHeight) + 1,
+      draftLines: new Set([...range.getClientRects()].map(rect => rect.top)).size,
+      wraps: glyphs.some(glyph => glyph.top + this.scrollTop >= contentBottom && glyph.top + this.scrollTop < viewport.bottom),
+      visibleGlyphs };
+  });
+  expect(clipping.oneLine).toBe(true); expect(clipping.draftLines).toBe(1); expect(clipping.wraps).toBe(true);
+  expect(clipping.paddingBottom).toBeGreaterThan(0); expect(clipping.clip).toMatch(/^inset\(/);
+  expect(clipping.visibleBottom).toBeLessThanOrEqual(clipping.contentBottom);
+  expect(clipping.visibleGlyphs.every(glyph => glyph.bottom <= clipping.contentBottom)).toBe(true);
+  await editor.press('Tab'); await expect(editor).toHaveText(clippingDraft + ' see you then!');
+  expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
+  console.log('PASS wrapped continuation clips at the one-line editor content bottom and still accepts with Tab');
   // Hold only the fixture provider delay so this check remains deterministic
   // even when accessibility traversal takes longer than its usual 200 ms.
   await app.evaluate(() => {
@@ -488,7 +552,7 @@ try {
       return original.call(this, callback, delay, ...args);
     };
   });
-  const edgePadding = await editor.evaluate(el => ({ value: el.style.getPropertyValue('padding-right'), priority: el.style.getPropertyPriority('padding-right') }));
+  const edgeStyles = await editor.evaluate(el => ['padding-right', 'padding-bottom', 'height'].map(name => ({ name, value: el.style.getPropertyValue(name), priority: el.style.getPropertyPriority(name) })));
   try {
     // Fit the last word within a few pixels of the edge, where nonzero-width
     // dots used to wrap it onto the next line in the overlay.
@@ -508,56 +572,62 @@ try {
     await editor.fill(edgeDraft);
     await expectDots(edgeDraft);
     await expect(statusText).toHaveText('');
-    const layoutSession = await remote.context().newCDPSession(remote);
-    try {
-      const { root } = await layoutSession.send('DOM.getDocument', { depth: -1, pierce: true });
-      const findGhost = node => {
-        const index = node.attributes?.indexOf('class');
-        if (index >= 0 && node.attributes[index + 1].split(' ').includes('ghost')) return node;
-        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) {
-          const found = findGhost(child); if (found) return found;
-        }
+    const layout = await ghostLayout(function () {
+      const lastWord = element => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        let node, last; while ((node = walker.nextNode())) last = node;
+        const range = document.createRange();
+        range.setStart(last, last.textContent.length - 5); range.setEnd(last, last.textContent.length);
+        return range.getBoundingClientRect();
       };
-      const { object } = await layoutSession.send('DOM.resolveNode', { nodeId: findGhost(root).nodeId });
-      const { result, exceptionDetails } = await layoutSession.send('Runtime.callFunctionOn', {
-        objectId: object.objectId, returnByValue: true,
-        functionDeclaration: (function () {
-          const lastWord = element => {
-            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-            let node, last; while ((node = walker.nextNode())) last = node;
-            const range = document.createRange();
-            range.setStart(last, last.textContent.length - 5); range.setEnd(last, last.textContent.length);
-            return range.getBoundingClientRect();
-          };
-          const editor = document.querySelector('#main footer [contenteditable=true]');
-          const original = lastWord(editor), overlay = lastWord(this.firstElementChild);
-          const inline = this.querySelector('.dots'), fallback = this.getRootNode().querySelector('.dots-fallback');
-          const inlineVisible = getComputedStyle(inline).visibility === 'visible';
-          const indicator = inlineVisible ? inline : fallback;
-          const viewport = inlineVisible ? this.getBoundingClientRect() : { left: 0, right: innerWidth, top: 0, bottom: innerHeight };
-          const rects = [...indicator.children].map(period => period.getBoundingClientRect());
-          const trigger = this.getRootNode().querySelector('.trigger').getBoundingClientRect();
-          const fallbackRect = fallback.getBoundingClientRect();
-          return { original: { top: original.top, left: original.left }, overlay: { top: overlay.top, left: overlay.left },
-            inlineVisible, fallbackVisible: !fallback.hidden,
-            visible: !indicator.hidden && getComputedStyle(indicator).visibility === 'visible' && rects.every(rect =>
-              rect.width > 0 && rect.height > 0 && rect.left >= viewport.left && rect.right <= viewport.right && rect.top >= viewport.top && rect.bottom <= viewport.bottom),
-            dotTop: rects[0].top, fallbackRight: fallbackRect.right, triggerLeft: trigger.left,
-            fallbackCenter: (fallbackRect.top + fallbackRect.bottom) / 2, triggerCenter: (trigger.top + trigger.bottom) / 2 };
-        }).toString()
-      });
-      if (exceptionDetails) throw new Error(exceptionDetails.text);
-      expect(result.value.overlay.top).toBeCloseTo(result.value.original.top, 0);
-      expect(result.value.overlay.left).toBeCloseTo(result.value.original.left, 0);
-      expect(result.value.visible).toBe(true);
-      expect(result.value.fallbackVisible).toBe(true); // The full line has no spare right padding.
-      expect(result.value.fallbackVisible).toBe(!result.value.inlineVisible);
-      if (result.value.inlineVisible) expect(result.value.dotTop).toBeCloseTo(result.value.original.top, 0);
-      else {
-        expect(result.value.fallbackRight).toBeLessThan(result.value.triggerLeft);
-        expect(result.value.fallbackCenter).toBeCloseTo(result.value.triggerCenter, 0);
-      }
-    } finally { await layoutSession.detach(); }
+      const editor = document.querySelector('#main footer [contenteditable=true]');
+      const original = lastWord(editor), overlay = lastWord(this.firstElementChild);
+      const inline = this.querySelector('.dots'), fallback = this.getRootNode().querySelector('.dots-fallback');
+      const inlineVisible = getComputedStyle(inline).visibility === 'visible';
+      const indicator = inlineVisible ? inline : fallback;
+      const box = this.getBoundingClientRect();
+      const viewport = inlineVisible ? { left: box.left, right: box.right, top: box.top, bottom: box.bottom - parseFloat(getComputedStyle(this).paddingBottom) } : { left: 0, right: innerWidth, top: 0, bottom: innerHeight };
+      const rects = [...indicator.children].map(period => period.getBoundingClientRect());
+      const trigger = this.getRootNode().querySelector('.trigger').getBoundingClientRect();
+      const fallbackRect = fallback.getBoundingClientRect();
+      return { original: { top: original.top, left: original.left }, overlay: { top: overlay.top, left: overlay.left },
+        inlineVisible, fallbackVisible: !fallback.hidden,
+        visible: !indicator.hidden && getComputedStyle(indicator).visibility === 'visible' && rects.every(rect =>
+          rect.width > 0 && rect.height > 0 && rect.left >= viewport.left && rect.right <= viewport.right && rect.top >= viewport.top && rect.bottom <= viewport.bottom),
+        dotTop: rects[0].top, fallbackRight: fallbackRect.right, triggerLeft: trigger.left,
+        fallbackCenter: (fallbackRect.top + fallbackRect.bottom) / 2, triggerCenter: (trigger.top + trigger.bottom) / 2 };
+    });
+    expect(layout.overlay.top).toBeCloseTo(layout.original.top, 0);
+    expect(layout.overlay.left).toBeCloseTo(layout.original.left, 0);
+    expect(layout.visible).toBe(true);
+    expect(layout.fallbackVisible).toBe(true); // The full line has no spare right padding.
+    expect(layout.fallbackVisible).toBe(!layout.inlineVisible);
+    if (layout.inlineVisible) expect(layout.dotTop).toBeCloseTo(layout.original.top, 0);
+    else {
+      expect(layout.fallbackRight).toBeLessThan(layout.triggerLeft);
+      expect(layout.fallbackCenter).toBeCloseTo(layout.triggerCenter, 0);
+    }
+    // Hold the viewport at one line while a longer draft wraps. A larger bottom
+    // padding keeps the second-line dots inside the padding box, so only the
+    // content-bottom check (not overflow:hidden) can select the fallback.
+    await editor.evaluate(el => {
+      const css = getComputedStyle(el);
+      el.style.paddingBottom = '32px';
+      el.style.height = `${parseFloat(css.paddingTop) + 32 + parseFloat(css.lineHeight) + parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth)}px`;
+    });
+    const wrappedDraft = edgeDraft + ' wrapped';
+    await editor.fill(wrappedDraft); await expectDots(wrappedDraft);
+    await editor.evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+    await expect.poll(async () => ghostLayout(function () {
+      const editor = document.querySelector('#main footer [contenteditable=true]'), css = getComputedStyle(editor);
+      const viewport = this.getBoundingClientRect(), contentBottom = viewport.bottom - parseFloat(css.paddingBottom);
+      const dots = this.querySelector('.dots'), fallback = this.getRootNode().querySelector('.dots-fallback');
+      const rects = [...dots.children].map(period => period.getBoundingClientRect());
+      return { mirrored: this.scrollTop === editor.scrollTop && editor.scrollTop === 0,
+        inBottomPadding: rects.every(rect => rect.top >= contentBottom && rect.bottom <= viewport.bottom && rect.left >= viewport.left && rect.right <= viewport.right),
+        inlineHidden: getComputedStyle(dots).visibility === 'hidden', fallbackVisible: !fallback.hidden };
+    })).toEqual({ mirrored: true, inBottomPadding: true, inlineHidden: true, fallbackVisible: true });
+    console.log('PASS wrapped loading dots in bottom padding use the fallback next to the star');
     await clickAssistant('Refine draft');
     await expect.poll(async () => (await assistantUi()).popupHidden).toBe(false);
     await expect.poll(async () => (await assistantUi()).ghost).toBe('');
@@ -566,7 +636,7 @@ try {
       const nodes = (await session.send('Accessibility.getFullAXTree')).nodes;
       expect(nodes.some(node => node.name?.value === 'Refine draft' && node.role?.value === 'StaticText')).toBe(true);
     } finally { await session.detach(); }
-    await expect(editor).toHaveText(edgeDraft);
+    await expect(editor).toHaveText(wrappedDraft);
     // Let the cancelled request complete; its late result must not return.
     await app.evaluate(() => {
       const held = globalThis.fixtureContinuationHold;
@@ -579,10 +649,11 @@ try {
     await remote.keyboard.press('Escape');
     console.log('PASS one star click during automatic continuation opens Refine draft and cancels the dots, with one loading announcement');
   } finally {
-    await editor.evaluate((el, padding) => {
-      if (padding.value) el.style.setProperty('padding-right', padding.value, padding.priority);
-      else el.style.removeProperty('padding-right');
-    }, edgePadding);
+    await editor.evaluate((el, styles) => {
+      for (const { name, value, priority } of styles) {
+        if (value) el.style.setProperty(name, value, priority); else el.style.removeProperty(name);
+      }
+    }, edgeStyles);
     await app.evaluate(() => {
       const held = globalThis.fixtureContinuationHold;
       if (!held) return;
