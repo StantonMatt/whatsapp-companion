@@ -12,7 +12,9 @@ export function upsertSticker(stickers: Sticker[], sticker: Sticker) {
   else return false;
   return true;
 }
-export function forgetSticker(state: State, id: string) {
-  state.stickers = state.stickers.filter(s => s.id !== id);
-  state.forgottenStickers = [...state.forgottenStickers.filter(hash => hash !== id), id].slice(-5000);
+export function forgetSticker(state: State, id: string) { forgetStickers(state, [id]); }
+export function forgetStickers(state: State, ids: string[]) {
+  const removed = new Set(ids);
+  state.stickers = state.stickers.filter(sticker => !removed.has(sticker.id));
+  state.forgottenStickers = [...state.forgottenStickers.filter(hash => !removed.has(hash)), ...removed].slice(-5000);
 }

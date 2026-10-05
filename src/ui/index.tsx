@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { DesktopAPI, Status, StatusUpdate, Action } from '../shared/model';
+import type { DesktopAPI, Status, StatusUpdate, Action, Panel } from '../shared/model';
 import { StatusCache } from '../core/status';
 import { Settings } from './settings';
 import { Stickers } from './stickers';
@@ -38,7 +38,13 @@ function App() {
     try { const result = await window.companion.action(action); setError(result.error ?? ''); return result.ok; }
     catch { setError('The desktop operation failed. Try again.'); return false; }
   }, []);
-  const close = () => { void act({ type: 'panel', panel: null }); };
+  const stickerNavigation = useRef<((panel: Panel) => void) | null>(null);
+  const navigate = useCallback((panel: Panel) => {
+    if (stickerNavigation.current) stickerNavigation.current(panel);
+    else void act({ type: 'panel', panel });
+  }, [act]);
+  const close = () => navigate(null);
+  useEffect(() => window.companion.subscribePanelNavigation?.(navigate), [navigate]);
   useEffect(() => { document.documentElement.dataset.theme = status?.theme ?? 'dark'; }, [status?.theme]);
   useEffect(() => {
     const escape = (e: KeyboardEvent) => {
@@ -46,7 +52,7 @@ function App() {
       if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('select:open, dialog[open]')) close();
     };
     document.addEventListener('keydown', escape); return () => document.removeEventListener('keydown', escape);
-  }, []);
+  }, [navigate]);
   const shield = useShield(status);
   return <>
     <div className="app-frame" data-enlarged={shield.frame ? '' : undefined} style={shield.frame}>
@@ -54,7 +60,7 @@ function App() {
       {error && panel && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'AI settings'}>
         {status.pending && panel !== 'stickers' && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
-        {panel === 'stickers' ? <Stickers status={status} act={act}/> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close}/>}
+        {panel === 'stickers' ? <Stickers status={status} act={act} navigation={stickerNavigation}/> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close}/>}
       </aside>}
     </div>
     {shield.layer}

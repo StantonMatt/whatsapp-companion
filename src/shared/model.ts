@@ -151,7 +151,8 @@ export type StickerShield = { nonce: string; image: string; bounds: ViewBounds; 
 export type Status = {
   sequence: number;
   runtimePaused: boolean;
-  state: State; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { canSendSticker: boolean; stickerSendBlockedReason?: StickerSendBlockedReason; loadedSentSamples?: number; destinationToken?: string };
+  // The controls projection supplies deletion history without its main-only ids.
+  state: State & { hasForgotten?: boolean }; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { canSendSticker: boolean; stickerSendBlockedReason?: StickerSendBlockedReason; loadedSentSamples?: number; destinationToken?: string };
   panel?: Panel; theme?: 'dark' | 'light';
   stickerLibraryError?: string;
   stickerLocation?: { id: string; state: 'looking' | 'found' | 'missing' | 'unavailable' } | null;
@@ -161,7 +162,7 @@ export type Status = {
   message: string; pending: { text: string; due: number } | null;
 };
 // Controls receive only changed UI fields; main-only durable records never cross IPC.
-export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenStickers' | 'stickers'> & { stickers: Omit<Sticker, 'fingerprint'>[] };
+export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenStickers' | 'stickers'> & { stickers: Omit<Sticker, 'fingerprint'>[]; hasForgotten: boolean };
 export type StatusUpdate = Partial<Omit<Status, 'state' | 'sequence' | 'stickerShield'>> & { sequence: number; state?: Partial<ControlsState>; stickerShield?: Omit<StickerShield, 'image'> & { image?: string } | null; stickerChanges?: { upsert: Omit<Sticker, 'fingerprint'>[]; removed: string[] } };
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()
@@ -184,6 +185,7 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('deleteStickerGroup'), id: stickerGroupIdSchema }).strict(),
   z.object({ type: z.literal('stickerGroupMembership'), id: stickerBaseSchema.shape.id, groupId: stickerGroupIdSchema, member: z.boolean() }).strict(),
   z.object({ type: z.literal('bulkStickerGroupMembership'), stickerIds: z.array(stickerBaseSchema.shape.id).min(1).max(MAX_LIBRARY_STICKERS), groupId: stickerGroupIdSchema, member: z.boolean() }).strict(),
+  z.object({ type: z.literal('forgetStickers'), ids: z.array(stickerBaseSchema.shape.id).min(1).max(MAX_LIBRARY_STICKERS).refine(ids => new Set(ids).size === ids.length, 'Duplicate sticker ids.') }).strict(),
   z.object({ type: z.literal('forgetSticker'), id: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ type: z.literal('locateSticker'), id: z.string().max(64), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/) }).strict(),
   z.object({ type: z.literal('sendSticker'), id: z.string().regex(/^[a-f0-9]{64}$/), nonce: z.string().uuid(), destinationToken: z.string().regex(/^[1-9][0-9]{0,15}$/), still: z.literal(true).optional() }).strict(),
@@ -193,4 +195,4 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('cancelAuto') }).strict(),
 ]);
 export type Action = z.infer<typeof actionSchema>;
-export interface DesktopAPI { shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider, refresh?: boolean): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }
+export interface DesktopAPI { subscribePanelNavigation(fn: (panel: Panel) => void): () => void; shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider, refresh?: boolean): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }

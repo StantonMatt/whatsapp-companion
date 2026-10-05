@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { initialState, legacyStateSchema, stateSchema, type State } from '../shared/model';
 import { StickerFiles } from './sticker-files';
 import { storedSticker } from './sticker-bytes';
-import { forgetSticker } from '../core/stickers';
+import { forgetStickers } from '../core/stickers';
 
 // Optional checkpoints let tests interrupt durability boundaries like a crash.
 export type StorageFault = (step: string) => void;
@@ -170,14 +170,23 @@ export class Store {
       return verified;
     } catch { throw new Error('Sticker file is missing or damaged. Restore the file from a backup, or let the app rediscover the sticker.'); }
   }
-  forgetSticker(id: string) {
-    this.update(state => forgetSticker(state, id));
-    this.stickerFiles.invalidate(id, 'removed');
-    // Durable tombstone first. A failed deletion leaves only an orphan for GC.
+  forgetSticker(id: string) { return this.forgetStickers([id]); }
+  forgetStickers(ids: string[]) {
+    // Unknown hashes are ignored, consistently for single and bulk deletion.
+    // Recovery can also explicitly forget a preserved, unindexed blob.
+    const known = new Set([...this.state.stickers.map(sticker => sticker.id), ...this.preservedStickerIds]);
+    const removed = [...new Set(ids)].filter(id => known.has(id));
+    if (!removed.length) return removed;
+    this.update(state => forgetStickers(state, removed));
+    for (const id of removed) this.stickerFiles.invalidate(id, 'removed');
+    // Persist ALL tombstones before deleting any blob. Failed unlinking leaves
+    // only an orphan for startup GC; it must not prevent the remaining cleanup.
     this.fault?.('forget:manifest');
-    // Until the tombstone is crash-durable, keep the blob as an orphan for startup GC.
-    if (this.manifestDurabilityWarning) return;
-    try { this.stickerFiles.remove(id); } catch { /* The durable Forget succeeded; startup GC can retry unlinking the orphan. */ }
+    if (this.manifestDurabilityWarning) return removed;
+    for (const id of removed) {
+      try { this.stickerFiles.remove(id); } catch { /* Startup GC retries orphan deletion. */ }
+    }
     this.fault?.('forget:removed');
+    return removed;
   }
 }

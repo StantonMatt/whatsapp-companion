@@ -67,7 +67,7 @@ test('selection circles are focusable sibling checkbox buttons; modifier-click s
   act(() => tiles()[1].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true })));
   act(() => tiles()[2].dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true })));
   expect(host.querySelector('.sticker-detail')).toBeNull(); expect(host.querySelector('.sticker-select-bar span')?.textContent).toBe('3 selected');
-  click('Clear'); expect(picks()[0].getAttribute('aria-checked')).toBe('false');
+  click('Clear selection'); expect(picks()[0].getAttribute('aria-checked')).toBe('false');
 });
 
 test('Select all selects only current search and group; popover tri-state adds/removes the whole selection', async () => {
@@ -78,7 +78,7 @@ test('Select all selects only current search and group; popover tri-state adds/r
   expect(animal.getAttribute('aria-checked')).toBe('true'); expect(status.state.stickers[2].groups).toEqual([group]);
   await act(async () => animal.click()); expect(host.querySelector('.pop-row[role=checkbox]')?.getAttribute('aria-checked')).toBe('false');
   expect(status.state.stickers[1].groups).toEqual([group]);
-  expect(escape()).toBe(true); click('Clear'); click('Animals', header()); fill('Search stickers', 'cat'); click('Select all'); expect(host.querySelector('.sticker-select-bar span')?.textContent).toBe('1 selected');
+  expect(escape()).toBe(true); click('Clear selection'); click('Animals', header()); fill('Search stickers', 'cat'); click('Select all'); expect(host.querySelector('.sticker-select-bar span')?.textContent).toBe('1 selected');
 });
 
 test('per-sticker membership saves immediately and leaves unsaved search terms intact', async () => {

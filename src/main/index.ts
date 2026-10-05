@@ -219,7 +219,7 @@ async function start() {
   // Presentation can hold composer readiness during maker teardown. Send
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
-  const libraryMessage = () => stickerBlobErrors.values().next().value ?? stickerIntakeError ?? store.recoveryHint ?? (store.state.stickers.length >= MAX_LIBRARY_STICKERS || store.state.stickers.reduce((total, s) => total + s.size, 0) >= MAX_LIBRARY_BYTES ? 'Sticker library is full' : undefined);
+  const libraryMessage = () => (store.durabilityWarning ? 'Sticker changes saved; disk sync pending.' : undefined) ?? stickerBlobErrors.values().next().value ?? stickerIntakeError ?? store.recoveryHint ?? (store.state.stickers.length >= MAX_LIBRARY_STICKERS || store.state.stickers.reduce((total, s) => total + s.size, 0) >= MAX_LIBRARY_BYTES ? 'Sticker library is full' : undefined);
   const status = (): Status => ({ sequence, panel, stickerLibraryError: libraryMessage(), stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing && !m.directionFallback).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   let lastMakerDiagnostic: Status['stickerSend'];
   const recordStickerSend = () => {
@@ -353,7 +353,9 @@ async function start() {
   };
   const authorizeSticker = (nonce: string, snapshot: typeof assistant.snapshot) => {
     const send = stickerTransfer.send;
-    try { if (!send || send.nonce !== nonce) return false; readSticker(send.id); }
+    // A queued picker Send already used verified bytes during preparation.
+    // Deleting its library entry cannot revoke that issued command's grant.
+    try { if (!send || send.nonce !== nonce) return false; if (!stickerTransfer.pickerSendQueued(nonce)) readSticker(send.id); }
     catch (error) { cancelSticker(); publish(); return false; }
     const allowed = stickerTransfer.authorize(nonce, snapshot);
     // Start the outcome budget at the grant, even if navigation or a renderer
@@ -384,7 +386,14 @@ async function start() {
     }
     return revoked;
   };
-  const openPanel = (next: Panel) => {
+  const openPanel = (next: Panel, confirmed = false) => {
+    // The local controls own unsaved editor drafts. Rail/menu navigation must
+    // ask them before unmounting the library; only their panel action completes it.
+    if (panel === 'stickers' && next !== 'stickers' && !confirmed) {
+      controls.webContents.send('companion:panel-navigation', next);
+      controls.webContents.focus();
+      return;
+    }
     cancelSticker(); clearStickerShield();
     if (next === 'chat' && (!assistant.snapshot.ready || !assistant.snapshot.settingsId)) {
       assistant.message = 'Chat settings need recognizable messages. Wait for this conversation to load.';
@@ -437,7 +446,7 @@ async function start() {
     if (stickerTransfer.send?.nonce !== request.data.nonce || !['preparing', 'sending'].includes(stickerTransfer.send.state)) return false;
     const snapshot = { ...request.data.snapshot, settingsId: identifyStickerDestination(request.data.snapshot) };
     if (observeStickerDestination(snapshot)) { publish(); return false; }
-    try { if (!stickerTransfer.send || stickerTransfer.send.nonce !== request.data.nonce) return false; readSticker(stickerTransfer.send.id); }
+    try { if (!stickerTransfer.send || stickerTransfer.send.nonce !== request.data.nonce) return false; if (!stickerTransfer.pickerSendQueued(request.data.nonce)) readSticker(stickerTransfer.send.id); }
     catch (error) { cancelSticker(); publish(); return false; }
     const allowed = request.data.phase === 'disclose' ? stickerTransfer.disclose(request.data.nonce, snapshot) : authorizeSticker(request.data.nonce, snapshot);
     if (allowed && request.data.phase === 'disclose' && makerInputOwner === request.data.nonce) {
@@ -474,6 +483,11 @@ async function start() {
     try { return modelCatalog.load(provider, vault.get(provider), refresh); }
     catch (error) { return { models: [], error: error instanceof Error ? error.message : 'Unable to unlock the provider key.' }; }
   });
+  const cleanupForgottenSticker = (id: string) => {
+    stickerInbox.discard(id);
+    if (stickerTransfer.send?.id === id && stickerTransfer.revokeIfNotAuthorized()) { stopStickerLookup(); clearStickerShield(); }
+    stickerBlobErrors.delete(id);
+  };
   ipcMain.handle('companion:action', async (event, raw: unknown) => {
     if (closing || !isLocal(event)) return { ok: false, error: 'Denied' };
     const parsed = actionSchema.safeParse(raw);
@@ -552,7 +566,13 @@ async function start() {
         case 'stickerGroupMembership':
         case 'bulkStickerGroupMembership': store.update(s => applyStickerGroupAction(s, action, randomUUID)); break;
         case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
-        case 'forgetSticker': store.forgetSticker(action.id); stickerInbox.discard(action.id); if (stickerTransfer.send?.id === action.id) cancelSticker(); stickerBlobErrors.delete(action.id); break;
+        case 'forgetSticker':
+        case 'forgetStickers': {
+          const ids = action.type === 'forgetSticker' ? [action.id] : action.ids;
+          const removed = store.forgetStickers(ids);
+          for (const id of removed) cleanupForgottenSticker(id);
+          break;
+        }
         case 'locateSticker': {
           stickerTransfer.requireDestination(action.destinationToken, assistant.snapshot);
           readSticker(action.id);
@@ -564,7 +584,7 @@ async function start() {
           }, 3000) };
           remote.webContents.send('companion:command', { type: 'locateSticker', id: action.id, nonce }); break;
         }
-        case 'panel': openPanel(action.panel); break;
+        case 'panel': openPanel(action.panel, true); break;
         case 'reload': cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); await remote.webContents.loadURL(remoteURL); break;
         case 'cancelAuto': assistant.activity(); return { ok: true };
       }
@@ -606,7 +626,7 @@ async function start() {
           if (v.success) {
             if (sendDiagnostic?.nonce === v.data.nonce && !sendDiagnostic.written) sendDiagnostic.result = v.data.diagnostics;
             const ticket = stickerTransfer.prepared(v.data.nonce, v.data.found, assistant.snapshot);
-            if (ticket) {
+            if (ticket && stickerTransfer.queuePickerSend(ticket.nonce)) {
               clearTimeout(stickerSendTimer);
               // A lost picker result cannot prove whether activation happened.
               stickerSendTimer = setTimeout(() => { stickerTransfer.result(ticket.nonce, true, false, 'unconfirmed'); stopStickerLookup(); publish(); }, 6000);

@@ -99,12 +99,29 @@ test('cancellation during finding revokes permission and keeps a terminal result
   expect(() => begin(t, id, nonce, snapshot, 4)).toThrow();
   begin(t, id, 'new-nonce', snapshot, 5); expect(t.send?.state).toBe('finding');
 });
-test.each([false, true])('cancellation once sending is ignored, including after authorization=%s', authorized => {
+test('user cancellation cannot revoke a prepared picker, even before its grant', () => {
+  const t = sending();
+  expect(t.cancel()).toBe(false); expect(t.send?.state).toBe('sending');
+  expect(t.authorize(nonce, snapshot, 3)).toBe(true);
+  t.result(nonce, true, true); expect(t.send?.state).toBe('sent');
+});
+test.each([false, true])('deletion revokes a prepared picker only before authorization=%s', authorized => {
   const t = sending();
   if (authorized) expect(t.authorize(nonce, snapshot, 3)).toBe(true);
-  expect(t.cancel()).toBe(false); expect(t.send?.state).toBe('sending');
-  if (!authorized) expect(t.authorize(nonce, snapshot, 4)).toBe(true);
+  expect(t.revokeIfNotAuthorized()).toBe(!authorized); expect(t.send?.state).toBe(authorized ? 'sending' : 'cancelled');
+  if (!authorized) expect(t.authorize(nonce, snapshot, 4)).toBe(false);
+  t.result(nonce, true, true); expect(t.send?.state).toBe(authorized ? 'sent' : 'cancelled');
+});
+test('queued picker commands cannot be revoked before the final grant', () => {
+  const t = sending();
+  expect(t.queuePickerSend('wrong')).toBe(false);
+  expect(t.queuePickerSend(nonce)).toBe(true);
+  expect(t.queuePickerSend(nonce)).toBe(false);
+  expect(t.cancel()).toBe(false); expect(t.revokeIfNotAuthorized()).toBe(false);
+  expect(t.authorize(nonce, snapshot, 3)).toBe(true);
   t.result(nonce, true, true); expect(t.send?.state).toBe('sent');
+  begin(t, id, 'new-nonce', snapshot, 4);
+  expect(t.revokeIfNotAuthorized()).toBe(true);
 });
 test.each([
   { chatId: '456@c.us' }, { revision: '2' }, { name: 'Another person' }, { settingsId: '456@c.us' }, { conversationOpen: false }, { ready: false }, { composing: true }
@@ -565,7 +582,7 @@ describe('sticker panel action races', () => {
     const b = 'b'.repeat(64), pending = deferred();
     const act: Act = action => action.type === 'forgetSticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus([sticker(id, 2), sticker(b, 1)]), act);
-    await editTile(); await click('Forget');
+    await editTile(); await reactAct(() => document.querySelector<HTMLButtonElement>('button[aria-label="Delete sticker"]')!.click()); await click('Delete');
     await render(panelStatus([sticker(b, 1)]), act); await editTile();
     await type('textarea', 'newer B draft');
     await reactAct(() => { pending.resolve(true); });
@@ -575,7 +592,7 @@ describe('sticker panel action races', () => {
   test('a delayed Forget cannot clear a newer draft after the same sticker is indexed again', async () => {
     const pending = deferred(), act: Act = action => action.type === 'forgetSticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus(), act);
-    await editTile(); await click('Forget');
+    await editTile(); await reactAct(() => document.querySelector<HTMLButtonElement>('button[aria-label="Delete sticker"]')!.click()); await click('Delete');
     await render(panelStatus([]), act); await render(panelStatus(), act);
     await editTile(); await type('textarea', 'newly indexed draft');
     await reactAct(() => { pending.resolve(true); });
@@ -586,7 +603,7 @@ describe('sticker panel action races', () => {
     const b = 'b'.repeat(64), pending = deferred();
     const act: Act = action => action.type === 'forgetSticker' ? pending.promise : Promise.resolve(true);
     await render(panelStatus([sticker(id, 2), sticker(b, 1)]), act);
-    await editTile(); await click('Forget');
+    await editTile(); await reactAct(() => document.querySelector<HTMLButtonElement>('button[aria-label="Delete sticker"]')!.click()); await click('Delete');
     await render(panelStatus([]), act);
     await reactAct(() => { pending.resolve(true); });
     expect(document.activeElement).toBe(document.querySelector('.search'));

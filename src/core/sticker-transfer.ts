@@ -14,6 +14,7 @@ export class StickerTransfer {
   send: StickerSend | null = null;
   private ticket?: StickerTicket & { scope: string; destinationToken: string; expires: number };
   private authorized = false;
+  private pickerQueued = false;
   private disclosed = false;
   private usedNonces = new Set<string>();
   private destinationIdentity?: string;
@@ -41,7 +42,7 @@ export class StickerTransfer {
     const scope = snapshot.settingsId ?? snapshot.chatId;
     if (!scope || !canSendSticker(snapshot)) throw new Error('Open a conversation before sending a sticker.');
     this.usedNonces.add(nonce);
-    this.authorized = false; this.disclosed = false;
+    this.authorized = false; this.disclosed = false; this.pickerQueued = false;
     this.ticket = { id, nonce, scope, destinationToken, expires: now + (route === 'picker' ? STICKER_PICKER_WATCHDOG_MS : 60_000), route, target: { name: snapshot.name, chatId: snapshot.chatId, revision: snapshot.revision } };
     this.send = { id, nonce, name: snapshot.name, route, animated, state: route === 'picker' ? 'finding' : 'preparing' };
     const ticket = this.ticket;
@@ -96,6 +97,16 @@ export class StickerTransfer {
   }
   ownsPreparation(snapshot: Snapshot) {
     return Boolean(this.ticket && this.disclosed && this.send?.state === 'preparing' && sameStickerPreparation(this.ticket, snapshot));
+  }
+  queuePickerSend(nonce: string) {
+    if (this.send?.nonce !== nonce || this.send.route !== 'picker' || this.send.state !== 'sending' || !this.ticket || this.pickerQueued) return false;
+    // The user-issued command crosses the cancellation boundary before IPC,
+    // even if the remote holds it before requesting the final grant.
+    this.pickerQueued = true;
+    return true;
+  }
+  pickerSendQueued(nonce: string) {
+    return this.send?.nonce === nonce && this.send.route === 'picker' && this.send.state === 'sending' && this.pickerQueued;
   }
   ownsMaker(snapshot: Snapshot) {
     return Boolean(this.ticket && this.disclosed && this.send?.route === 'maker' &&
@@ -155,6 +166,15 @@ export class StickerTransfer {
     const diagnostic = detail ?? (this.send.route === 'maker' ? reason ?? 'cancelled' : undefined);
     this.send = { ...this.send, state: 'cancelled', ...(reason ? { reason } : {}), ...(diagnostic ? { detail: diagnostic } : {}) };
     this.ticket = undefined; this.authorized = false;
+    return true;
+  }
+  revokeIfNotAuthorized() {
+    if (this.authorized || this.pickerQueued) return false;
+    if (this.cancel()) return true;
+    if (this.send?.route !== 'picker' || this.send.state !== 'sending') return false;
+    // Deletion may revoke a prepared picker only before its command is queued.
+    this.send = { ...this.send, state: 'cancelled' };
+    this.ticket = undefined;
     return true;
   }
   private finish(state: 'sent' | 'failed' | 'missing', reason?: StickerReason, detail?: StickerMakerDetail, sent?: StickerSendOutcome) {
