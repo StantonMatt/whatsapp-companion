@@ -109,3 +109,172 @@ test('an unobserved placeholder is never relabelled by inference', () => {
   second.getBoundingClientRect = () => rect(0, 800, 150);
   expect(new DomConnector(document, () => {}).read().messages.at(-1)).toMatchObject({ text: '', outgoing: null });
 });
+
+test.each(['message-in', 'message-out', 'author', 'own-label', 'wrapper-id'])('cached placeholders use current external direction evidence: %s', evidence => {
+  vi.useFakeTimers(); pane();
+  const row = bubble('<span data-icon="tail-in"></span><span data-testid="msg-text">Observed</span>');
+  const wrapper = document.createElement('article'); wrapper.dataset.testid = 'msg-container';
+  row.before(wrapper); wrapper.append(row);
+  const cached = new DomConnector(document, () => {}), fresh = new DomConnector(document, () => {});
+  const observer = new MutationObserver(() => {});
+  observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  const compare = () => {
+    cached['mutations'](observer.takeRecords(), false);
+    const snapshot = cached.read(false); expect(snapshot).toEqual(fresh.read()); return snapshot;
+  };
+  try {
+    compare(); row.innerHTML = '<div style="height:150px"></div>';
+    expect(compare().messages[0].text).toBe('Observed');
+    if (evidence.startsWith('message-')) wrapper.className = evidence;
+    if (evidence === 'author') wrapper.insertAdjacentHTML('afterbegin', '<span data-testid="author">Someone</span>');
+    if (evidence === 'own-label') wrapper.insertAdjacentHTML('afterbegin', '<span aria-label="You:"></span>');
+    if (evidence === 'wrapper-id') wrapper.dataset.id = 'true_123@c.us_wrapper';
+    expect(compare().messages.at(-1)).toMatchObject({ text: '', outgoing: !['message-in', 'author'].includes(evidence) });
+    wrapper.className = ''; wrapper.removeAttribute('data-id');
+    wrapper.querySelector('[data-testid="author"], [aria-label]')?.remove();
+    compare();
+  } finally { observer.disconnect(); }
+});
+
+test('extraction rejects cached entries when connection state changes before observer delivery', () => {
+  pane(); const row = bubble('<span data-testid="msg-text"><img alt="😂"></span>');
+  const connector = new DomConnector(document, () => {});
+  const mounted = connector['extractMessage'](row, false);
+  row.remove(); row.querySelector('img')!.alt = '😀';
+  const detached = connector['extractMessage'](row, false);
+  expect(detached).not.toBe(mounted); expect(detached.content.text).toBe('😀');
+  row.querySelector('img')!.alt = '🫢'; document.querySelector('section')!.append(row);
+  const reattached = connector['extractMessage'](row, false);
+  expect(reattached).not.toBe(detached); expect(reattached.content.text).toBe('🫢');
+});
+
+test.each([1, 17, 42, 101, 2026, 65535])('cached and fresh snapshots agree through randomized evidence changes and node reuse (seed=%s)', async seed => {
+  vi.useFakeTimers(); const main = pane(), section = main.querySelector('section')!;
+  let state = seed;
+  const random = (limit: number) => { state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return state % limit; };
+  let paneLeft = 0, paneWidth = 800;
+  main.getBoundingClientRect = () => rect(paneLeft, paneWidth, 600);
+  const rows = Array.from({ length: 4 }, (_, index) => {
+    const node = bubble(`<span data-testid="msg-text">Message ${index}</span>`, 350);
+    const wrapper = document.createElement('article'); wrapper.dataset.testid = 'msg-container';
+    const header = document.createElement('aside');
+    node.before(wrapper); wrapper.append(header, node);
+    const geometry = { left: 350, width: 100 };
+    node.getBoundingClientRect = () => rect(geometry.left, geometry.width);
+    node.querySelector<HTMLElement>('[data-testid="msg-container"]')!.getBoundingClientRect = node.getBoundingClientRect;
+    return { node, wrapper, header, geometry };
+  });
+  const cached = new DomConnector(document, () => {}), fresh = new DomConnector(document, () => {});
+  const observer = new MutationObserver(() => {});
+  observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  const compare = (step: number | string) => {
+    cached['mutations'](observer.takeRecords(), false);
+    expect(cached.read(false), `seed ${seed}, step ${step}`).toEqual(fresh.read());
+  };
+  try {
+    compare(-1);
+    for (let step = 0; step < 180; step++) {
+      const { node, wrapper, header, geometry } = rows[random(rows.length)];
+      // Cycle operation classes for coverage, randomize the affected bubble and
+      // evidence. Geometry-only changes deliberately generate no DOM records.
+      switch (step % 18) {
+        case 0: wrapper.className = ['', 'message-in', 'message-out'][random(3)]; break;
+        case 1: wrapper.dataset.testid = ['msg-container', 'neutral-wrapper', 'conv-msg-wrapper'][random(3)]; break;
+        case 2: header.innerHTML = ['', '<span data-testid="author">Peer</span>', '<span data-pre-plain-text="[10:00] Peer: ">Peer</span>'][random(3)]; break;
+        case 3: header.innerHTML = ['', '<span aria-label="You:"></span>', '<span data-icon="tail-in"></span>', '<span data-icon="tail-out"></span>'][random(4)]; break;
+        case 4: node.innerHTML = random(2) ? '<div style="height:150px"></div>' : `<span data-testid="msg-text">Message ${random(10)}</span>`; break;
+        case 5: {
+          for (const sibling of [...section.childNodes]) if (!rows.some(row => row.wrapper === sibling)) sibling.remove();
+          const divider = document.createElement('div');
+          divider.innerHTML = ['<span data-testid="date-divider">Today</span>', '<span role="separator"></span>', 'Yesterday', ''][random(4)];
+          wrapper.before(divider); break;
+        }
+        case 6: wrapper.dataset.testid = random(2) ? 'quoted-message' : 'msg-container'; break;
+        case 7: geometry.left = [10, 60, 350, 640][random(4)]; geometry.width = [0, 100, 700][random(3)]; break;
+        case 8: paneLeft = [0, -600, 100][random(3)]; paneWidth = [0, 800, 1200][random(3)]; break;
+        case 9: section.append(wrapper); break;
+        case 10: {
+          header.innerHTML = '<div data-testid="quoted-message"><span data-testid="author">Peer</span><span data-icon="tail-out"></span></div>';
+          header.firstElementChild!.setAttribute('data-testid', random(2) ? 'quoted-message' : 'native-header'); break;
+        }
+        case 11: {
+          node.innerHTML = '<span data-testid="msg-text">Body</span><div data-testid="quoted-message"><span data-testid="author">Peer</span><span data-testid="msg-text">Quote</span></div>';
+          node.lastElementChild!.setAttribute('data-testid', random(2) ? 'quoted-message' : 'native-body'); break;
+        }
+        case 12:
+        case 13:
+        case 14: {
+          // Drain removal records and let transient subtree observation end
+          // before editing, so the edits genuinely happen outside the observer.
+          wrapper.dataset.testid = 'msg-container';
+          node.innerHTML = '<span data-testid="msg-text">Body <img alt="😂"></span>';
+          compare(`${step} mounted`);
+          const removed = step % 18 === 13 ? wrapper : node;
+          removed.remove(); compare(`${step} detached`); await Promise.resolve();
+          if (step % 18 === 12) node.querySelector('img')!.alt = ['😀', '😍', '🫢'][random(3)];
+          if (step % 18 === 13) node.querySelector('span')!.firstChild!.textContent = `Detached ${random(10)} `;
+          if (step % 18 === 14) {
+            node.dataset.id = `REUSED_${seed}_${step}`; node.dataset.testid = `conv-msg-${node.dataset.id}`;
+            node.querySelector('img')!.alt = '🫢';
+          }
+          compare(`${step} edited while detached`);
+          if (removed === wrapper) section.append(wrapper); else wrapper.append(node);
+          break;
+        }
+        case 15: {
+          wrapper.dataset.testid = 'msg-container';
+          node.innerHTML = '<span data-testid="msg-text"><img alt="😂"></span>';
+          compare(`${step} before move`);
+          const destination = document.createElement('div'); destination.className = 'message-out';
+          section.append(destination); destination.append(node);
+          compare(`${step} in other container`);
+          node.remove(); compare(`${step} detached from other container`); await Promise.resolve();
+          node.querySelector('img')!.alt = '😍';
+          compare(`${step} edited after move`);
+          wrapper.append(node); destination.remove(); break;
+        }
+        case 16: {
+          wrapper.dataset.testid = 'msg-container';
+          node.innerHTML = '<span data-testid="msg-text"><img alt="😂"></span>';
+          compare(`${step} before nested reattachment`);
+          wrapper.remove(); compare(`${step} wrapper detached`); await Promise.resolve();
+          // Seed a detached entry as well: added subtree invalidation must find
+          // cached descendants even when recycling removed their old selector.
+          cached['extractMessage'](node, false);
+          const id = node.dataset.id!; node.removeAttribute('data-id');
+          node.querySelector('img')!.alt = '🫢';
+          compare(`${step} recycled while detached`);
+          const outer = document.createElement('div'); outer.append(wrapper); section.append(outer);
+          compare(`${step} reattached without ID`);
+          expect(cached['messageCache'].has(node)).toBe(false);
+          node.dataset.id = id; section.append(wrapper); outer.remove(); break;
+        }
+        case 17: {
+          wrapper.dataset.testid = 'msg-container';
+          node.innerHTML = '<span data-testid="msg-text"><img alt="😂"></span>';
+          compare(`${step} before same-turn reuse`);
+          node.remove(); node.querySelector('img')!.alt = '😀'; wrapper.append(node);
+          // Connection state matches the old entry when these records arrive.
+          break;
+        }
+      }
+      compare(step);
+    }
+  } finally { observer.disconnect(); }
+});
+
+test('fallback geometry is shared within one read and refreshed for the next authorization read', () => {
+  const main = pane();
+  const rows = Array.from({ length: 10 }, (_, index) => bubble(`<span data-testid="msg-text">${index}</span>`, 60, 100));
+  const paneRect = vi.spyOn(main, 'getBoundingClientRect');
+  const bubbleRects = rows.map(row => vi.spyOn(row.querySelector<HTMLElement>('[data-testid="msg-container"]')!, 'getBoundingClientRect'));
+  const connector = new DomConnector(document, () => {});
+  expect(connector.read().messages.every(message => message.outgoing === false && message.directionFallback)).toBe(true);
+  // One pane visibility read and one shared direction viewport read.
+  expect(paneRect).toHaveBeenCalledTimes(2);
+  expect(bubbleRects.every(read => read.mock.calls.length === 1)).toBe(true);
+  paneRect.mockClear(); bubbleRects.forEach(read => read.mockClear());
+  main.getBoundingClientRect = vi.fn(() => rect(-600, 800, 600));
+  expect(connector.read().messages[0].outgoing).toBe(true);
+  expect(bubbleRects.every(read => read.mock.calls.length === 1)).toBe(true);
+});

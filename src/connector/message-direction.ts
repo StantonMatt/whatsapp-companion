@@ -34,17 +34,22 @@ export function messageDirection(node: HTMLElement, id = node.dataset.id ?? ''):
   return null;
 }
 
-function bubbleBounds(node: HTMLElement) {
-  return (ownElements(node, '[data-testid="msg-container"]')[0] ?? node).getBoundingClientRect();
+function bounds(element: Element, geometry?: Map<Element, DOMRect>) {
+  const cached = geometry?.get(element);
+  if (cached) return cached;
+  const rect = element.getBoundingClientRect(); geometry?.set(element, rect); return rect;
+}
+function bubbleBounds(node: HTMLElement, geometry?: Map<Element, DOMRect>) {
+  return bounds((ownElements(node, '[data-testid="msg-container"]')[0] ?? node), geometry);
 }
 function measurable(rect: DOMRect) {
   return rect.width > 0 && rect.height > 0 && [rect.left, rect.right].every(Number.isFinite);
 }
 /** Suggestion-only inference. Never use this to authorize automatic sending. */
-export function fallbackDirection(node: HTMLElement, pane: HTMLElement, preceding?: { node: HTMLElement; direction: boolean | null }): boolean | null {
+export function fallbackDirection(node: HTMLElement, pane: HTMLElement, preceding?: { node: HTMLElement; direction: boolean | null }, geometry?: Map<Element, DOMRect>): boolean | null {
   if (node.closest(quoteSelector)) return null;
-  const bounds = bubbleBounds(node), viewport = pane.getBoundingClientRect();
-  if (!measurable(bounds) || !measurable(viewport)) return null;
+  const rect = bubbleBounds(node, geometry), viewport = bounds(pane, geometry);
+  if (!measurable(rect) || !measurable(viewport)) return null;
   // Walk only empty wrapper boundaries. A divider/system row, even without an
   // ID, breaks the run; never search backwards past it for a convenient author.
   let row = node;
@@ -59,16 +64,16 @@ export function fallbackDirection(node: HTMLElement, pane: HTMLElement, precedin
   if (previous && !precedingText(row) && !sibling?.matches('[data-testid*="system"], [data-testid*="date"], [role="separator"]') &&
       !sibling?.querySelector('[data-testid*="system"], [data-testid*="date"], [role="separator"]') &&
       (!sibling?.querySelectorAll('[data-id]').length || sibling.querySelectorAll('[data-id]').length === 1)) {
-    const before = bubbleBounds(previous);
+    const before = bubbleBounds(previous, geometry);
     const direction = messageDirection(previous) ?? (preceding?.node === previous ? preceding.direction : null);
     if (measurable(before) && direction != null &&
-        Math.abs((direction ? bounds.right : bounds.left) - (direction ? before.right : before.left)) <= 12 &&
-        Math.abs((bounds.left + bounds.right) / 2 - (before.left + before.right) / 2) < viewport.width / 4)
+        Math.abs((direction ? rect.right : rect.left) - (direction ? before.right : before.left)) <= 12 &&
+        Math.abs((rect.left + rect.right) / 2 - (before.left + before.right) / 2) < viewport.width / 4)
       return direction;
   }
   // Require a clear gap difference, so wide/centred/partially mounted bubbles
   // and zero-sized placeholders stay unknown.
-  const left = bounds.left - viewport.left, right = viewport.right - bounds.right;
+  const left = rect.left - viewport.left, right = viewport.right - rect.right;
   const margin = Math.max(24, viewport.width * 0.08);
   if (left < -12 || right < -12 || Math.abs(left - right) < margin) return null;
   return left > right;

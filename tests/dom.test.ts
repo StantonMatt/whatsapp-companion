@@ -8,7 +8,7 @@ import { ProviderError, type generate } from '../src/main/providers';
 import type { Store } from '../src/main/store';
 import type { Vault } from '../src/main/vault';
 import { StickerTransfer, canSendSticker, stickerRoute } from '../src/core/sticker-transfer';
-import { snapshotKey, suggestionKey } from '../src/core/suggestions';
+import { snapshotKey, suggestionKey, SnapshotKeys } from '../src/core/suggestions';
 import type { RemoteEvent, RemoteCommand } from '../src/shared/connector';
 import { composerProvablyEmpty } from '../src/connector/draft';
 import { emptyComposers } from './fixtures/empty-composers';
@@ -248,13 +248,14 @@ test('inline acceptance requires a collapsed caret at the end, not a selected ra
   range.setStart(editor.firstChild!, 2); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); expect(caretAtEnd(editor)).toBe(false);
   range.selectNodeContents(editor); selection.removeAllRanges(); selection.addRange(range); expect(caretAtEnd(editor)).toBe(false);
 });
-test('selection changes publish caret eligibility without changing the draft', () => {
+test('selection changes publish caret eligibility without changing the draft', async () => {
+  vi.useFakeTimers();
   const editor = fixture(), events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
   try {
     const selection = document.getSelection()!, range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
-    selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange'));
+    selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(20);
     expect(events.at(-1)).toMatchObject({ type: 'snapshot', snapshot: { draft: 'A draft', caretAtEnd: true } });
-    range.setStart(editor.firstChild!, 2); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange'));
+    range.setStart(editor.firstChild!, 2); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(20);
     expect(events.at(-1)).toMatchObject({ type: 'snapshot', snapshot: { draft: 'A draft', caretAtEnd: false } });
   } finally { connector.stop(); }
 });
@@ -963,7 +964,7 @@ function retryClicks() {
     stop: () => spy.mockRestore()
   };
 }
-function integratedAssistant(generator: typeof generate, identify?: (snapshot: Snapshot) => string) {
+function integratedAssistant(generator: typeof generate, identify?: (snapshot: Snapshot) => string, queued = false) {
   const editor = fixture(); editor.tabIndex = 0;
   const state = initialState(); state.global.suggestions = true; state.global.shareContext = true;
   const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
@@ -971,14 +972,17 @@ function integratedAssistant(generator: typeof generate, identify?: (snapshot: S
   let assistant!: Assistant;
   const connector = new DomConnector(document, event => {
     events.push(event);
-    if (event.type === 'snapshot') assistant.receive(identify ? { ...event.snapshot, settingsId: identify(event.snapshot) } : event.snapshot, false, event.nonce);
-    if (event.type === 'activity') assistant.activity(event.editing);
-    if (event.type === 'applied') assistant.applied(event);
-    if (event.type === 'request') void assistant.request(event.instruction, false, event);
-    if (event.type === 'dismiss') assistant.dismiss(event);
-    if (event.type === 'displayAck') assistant.displayAck(event);
+    const receive = () => {
+      if (event.type === 'snapshot') assistant.receive(identify ? { ...event.snapshot, settingsId: identify(event.snapshot) } : snapshotSchema.parse(event.snapshot), false, event.nonce);
+      if (event.type === 'activity') assistant.activity(event.editing);
+      if (event.type === 'applied') assistant.applied(event);
+      if (event.type === 'request') void assistant.request(event.instruction, false, event);
+      if (event.type === 'dismiss') assistant.dismiss(event);
+      if (event.type === 'displayAck') assistant.displayAck(event);
+    };
+    if (queued) setTimeout(receive, 0); else receive();
   });
-  assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => connector.command(c), focus() {} }, () => {}, false, generator);
+  assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => { if (queued) setTimeout(() => connector.command(c), 0); else connector.command(c); }, focus() {} }, () => {}, false, generator);
   connector.start();
   return { editor, state, assistant, connector, events, stop() { assistant.cancel(true); connector.stop(); } };
 }
@@ -986,6 +990,488 @@ function focusEnd(editor: HTMLElement) {
   editor.focus(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
   document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
 }
+
+test.each([[false, false], [true, false], [true, true]])('instruction Enter after the refinement popup wait preserves the request and shows dots (queued=%s, stale cache=%s)', async (queued, staleCache) => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  let enter!: EventListener;
+  const add = HTMLInputElement.prototype.addEventListener;
+  const inputListeners = vi.spyOn(HTMLInputElement.prototype, 'addEventListener').mockImplementation(function (this: HTMLInputElement, type, listener, options) {
+    if (type === 'keydown' && typeof listener === 'function') enter = listener as EventListener;
+    return add.call(this, type, listener, options);
+  });
+  let finish!: (text: string) => void;
+  const generator = vi.fn<typeof generate>(() => new Promise(resolve => { finish = resolve; }));
+  const app = integratedAssistant(generator, undefined, queued);
+  const read = app.connector.read.bind(app.connector);
+  // Fault-inject an out-of-date message extraction cache. Fresh user actions
+  // must publish their actual context, rather than ask main to use that cache.
+  const stale = read();
+  let staleReads = false;
+  const reads = vi.spyOn(app.connector, 'read').mockImplementation((fresh = true) => {
+    const snapshot = read(fresh);
+    return staleReads && !fresh ? { ...snapshot, messages: stale.messages } : snapshot;
+  });
+  let selected = false;
+  const original = 'A long draft to make warmer';
+  const selection = () => { selected = !document.getSelection()?.isCollapsed && app.editor.contains(document.getSelection()?.anchorNode ?? null); };
+  const input = () => { if (!selected) app.editor.textContent = original; };
+  const previousInsert = document.execCommand;
+  document.execCommand = vi.fn((_command: string, _ui: boolean, text: string) => {
+    const range = document.getSelection()!.getRangeAt(0);
+    range.deleteContents(); const node = document.createTextNode(text); range.insertNode(node); range.setStartAfter(node); range.collapse(true);
+    app.editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    return true;
+  });
+  document.addEventListener('selectionchange', selection); app.editor.addEventListener('input', input);
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    app.editor.textContent = original; focusEnd(app.editor);
+    document.querySelector('#main .selectable-text')!.textContent = 'Current message context';
+    app.editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    clicks.trigger(app.connector);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(app.connector['popup'].hidden).toBe(false);
+    const instruction = app.connector['popup'].querySelector('input')!;
+    for (const character of 'Make it warmer') {
+      app.connector['keydown']({ isTrusted: true, key: character, target: app.connector['host'] } as unknown as KeyboardEvent);
+      app.connector['beforeInput']({ isTrusted: true, target: app.connector['host'] } as unknown as InputEvent);
+      instruction.value += character;
+      instruction.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+    }
+    staleReads = staleCache;
+    app.connector['keydown']({ isTrusted: true, key: 'Enter', target: app.connector['host'] } as unknown as KeyboardEvent);
+    enter.call(instruction, { isTrusted: true, key: 'Enter', preventDefault() {}, stopPropagation() {} } as KeyboardEvent);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(app.events.filter(event => event.type === 'request').at(-1)).toMatchObject({ instruction: 'Make it warmer', key: suggestionKey(app.assistant.snapshot) });
+    expect(app.connector['pending']).toMatchObject({ type: 'refining', origin: 'user', key: suggestionKey(app.assistant.snapshot) });
+    expect(app.connector['ghost'].textContent).toBe(original + '...');
+    expect(app.connector['popup'].hidden).toBe(true);
+    staleReads = false;
+    await vi.advanceTimersByTimeAsync(120);
+    expect(app.connector['pending']?.type).toBe('refining');
+    finish('That sounds lovely. See you then!');
+    await vi.advanceTimersByTimeAsync(10);
+    document.dispatchEvent(new Event('selectionchange'));
+    await vi.advanceTimersByTimeAsync(60);
+    expect(app.editor.textContent).toBe('That sounds lovely. See you then!');
+    expect(app.events.some(event => event.type === 'applied')).toBe(true);
+  } finally {
+    document.removeEventListener('selectionchange', selection); app.editor.removeEventListener('input', input);
+    document.execCommand = previousInsert;
+    reads.mockRestore(); app.stop(); clicks.stop(); inputListeners.mockRestore();
+  }
+});
+
+test.each(['thinking', 'refining', 'suggestion', 'notice', 'clear'] as const)('fresh snapshot recovery supplies the same key used by %s acceptance', async type => {
+  vi.useFakeTimers(); const editor = fixture(); editor.tabIndex = 0;
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event));
+  connector.start();
+  let restoreRead = () => {};
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(editor);
+    const read = connector.read.bind(connector), stale = read();
+    document.querySelector('#main .selectable-text')!.textContent = 'Current context';
+    const reads = vi.spyOn(connector, 'read').mockImplementation((fresh = true) => {
+      const snapshot = read(fresh);
+      return fresh ? snapshot : { ...snapshot, messages: stale.messages };
+    });
+    restoreRead = () => reads.mockRestore();
+    events.length = 0;
+    connector.command({ type: 'snapshot', nonce: 'fresh-recovery' });
+    const snapshots = events.filter(event => event.type === 'snapshot');
+    const key = suggestionKey(snapshots.at(-1)!.snapshot);
+    expect(key).toBe(suggestionKey(read()));
+    expect(connector['lastContentKey']).toBe(key);
+    expect(snapshots.every(event => suggestionKey(event.snapshot) === key)).toBe(true);
+    if (type === 'thinking' || type === 'refining') {
+      connector.command({ type, origin: 'user', key, requestId: 'fresh-work' });
+      expect(connector['pending']?.key).toBe(key);
+    } else if (type === 'suggestion') {
+      connector.command({ type, key, text: ' suffix', replace: false, id: 'fresh-offer' });
+      expect(connector['suggestion']?.key).toBe(key);
+      expect(events.at(-1)).toMatchObject({ type: 'displayAck', reason: 'displayed', key });
+    } else {
+      connector.command({ type: 'notice', text: 'Try again', retryKey: key });
+      expect(connector['popup'].hidden).toBe(false);
+      if (type === 'clear') { connector.command({ type }); expect(connector['popup'].hidden).toBe(true); }
+    }
+  } finally { restoreRead(); connector.stop(); }
+});
+
+test.each(['fill', 'typing', 'auto dots'] as const)('star immediately after %s opens Refine draft before any frame runs', async source => {
+  vi.useFakeTimers(); const clicks = retryClicks(); const editor = fixture(); editor.textContent = ''; editor.tabIndex = 0;
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    if (source.endsWith('dots')) connector.command({ type: 'thinking', origin: source === 'auto dots' ? 'auto' : 'user', key: suggestionKey(connector.read()), requestId: 'old-empty-work' });
+    if (source === 'typing') connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+    editor.textContent = 'Translate this written message'; focusEnd(editor);
+    editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    expect(connector['refreshTimeout']).toBeDefined();
+    if (source === 'fill' || source === 'typing') expect(connector['button'].getAttribute('aria-label')).toBe('Refine draft');
+    clicks.trigger(connector);
+    expect(connector['button'].getAttribute('aria-label')).toBe('Refine draft');
+    expect(connector['button'].getAttribute('aria-expanded')).toBe('true');
+    expect(connector['popup'].hidden).toBe(false);
+    expect(connector['popup'].getAttribute('aria-label')).toBe('Refine draft');
+    expect([...connector['popup'].querySelectorAll('button')].some(button => button.textContent === 'Translate…')).toBe(true);
+    expect(events.some(event => event.type === 'request')).toBe(false);
+    // The old frame must not subsequently close the freshly opened popup.
+    await vi.advanceTimersByTimeAsync(120);
+    expect(connector['popup'].hidden).toBe(false);
+    clicks.click(connector, 'Translate…');
+    expect(connector['popup'].querySelector('input')?.getAttribute('aria-label')).toBe('Translation language');
+  } finally { connector.stop(); clicks.stop(); }
+});
+
+test('fill → star reconciles a pending rAF before creating Refine and its deferred callback keeps the popup', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks(); const editor = fixture(); editor.tabIndex = 0; editor.textContent = '';
+  const connector = new DomConnector(document, () => {}); connector.start();
+  let frame!: FrameRequestCallback;
+  let restore = () => {};
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    const frames = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frame = callback; return 987; });
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame');
+    const flush = vi.spyOn(connector as unknown as { flushAction(): Snapshot }, 'flushAction');
+    restore = () => { frames.mockRestore(); cancel.mockRestore(); flush.mockRestore(); };
+    editor.textContent = 'Translate this'; focusEnd(editor); editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    expect(connector['refreshFrame']).toBe(987); const deferred = frame;
+    clicks.trigger(connector);
+    expect(flush).toHaveBeenCalledOnce(); expect(cancel).toHaveBeenCalledWith(987);
+    const key = suggestionKey(connector.read()); expect(connector['lastContentKey']).toBe(key);
+    expect(connector['popup'].hidden).toBe(false);
+    deferred(0); await vi.advanceTimersByTimeAsync(120);
+    expect(connector['popup'].hidden).toBe(false); expect(connector['popupKey']).toBe(key);
+    expect(connector.read(false)).toEqual(connector.read());
+    flush.mockClear(); clicks.click(connector, 'Translate…'); expect(flush).toHaveBeenCalledOnce();
+    const instruction = connector['popup'].querySelector('input')!; instruction.value = 'Spanish'; instruction.dispatchEvent(new Event('input'));
+    flush.mockClear(); clicks.click(connector, 'Apply instruction'); expect(flush).toHaveBeenCalledOnce();
+    expect(connector['popup'].hidden).toBe(true);
+  } finally { restore(); connector.stop(); clicks.stop(); }
+});
+
+test.each([false, true])('notice validity uses its creation context rather than an older publication baseline (revert=%s)', async revert => {
+  vi.useFakeTimers(); const editor = fixture(), connector = new DomConnector(document, () => {}); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    const baseline = connector['lastContentKey']; editor.textContent = 'Fresh draft';
+    const key = suggestionKey(connector.read()); expect(key).not.toBe(baseline);
+    connector.command({ type: 'notice', text: 'Current failure', retryKey: key });
+    expect(connector['lastContentKey']).toBe(baseline); expect(connector['popup'].hidden).toBe(false);
+    if (revert) editor.textContent = 'A draft';
+    document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(120);
+    expect(connector['popup'].hidden).toBe(revert);
+    if (!revert) expect(connector['popupKey']).toBe(key);
+  } finally { connector.stop(); }
+});
+
+test('Escape immediately after typing flushes the draft and rejects a queued old suggestion', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.tabIndex = 0;
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(editor);
+    const offer = { type: 'suggestion' as const, key: suggestionKey(connector.read()), id: 'old-offer', text: ' suffix', replace: false };
+    connector.command(offer);
+    editor.textContent = 'Just typed'; focusEnd(editor);
+    editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    const preventDefault = vi.fn();
+    connector['keydown']({ isTrusted: true, key: 'Escape', target: editor, composedPath: () => [editor], preventDefault, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(events.filter(event => event.type === 'snapshot').at(-1)).toMatchObject({ snapshot: { draft: 'Just typed', focused: true } });
+    expect(events).toContainEqual({ type: 'dismiss', suggestionId: offer.id, key: offer.key });
+    expect(connector['refreshTimeout']).toBeUndefined();
+    expect(connector['button'].getAttribute('aria-label')).toBe('Refine draft');
+    connector.command(offer);
+    expect(connector['ghost'].textContent).toBe(''); expect(editor.textContent).toBe('Just typed');
+  } finally { connector.stop(); }
+});
+
+test('Tab immediately after a suggestion arrives flushes pending input and accepts without a frame', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.textContent = ''; editor.tabIndex = 0;
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    editor.textContent = 'Just typed'; focusEnd(editor);
+    editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    const key = suggestionKey(connector.read());
+    connector.command({ type: 'suggestion', key, id: 'immediate-offer', text: ' suffix', replace: false });
+    const insert = vi.fn((_command: string, _ui: boolean, text: string) => { editor.append(text); return true; });
+    document.execCommand = insert;
+    const preventDefault = vi.fn();
+    connector['keydown']({ isTrusted: true, key: 'Tab', target: editor, composedPath: () => [editor], preventDefault, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(preventDefault).toHaveBeenCalledOnce(); expect(insert).toHaveBeenCalledOnce();
+    expect(editor.textContent).toBe('Just typed suffix');
+    expect(events).toContainEqual({ type: 'applied', key, suggestionId: 'immediate-offer' });
+    expect(events.filter(event => event.type === 'snapshot').at(-1)).toMatchObject({ snapshot: { draft: 'Just typed', focused: true } });
+  } finally { connector.stop(); }
+});
+
+test.each(['Translate…', 'Warmer', 'Apply instruction', 'Try again', 'Close reply assistance'])(
+  '%s immediately after input flushes the composer and rejects stale popup actions', async action => {
+    vi.useFakeTimers(); const clicks = retryClicks(); const editor = fixture(); editor.tabIndex = 0;
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); focusEnd(editor);
+      if (action === 'Try again') connector.command({ type: 'notice', text: 'Try later', retryKey: suggestionKey(connector.read()) });
+      else {
+        clicks.trigger(connector);
+        if (action === 'Apply instruction') {
+          const instruction = connector['popup'].querySelector('input')!;
+          instruction.value = 'Make this warmer'; instruction.dispatchEvent(new Event('input'));
+        }
+      }
+      editor.textContent = 'New draft before the next frame'; focusEnd(editor);
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      clicks.click(connector, action);
+      expect(events.some(event => event.type === 'request')).toBe(false);
+      expect(events.filter(event => event.type === 'snapshot').at(-1)).toMatchObject({ snapshot: { draft: editor.textContent, focused: true } });
+      expect(connector['button'].getAttribute('aria-label')).toBe('Refine draft');
+      expect(connector['popup'].hidden).toBe(true);
+      expect(connector['refreshTimeout']).toBeUndefined();
+      expect(editor.textContent).toBe('New draft before the next frame');
+    } finally { connector.stop(); clicks.stop(); }
+  }
+);
+
+function loadOlderHistory() {
+  document.querySelector('#main [data-id]')!.insertAdjacentHTML('beforebegin', '<div data-id="false_123@c.us_older"><span class="selectable-text copyable-text">Older history</span></div>');
+}
+
+test.each([false, true].flatMap(queued => (['Cancel', 'Escape', 'Dismiss'] as const).map(action => ({ queued, action }))))('$action keeps the visible target when history loads during its flush (queued=$queued)', async ({ queued, action }) => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>(() => action === 'Dismiss' ? Promise.reject(new ProviderError('Rejected')) : new Promise(() => {}));
+  const app = integratedAssistant(generator, undefined, queued);
+  try {
+    app.editor.textContent = ''; focusEnd(app.editor);
+    await vi.advanceTimersByTimeAsync(600);
+    clicks.trigger(app.connector); await vi.advanceTimersByTimeAsync(10);
+    expect(generator).toHaveBeenCalledOnce();
+    const requestId = action === 'Dismiss' ? app.connector['popupRequest']!.id : app.connector['pending']!.requestId;
+    if (action === 'Cancel') expect(app.connector['button'].getAttribute('aria-label')).toBe('Cancel');
+    loadOlderHistory(); // No observer/frame/IPC delivery before the trusted action.
+    if (action === 'Cancel') clicks.trigger(app.connector);
+    else if (action === 'Dismiss') clicks.click(app.connector, 'Close reply assistance');
+    else app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor, composedPath: () => [app.editor], preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(app.events.filter(event => event.type === 'dismiss').at(-1)).toEqual({ type: 'dismiss', requestId });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(generator).toHaveBeenCalledOnce();
+    expect(app.events.filter(event => event.type === 'request')).toHaveLength(1);
+    expect(app.connector['pending']).toBeUndefined(); expect(app.connector['popup'].hidden).toBe(true);
+    expect(app.connector['ghost'].textContent).toBe(''); expect(app.assistant['live']).toBeUndefined();
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test('Cancel after a composer fill still cancels its visible request instead of opening Refine', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks(); const editor = fixture(); editor.textContent = '';
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    connector.command({ type: 'thinking', origin: 'user', key: suggestionKey(connector.read()), requestId: 'filled-work' });
+    editor.textContent = 'Just filled'; editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    expect(connector['button'].getAttribute('aria-label')).toBe('Cancel');
+    clicks.trigger(connector);
+    expect(events).toContainEqual({ type: 'dismiss', requestId: 'filled-work' });
+    expect(events.some(event => event.type === 'request')).toBe(false);
+    expect(connector['popup'].hidden).toBe(true); expect(connector['button'].getAttribute('aria-label')).toBe('Refine draft');
+  } finally { connector.stop(); clicks.stop(); }
+});
+
+test.each(['continuation', 'refine', 'translate'] as const)('visible %s Try again declines a history change until main republishes the notice', async operation => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Rejected')).mockImplementation(() => new Promise(() => {}));
+  const app = integratedAssistant(generator, undefined, true);
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh']();
+    if (operation === 'continuation') await vi.advanceTimersByTimeAsync(1010);
+    else {
+      await vi.advanceTimersByTimeAsync(10);
+      await app.assistant.request('Original instruction', false, operation === 'translate' ? { operation } : undefined);
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(generator).toHaveBeenCalledOnce(); expect(app.connector['popup'].textContent).toContain('Rejected');
+    loadOlderHistory(); clicks.click(app.connector);
+    expect(app.events.filter(event => event.type === 'request')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(120);
+    expect(generator).toHaveBeenCalledOnce();
+    clicks.click(app.connector);
+    expect(app.events.filter(event => event.type === 'request').at(-1)).toMatchObject({ operation: 'retry', key: suggestionKey(app.connector.read()) });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(generator).toHaveBeenCalledTimes(2); expect(generator.mock.calls[1][0].reason).toBe('retry');
+    expect(generator.mock.calls[1][0].system).toBe(generator.mock.calls[0][0].system);
+    expect(app.connector['popup'].hidden).toBe(true); expect(app.connector['pending']?.origin).toBe('user');
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test.each([false, true])('Tab declines a history change then accepts the offer main republishes (queued=%s)', async queued => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValue('Visible reply');
+  const app = integratedAssistant(generator, undefined, queued);
+  const previousInsert = document.execCommand;
+  const insert = vi.fn((_command: string, _ui: boolean, text: string) => { app.editor.append(text); app.editor.dispatchEvent(new InputEvent('input', { bubbles: true })); return true; });
+  document.execCommand = insert;
+  try {
+    app.editor.textContent = ''; focusEnd(app.editor); await vi.advanceTimersByTimeAsync(2000);
+    const offer = app.connector['suggestion']!; expect(offer.text).toBe('Visible reply');
+    loadOlderHistory(); const key = suggestionKey(app.connector.read()), preventDefault = vi.fn();
+    app.connector['keydown']({ isTrusted: true, key: 'Tab', target: app.editor, composedPath: () => [app.editor], preventDefault, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(preventDefault).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled();
+    expect(app.editor.textContent).toBe(''); expect(app.events.filter(event => event.type === 'applied')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(120);
+    expect(app.connector['suggestion']).toMatchObject({ id: offer.id, key });
+    app.connector['keydown']({ isTrusted: true, key: 'Tab', target: app.editor, composedPath: () => [app.editor], preventDefault, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(preventDefault).toHaveBeenCalledOnce(); expect(insert).toHaveBeenCalledOnce(); expect(app.editor.textContent).toBe('Visible reply');
+    expect(app.events.filter(event => event.type === 'applied')).toEqual([{ type: 'applied', suggestionId: offer.id, key }]);
+    await vi.advanceTimersByTimeAsync(120);
+    expect(insert).toHaveBeenCalledOnce(); expect(generator).toHaveBeenCalledOnce(); expect(app.connector['ghost'].textContent).toBe('');
+    expect(app.assistant['live']).toBeUndefined();
+  } finally { document.execCommand = previousInsert; app.stop(); }
+});
+
+test.each(['Warmer', 'Translate…', 'Apply instruction', 'Translate submit'] as const)('%s declines its stale popup context when history loads during its flush', async action => {
+  vi.useFakeTimers(); const clicks = retryClicks(); const editor = fixture(); editor.tabIndex = 0;
+  const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(editor); clicks.trigger(connector);
+    const input = connector['popup'].querySelector('input')!;
+    if (action === 'Translate submit') clicks.click(connector, 'Translate…');
+    input.value = action === 'Translate submit' ? 'Spanish' : 'Make this warmer'; input.dispatchEvent(new Event('input'));
+    loadOlderHistory();
+    clicks.click(connector, action === 'Translate submit' ? 'Apply instruction' : action);
+    expect(events.filter(event => event.type === 'request')).toEqual([]);
+    expect(connector['popup'].hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(120);
+    expect(connector['popup'].hidden).toBe(true);
+    expect(suggestionKey(events.filter(event => event.type === 'snapshot').at(-1)!.snapshot)).toBe(suggestionKey(connector.read()));
+  } finally { connector.stop(); clicks.stop(); }
+});
+
+test('Translate declines a stale form when the flush synchronously republishes an older failure notice', async () => {
+  vi.useFakeTimers(); const clicks = retryClicks();
+  const generator = vi.fn<typeof generate>().mockRejectedValueOnce(new ProviderError('Rejected')).mockImplementation(() => new Promise(() => {}));
+  const app = integratedAssistant(generator);
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh'](); await vi.advanceTimersByTimeAsync(1000);
+    expect(app.connector['popup'].textContent).toContain('Rejected');
+    clicks.trigger(app.connector);
+    const instruction = app.connector['popup'].querySelector('input')!;
+    loadOlderHistory(); clicks.click(app.connector, 'Translate…');
+    expect(app.connector['popup'].hidden).toBe(true);
+    expect(app.events.filter(event => event.type === 'request')).toHaveLength(0);
+    expect(instruction.isConnected).toBe(false);
+    clicks.trigger(app.connector); clicks.click(app.connector, 'Translate…');
+    const current = app.connector['popup'].querySelector('input')!;
+    current.value = 'Spanish'; current.dispatchEvent(new Event('input')); clicks.click(app.connector, 'Apply instruction');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(generator).toHaveBeenCalledTimes(2); expect(generator.mock.calls[1][0].reason).toBe('translate');
+    expect(app.events.filter(event => event.type === 'request').at(-1)).toMatchObject({ instruction: 'Translate the draft to Spanish.', operation: 'translate', key: suggestionKey(app.assistant.snapshot) });
+    expect(app.connector['pending']?.origin).toBe('user');
+  } finally { app.stop(); clicks.stop(); }
+});
+
+test.each([false, true].flatMap(queued => (['incoming', 'latest edit'] as const).map(change => ({ queued, change }))))('Tab rejects the displayed offer after $change before queued IPC and passive refresh (queued=$queued)', async ({ queued, change }) => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValueOnce('Old reply').mockImplementation(() => new Promise(() => {}));
+  const app = integratedAssistant(generator, undefined, queued);
+  const previousInsert = document.execCommand, insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    app.editor.textContent = ''; focusEnd(app.editor); await vi.advanceTimersByTimeAsync(2000);
+    const offer = app.connector['suggestion']!; expect(offer.text).toBe('Old reply');
+    if (change === 'incoming') document.querySelector('#main [data-id]')!.insertAdjacentHTML('afterend', '<div data-id="false_123@c.us_new"><span class="selectable-text copyable-text">New question</span></div>');
+    else document.querySelector('#main .selectable-text')!.textContent = 'Edited question';
+    const preventDefault = vi.fn();
+    app.connector['keydown']({ isTrusted: true, key: 'Tab', target: app.editor, composedPath: () => [app.editor], preventDefault, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(preventDefault).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled();
+    // Replay an IPC result already in flight before the new context was read.
+    setTimeout(() => app.connector.command(offer), 0);
+    document.dispatchEvent(new Event('selectionchange'));
+    await vi.advanceTimersByTimeAsync(120);
+    expect(insert).not.toHaveBeenCalled(); expect(app.editor.textContent).toBe('');
+    expect(app.events.filter(event => event.type === 'applied')).toEqual([]);
+    expect(app.connector['suggestion']).toBeUndefined();
+    expect(app.connector['lastContentKey']).toBe(suggestionKey(app.connector.read()));
+    expect(suggestionKey(app.assistant.snapshot)).toBe(suggestionKey(app.connector.read()));
+  } finally { document.execCommand = previousInsert; app.stop(); }
+});
+
+test.each([false, true])('history-flush republication reconciles an active replacement without changing its command identity (queued=%s)', async queued => {
+  vi.useFakeTimers(); const generator = vi.fn<typeof generate>().mockResolvedValue('Revised draft');
+  const app = integratedAssistant(generator, undefined, queued);
+  const previousInsert = document.execCommand;
+  const insert = vi.fn((_command: string, _ui: boolean, text: string) => { app.editor.textContent = text; app.editor.dispatchEvent(new InputEvent('input', { bubbles: true })); return true; });
+  document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    const search = document.createElement('input'); document.body.append(search); search.focus();
+    app.connector['refresh'](); await vi.advanceTimersByTimeAsync(10);
+    await app.assistant.request('Rewrite the draft'); await vi.advanceTimersByTimeAsync(10);
+    const displayed = app.connector['suggestion']!; expect(displayed.replace).toBe(true); expect(app.connector['replacement']).toBeUndefined();
+    focusEnd(app.editor); loadOlderHistory();
+    const preventDefault = vi.fn();
+    app.connector['keydown']({ isTrusted: true, key: 'Tab', target: app.editor, composedPath: () => [app.editor], preventDefault, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    expect(preventDefault).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10);
+    const replacement = app.connector['replacement']!;
+    expect(replacement).toBeDefined(); expect(app.connector['suggestion']).toBe(replacement.command);
+    expect(replacement.command).not.toBe(displayed); expect(replacement.command.key).toBe(suggestionKey(app.connector.read()));
+    document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(120);
+    expect(insert).toHaveBeenCalledOnce(); expect(app.editor.textContent).toBe('Revised draft');
+    expect(app.connector['replacement']).toBeUndefined(); expect(app.connector['suggestion']).toBeUndefined();
+    expect(app.events.filter(event => event.type === 'applied')).toEqual([{ type: 'applied', key: replacement.command.key, suggestionId: displayed.id }]);
+    expect(generator).toHaveBeenCalledOnce();
+  } finally { document.execCommand = previousInsert; app.stop(); }
+});
+
+test('accepting a displayed revision preserves its identity while native selection settles', async () => {
+  vi.useFakeTimers(); const editor = fixture(); editor.tabIndex = 0;
+  const connector = new DomConnector(document, () => {}); connector.start();
+  const previousInsert = document.execCommand;
+  document.execCommand = vi.fn((_command: string, _ui: boolean, text: string) => { editor.textContent = text; return true; });
+  try {
+    await vi.advanceTimersByTimeAsync(600);
+    const command = { type: 'suggestion' as const, id: 'identity', text: 'Revised', replace: true, key: suggestionKey(connector.read()) };
+    connector.command(command); focusEnd(editor); connector['acceptSuggestion']();
+    expect(connector['suggestion']).toBe(command); expect(connector['replacement']?.command).toBe(command);
+    document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(120);
+    expect(editor.textContent).toBe('Revised'); expect(connector['replacement']).toBeUndefined();
+  } finally { document.execCommand = previousInsert; connector.stop(); }
+});
+
+test.each([false, true])('Escape cancels an active replacement across history reconciliation, queued IPC and passive refresh (queued=%s)', async queued => {
+  vi.useFakeTimers(); const app = integratedAssistant(vi.fn<typeof generate>().mockResolvedValue('Unwanted revision'), undefined, queued);
+  const previousInsert = document.execCommand, insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    await vi.advanceTimersByTimeAsync(600); focusEnd(app.editor); app.connector['refresh'](); await vi.advanceTimersByTimeAsync(10);
+    await app.assistant.request('Rewrite'); await vi.advanceTimersByTimeAsync(10);
+    const offer = app.connector['suggestion']!; expect(app.connector['replacement']?.command).toBe(offer);
+    loadOlderHistory();
+    app.connector['keydown']({ isTrusted: true, key: 'Escape', target: app.editor, composedPath: () => [app.editor], preventDefault() {}, stopImmediatePropagation() {} } as unknown as KeyboardEvent);
+    setTimeout(() => app.connector.command(offer), 0);
+    document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(120);
+    expect(insert).not.toHaveBeenCalled(); expect(app.editor.textContent).toBe('A draft');
+    expect(app.connector['replacement']).toBeUndefined(); expect(app.connector['suggestion']).toBeUndefined();
+    expect(app.events.filter(event => event.type === 'applied')).toEqual([]);
+    expect(app.assistant['live']).toBeUndefined();
+  } finally { document.execCommand = previousInsert; app.stop(); }
+});
+
+test('IME blocks acceptance and stale queued offers across the next passive refresh', async () => {
+  vi.useFakeTimers(); const app = integratedAssistant(vi.fn<typeof generate>().mockResolvedValue('Old reply'), undefined, true);
+  const previousInsert = document.execCommand, insert = vi.fn(() => true); document.execCommand = insert;
+  try {
+    app.editor.textContent = ''; focusEnd(app.editor); await vi.advanceTimersByTimeAsync(2000);
+    const offer = app.connector['suggestion']!; expect(offer).toBeDefined();
+    app.editor.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    app.editor.textContent = 'Composing';
+    app.connector['keydown']({ isTrusted: true, key: 'Tab', isComposing: true, target: app.editor } as unknown as KeyboardEvent);
+    setTimeout(() => app.connector.command(offer), 0);
+    document.dispatchEvent(new Event('selectionchange')); await vi.advanceTimersByTimeAsync(120);
+    expect(insert).not.toHaveBeenCalled(); expect(app.editor.textContent).toBe('Composing');
+    expect(app.connector['suggestion']).toBeUndefined(); expect(app.connector['replacement']).toBeUndefined();
+    expect(app.events.filter(event => event.type === 'applied')).toEqual([]);
+    expect(app.assistant.snapshot.composing).toBe(true);
+    app.editor.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })); await vi.advanceTimersByTimeAsync(10);
+    expect(app.assistant.snapshot.composing).toBe(false);
+  } finally { document.execCommand = previousInsert; app.stop(); }
+});
 
 test.each(['continuation', 'refine', 'translate'] as const)('compatible history republishes the actual %s Try again control (C2/D2)', async operation => {
   vi.useFakeTimers(); const clicks = retryClicks();
@@ -1143,7 +1629,7 @@ test('a transient tail/key rejection recovers a cached suggestion without anothe
     app.connector['observer']!.disconnect();
     const tail = row.querySelector('[data-icon="tail-in"]')!; tail.remove(); finish('Recovered ghost');
     await Promise.resolve(); // completion sees the temporary key before polling
-    row.append(tail); await vi.advanceTimersByTimeAsync(400);
+    row.append(tail); await vi.advanceTimersByTimeAsync(1100); // slower fallback when the observer is deliberately disabled
     expect(app.events.some(e => e.type === 'displayAck' && e.reason === 'key')).toBe(true);
     expect(app.connector['ghost'].textContent).toBe('Recovered ghost'); expect(generator).toHaveBeenCalledOnce();
   } finally { app.stop(); }
@@ -1280,6 +1766,8 @@ test('dismissal of an old visible offer preserves a newer offer already queued f
     app.editor.textContent = ''; app.connector['refresh'](); await vi.advanceTimersByTimeAsync(2000);
     const original = app.connector['suggestion']!, oldContext = app.assistant['emptyKey']();
     app.connector['observer']!.disconnect(); clearInterval(app.connector['timer']);
+    if (app.connector['refreshFrame'] !== undefined) window.cancelAnimationFrame(app.connector['refreshFrame']);
+    app.connector['refreshFrame'] = undefined;
     const queued: RemoteCommand[] = [], deliver = app.connector.command.bind(app.connector);
     const spy = vi.spyOn(app.connector, 'command').mockImplementation(command => { queued.push(command); });
     document.querySelector('#main footer')!.insertAdjacentHTML('beforebegin', '<div data-id="false_123@c.us_new"><span data-testid="msg-text">New question</span></div>');
@@ -1599,4 +2087,371 @@ test('automatic dots are not announced and a star click returns focus to the emp
     connector.command({ type: 'thinking', origin: 'user', key, requestId: '00000000-0000-4000-8000-0000000000a2' });
     expect(connector['loadingStatus'].textContent).toBe('Suggesting a reply');
   } finally { connector.stop(); clicks.stop(); }
+});
+
+describe('connector work budgets', () => {
+  test('micro-benchmark: pointerdown/beforeinput do zero full reads and still invalidate editing immediately', async () => {
+    vi.useFakeTimers(); const editor = fixture();
+    const main = document.querySelector('#main')!;
+    for (let i = 0; i < 100; i++) main.querySelector('footer')!.insertAdjacentHTML('beforebegin', `<div data-id="false_123@c.us_bench${i}"><span data-testid="msg-text">Message ${i}</span></div>`);
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const read = vi.spyOn(connector, 'read');
+      for (let i = 0; i < 20; i++) {
+        connector['pointer']({ isTrusted: true, target: editor, composedPath: () => [editor] } as unknown as Event);
+        connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+        connector.command({ type: 'clear' });
+      }
+      expect(read).not.toHaveBeenCalled(); expect(events.filter(event => event.type === 'activity')).toHaveLength(40);
+      expect(connector['activityGeneration']).toBe(40); expect(connector['editRevision']).toBe(20);
+      const key = suggestionKey(connector.read());
+      read.mockClear(); connector.command({ type: 'thinking', key, origin: 'user', requestId: 'editing-budget' });
+      expect(read).toHaveBeenCalledTimes(1); read.mockClear();
+      connector['beforeInput']({ isTrusted: true, target: editor } as unknown as Event);
+      expect(read).not.toHaveBeenCalled(); expect(connector['pending']).toBeUndefined();
+      connector.command({ type: 'suggestion', key, text: 'Stale', replace: false, requestId: 'editing-budget' });
+      expect(connector['ghost'].textContent).toBe('');
+    } finally { connector.stop(); }
+  });
+
+  test('micro-benchmark: a mutation burst performs one read and does not reparse unchanged bubbles', async () => {
+    vi.useFakeTimers(); fixture();
+    const main = document.querySelector('#main')!;
+    for (let i = 0; i < 29; i++) main.querySelector('footer')!.insertAdjacentHTML('beforebegin', `<div data-id="false_123@c.us_bench${i}"><span data-testid="msg-text">Message ${i}</span></div>`);
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const nodes = [...main.querySelectorAll<HTMLElement>('[data-id]')];
+      const queries = nodes.map(node => vi.spyOn(node, 'querySelectorAll'));
+      const read = vi.spyOn(connector, 'read');
+      const original = connector['messageContext'];
+      connector['selectionChanged'](); connector['selectionChanged'](); await vi.advanceTimersByTimeAsync(20);
+      expect(read).toHaveBeenCalledTimes(1); expect(connector['messageContext']).toBe(original);
+      expect(queries.every(query => query.mock.calls.length === 0)).toBe(true);
+      read.mockClear(); queries.forEach(query => query.mockClear());
+      for (let i = 0; i < 25; i++) { nodes.at(-1)!.firstElementChild!.textContent = `Changed ${i}`; await Promise.resolve(); }
+      await Promise.resolve(); expect(read).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(read).toHaveBeenCalledExactlyOnceWith(false);
+      expect(queries.slice(0, -1).every(query => query.mock.calls.length === 0)).toBe(true);
+      expect(queries.at(-1)!.mock.calls.filter(([selector]) => selector === '.selectable-text.copyable-text, [data-testid="msg-text"], [data-testid="selectable-text"]')).toHaveLength(1);
+      expect(connector['messageContext'].at(-1)!.text).toBe('Changed 24');
+    } finally { connector.stop(); }
+  });
+
+  test('cached refresh catches same-text emoji/quote changes, recycling, and bypasses caches for fresh reads', async () => {
+    vi.useFakeTimers(); fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const node = document.querySelector<HTMLElement>('[data-id]')!;
+      node.innerHTML = '<span data-testid="msg-text"><img alt="😂"></span><div data-testid="quoted-message"><span data-testid="msg-text">Quote</span></div>';
+      await vi.advanceTimersByTimeAsync(20); expect(connector['messageContext'][0]).toMatchObject({ text: '😂', quoted: { text: 'Quote' } });
+      node.querySelector('img')!.setAttribute('alt', '😀');
+      // Fresh authorization must see the change before observer delivery.
+      expect(connector.read().messages[0].text).toBe('😀');
+      node.querySelector('[data-testid="quoted-message"]')!.setAttribute('data-testid', 'not-a-quote');
+      node.dataset.id = 'true_123@c.us_recycled';
+      await vi.advanceTimersByTimeAsync(20);
+      expect(connector['messageContext'][0]).toMatchObject({ id: 'true_123@c.us_recycled', text: '😀\nQuote', outgoing: true });
+      expect(connector['messageContext'][0].quoted).toBeUndefined();
+      const replacement = node.cloneNode(true) as HTMLElement; replacement.querySelector('img')!.alt = '🫢'; node.replaceWith(replacement);
+      await vi.advanceTimersByTimeAsync(20); expect(connector['messageContext'][0].text).toBe('🫢\nQuote');
+    } finally { connector.stop(); }
+  });
+
+  test('message mutations revoke visible work after the coalesced read; queued commands still require fresh DOM evidence', async () => {
+    vi.useFakeTimers(); fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+      connector.command({ type: 'thinking', key, origin: 'user', requestId: 'incoming-budget' });
+      document.querySelector('[data-id] span')!.textContent = 'New question';
+      await Promise.resolve(); expect(connector['pending']?.requestId).toBe('incoming-budget');
+      connector.command({ type: 'suggestion', key, text: 'Stale', replace: false });
+      expect(connector['suggestion']).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(connector['pending']).toBeUndefined();
+      expect(connector['ghost'].textContent).toBe('');
+    } finally { connector.stop(); }
+  });
+
+  test.each([false, true])('suspended rAF still publishes mutation refreshes (hidden=%s)', async hidden => {
+    vi.useFakeTimers(); fixture();
+    const frames = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(123);
+    const visibility = vi.spyOn(document, 'hidden', 'get').mockReturnValue(hidden);
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const read = vi.spyOn(connector, 'read'); events.length = 0; frames.mockClear();
+      for (let i = 0; i < 25; i++) { document.querySelector('[data-id] span')!.textContent = `Incoming ${i}`; await Promise.resolve(); }
+      expect(read).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(hidden ? 1 : 100);
+      expect(read).toHaveBeenCalledExactlyOnceWith(false);
+      expect(events.filter(event => event.type === 'snapshot')).toEqual([expect.objectContaining({ snapshot: expect.objectContaining({ messages: [expect.objectContaining({ text: 'Incoming 24' })] }) })]);
+      expect(frames).toHaveBeenCalledTimes(hidden ? 0 : 1);
+      expect(connector['refreshFrame']).toBeUndefined(); expect(connector['refreshTimeout']).toBeUndefined();
+    } finally { connector.stop(); frames.mockRestore(); visibility.mockRestore(); }
+  });
+
+  test('the fallback poll refreshes even when a frame is pending, and teardown cancels its watchdog', async () => {
+    vi.useFakeTimers(); const editor = fixture(); editor.tabIndex = 0; editor.focus();
+    const frames = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(123);
+    const visibility = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(999);
+      const read = vi.spyOn(connector, 'read'); events.length = 0;
+      connector['selectionChanged'](); focus.mockReturnValue(true);
+      expect(connector['refreshFrame']).toBe(123);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(read).toHaveBeenCalledExactlyOnceWith(false);
+      expect(events.filter(event => event.type === 'snapshot')).toEqual([expect.objectContaining({ snapshot: expect.objectContaining({ focused: true }) })]);
+      await vi.advanceTimersByTimeAsync(100); expect(read).toHaveBeenCalledTimes(1);
+      connector['selectionChanged'](); connector.stop(); read.mockClear();
+      await vi.advanceTimersByTimeAsync(1200); expect(read).not.toHaveBeenCalled();
+      expect(connector['refreshTimeout']).toBeUndefined();
+    } finally { connector.stop(); frames.mockRestore(); visibility.mockRestore(); focus.mockRestore(); }
+  });
+
+  test('hidden mutations replace a suspended visible frame with a timer turn', async () => {
+    vi.useFakeTimers(); fixture();
+    const frames = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(123);
+    const visibility = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const read = vi.spyOn(connector, 'read');
+      connector['selectionChanged'](); visibility.mockReturnValue(true);
+      document.querySelector('[data-id] span')!.textContent = 'Hidden incoming';
+      await vi.advanceTimersByTimeAsync(1);
+      expect(read).toHaveBeenCalledExactlyOnceWith(false); expect(connector['messageContext'][0].text).toBe('Hidden incoming');
+      await vi.advanceTimersByTimeAsync(100); expect(read).toHaveBeenCalledTimes(1);
+    } finally { connector.stop(); frames.mockRestore(); visibility.mockRestore(); }
+  });
+
+  const offers = ['suggestion', 'thinking', 'refining'] as const;
+  const unchangedMutations = ['header status', 'unread count', 'composer markup', 'bubble markup', 'placeholder', 'transient edit'] as const;
+  test.each(offers.flatMap(offer => unchangedMutations.map(mutation => [offer, mutation] as const)))('%s survives unchanged context after %s mutations', async (offer, mutation) => {
+    vi.useFakeTimers(); const editor = modernFixture();
+    const header = document.querySelector('#main header')!; header.insertAdjacentHTML('beforeend', '<span data-testid="status">Online</span>');
+    const row = document.querySelector('#pane-side [aria-selected]')!; row.insertAdjacentHTML('beforeend', '<span data-testid="unread">1</span>');
+    const bubble = document.querySelector('#main [data-id]')!;
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const key = suggestionKey(connector.read());
+      if (offer === 'suggestion') connector.command({ type: offer, key, text: 'Keep this', replace: false });
+      else connector.command({ type: offer, key, origin: 'user', requestId: 'keep-work' });
+      const ghost = connector['ghost'].textContent, dots = connector['ghost'].querySelector('.dots'); events.length = 0;
+      const read = vi.spyOn(connector, 'read');
+      if (mutation === 'header status') header.querySelector('[data-testid="status"]')!.textContent = 'Typing…';
+      if (mutation === 'unread count') row.querySelector('[data-testid="unread"]')!.textContent = '2';
+      if (mutation === 'composer markup') editor.innerHTML = '<b>A draft</b>';
+      if (mutation === 'bubble markup') bubble.querySelector('span')!.innerHTML = '<b>Hi</b>';
+      if (mutation === 'placeholder') bubble.innerHTML = '<div style="height:150px"></div>';
+      if (mutation === 'transient edit') { bubble.querySelector('span')!.textContent = 'Transient'; await Promise.resolve(); bubble.querySelector('span')!.textContent = 'Hi'; }
+      await Promise.resolve(); expect(connector['ghost'].textContent).toBe(ghost); expect(read).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(read).toHaveBeenCalledExactlyOnceWith(false);
+      expect(connector['ghost'].textContent).toBe(ghost); expect(connector['ghost'].querySelector('.dots')).toBe(dots);
+      expect(connector['suggestion']?.key ?? connector['pending']?.key).toBe(key);
+      expect(events.filter(event => event.type === 'snapshot')).toEqual([]);
+      expect(suggestionKey(connector.read())).toBe(key);
+    } finally { connector.stop(); }
+  });
+
+  const changedMutations = ['header title', 'selected chat', 'draft', 'editor replacement', 'message edit', 'mounted deletion', 'direction', 'recycled ID', 'message insertion', 'message removal'] as const;
+  test.each(offers.flatMap(offer => changedMutations.map(mutation => [offer, mutation] as const)))('%s is invalidated by changed semantics after %s mutations', async (offer, mutation) => {
+    vi.useFakeTimers(); const editor = modernFixture(), bubble = document.querySelector<HTMLElement>('#main [data-id]')!;
+    const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const key = suggestionKey(connector.read());
+      if (offer === 'suggestion') connector.command({ type: offer, key, text: 'Old reply', replace: false });
+      else connector.command({ type: offer, key, origin: 'user', requestId: 'old-work' });
+      events.length = 0;
+      if (mutation === 'header title') document.querySelector('[data-testid="conversation-info-header-chat-title"]')!.textContent = 'Another friend';
+      if (mutation === 'selected chat') { const row = document.querySelector('#pane-side [aria-selected]')!; row.replaceWith(row.cloneNode(true)); }
+      if (mutation === 'draft') editor.textContent = 'Changed draft';
+      if (mutation === 'editor replacement') editor.replaceWith(editor.cloneNode(true));
+      if (mutation === 'message edit') bubble.querySelector('span')!.textContent = 'New question';
+      if (mutation === 'mounted deletion') bubble.innerHTML = '<div data-testid="msg-container">Deleted message</div>';
+      if (mutation === 'direction') bubble.insertAdjacentHTML('beforeend', '<span data-icon="tail-out"></span>');
+      if (mutation === 'recycled ID') { bubble.dataset.id = 'XYZ123456'; bubble.dataset.testid = 'conv-msg-XYZ123456'; }
+      if (mutation === 'message insertion') bubble.insertAdjacentHTML('afterend', '<div data-id="XYZ123456" data-testid="conv-msg-XYZ123456"><span data-testid="msg-text">Incoming</span></div>');
+      if (mutation === 'message removal') bubble.remove();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(connector['suggestion']).toBeUndefined(); expect(connector['pending']).toBeUndefined(); expect(connector['ghost'].textContent).toBe('');
+      expect(connector['popup'].hidden).toBe(true);
+      expect(events.filter(event => event.type === 'snapshot')).toHaveLength(1);
+      expect(suggestionKey(connector.read())).not.toBe(key);
+      connector.command({ type: 'suggestion', key, text: 'Queued stale reply', replace: false });
+      expect(connector['ghost'].textContent).toBe('');
+    } finally { connector.stop(); }
+  });
+
+  test.each([false, true])('coalesced keys preserve or cancel an in-flight draft replacement (changed=%s)', async changed => {
+    vi.useFakeTimers(); const editor = modernFixture(); editor.tabIndex = 0; editor.focus();
+    const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const header = document.querySelector('#main header')!; header.insertAdjacentHTML('beforeend', '<span data-testid="status">Online</span>');
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
+      document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+      connector.command({ type: 'suggestion', key: suggestionKey(connector.read()), text: 'Replacement', replace: true });
+      const replacement = connector['replacement']; expect(replacement).toBeDefined(); expect(connector['wholeDraftSelected'](editor)).toBe(true);
+      if (changed) document.querySelector('[data-id] span')!.textContent = 'New question';
+      else header.querySelector('[data-testid="status"]')!.textContent = 'Typing…';
+      await vi.advanceTimersByTimeAsync(20);
+      expect(editor.textContent).toBe('A draft');
+      if (changed) {
+        expect(connector['replacement']).toBeUndefined(); expect(connector['suggestion']).toBeUndefined();
+        expect(document.getSelection()!.isCollapsed).toBe(true);
+      } else {
+        expect(connector['replacement']).toBe(replacement); expect(connector['suggestion']).toBe(replacement!.command);
+        expect(connector['wholeDraftSelected'](editor)).toBe(true);
+      }
+    } finally { connector.stop(); focus.mockRestore(); }
+  });
+
+  test('popup invalidation follows context keys across chrome, composer layout, placeholders and real edits', async () => {
+    vi.useFakeTimers(); const editor = modernFixture(), header = document.querySelector('#main header')!;
+    header.insertAdjacentHTML('beforeend', '<span data-testid="status">Online</span>');
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const key = suggestionKey(connector.read()); connector.command({ type: 'suggestion', key, text: 'Keep this', replace: false });
+      connector['openPopup'](); await vi.advanceTimersByTimeAsync(20); expect(connector['popup'].hidden).toBe(false);
+      header.querySelector('[data-testid="status"]')!.textContent = 'Typing…';
+      editor.parentElement!.style.padding = '12px';
+      document.querySelector('[data-id]')!.innerHTML = '<div style="height:150px"></div>';
+      await vi.advanceTimersByTimeAsync(20);
+      expect(connector['popup'].hidden).toBe(false); expect(connector['suggestion']?.key).toBe(key);
+      document.querySelector('[data-id]')!.innerHTML = '<div data-testid="msg-container"><span data-testid="msg-text">Edited message</span></div>';
+      await vi.advanceTimersByTimeAsync(20);
+      expect(connector['popup'].hidden).toBe(true); expect(connector['suggestion']).toBeUndefined();
+    } finally { connector.stop(); }
+  });
+
+  test('semantically unchanged bubble markup retains the current suggestion', async () => {
+    vi.useFakeTimers(); fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      const key = suggestionKey(connector.read()); connector.command({ type: 'suggestion', key, text: 'Keep this', replace: false });
+      const node = document.querySelector('[data-id]')!;
+      node.querySelector('span')!.innerHTML = '<b>Hi</b>';
+      await vi.advanceTimersByTimeAsync(20);
+      expect(connector['ghost'].textContent).toBe('A draftKeep this'); expect(connector['suggestion']?.key).toBe(key);
+    } finally { connector.stop(); }
+  });
+
+  test('owned controls and unrelated subtree mutations do not schedule refreshes', async () => {
+    vi.useFakeTimers(); fixture(); const aside = document.createElement('aside'); aside.innerHTML = '<span>Unrelated</span>'; document.body.append(aside);
+    const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600); const read = vi.spyOn(connector, 'read');
+      connector['host'].style.opacity = '.9'; connector['navigation']!.chatHost.style.color = 'red';
+      aside.firstElementChild!.textContent = 'Updated'; aside.setAttribute('data-unrelated', '1');
+      await vi.advanceTimersByTimeAsync(50); expect(read).not.toHaveBeenCalled();
+    } finally { connector.stop(); }
+  });
+
+  test('discovery scans on relevant DOM/load changes, skips idle polling, and finishes beyond one batch', async () => {
+    vi.useFakeTimers(); fixture(); mockStickerData();
+    const connector = new DomConnector(document, () => {}); const index = vi.spyOn(connector as unknown as { indexStickers(): Promise<void> }, 'indexStickers'); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2500); expect(index).toHaveBeenCalledTimes(1); index.mockClear();
+      for (let i = 0; i < 151; i++) stickerImage(i);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(connector['stickerSources'].size).toBe(151); expect(fetch).toHaveBeenCalledTimes(151);
+      const count = index.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(2000); expect(index.mock.calls).toHaveLength(count);
+      const pending = stickerImage(200); setStickerLoadState(pending, 'pending'); await vi.advanceTimersByTimeAsync(20);
+      Object.defineProperties(pending, { complete: { value: true }, naturalWidth: { value: 100 } }); pending.dispatchEvent(new Event('load'));
+      await vi.advanceTimersByTimeAsync(30); expect(connector['stickerSources'].has(pending.src)).toBe(true);
+    } finally { connector.stop(); }
+  });
+
+  test('teardown aborts pending intake and prevents emissions/caching after async work', async () => {
+    vi.useFakeTimers(); fixture();
+    let finish!: (value: { size: number; type: string }) => void;
+    let signal!: AbortSignal;
+    vi.stubGlobal('fetch', vi.fn(async (_source: string, options: { signal: AbortSignal }) => { signal = options.signal; return { blob: () => new Promise(resolve => { finish = resolve; }) }; }));
+    stickerImage(1); const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await Promise.resolve(); connector.stop(); expect(signal.aborted).toBe(true);
+      finish({ size: 20, type: 'image/webp' }); await vi.advanceTimersByTimeAsync(100);
+      expect(events.filter(event => event.type === 'sticker')).toEqual([]); expect(connector['stickerSources'].size).toBe(0);
+      expect(connector['refreshFrame']).toBeUndefined();
+    } finally { connector.stop(); }
+  });
+
+  test('teardown aborts active FileReader encoding and emits no sticker', async () => {
+    vi.useFakeTimers(); fixture(); mockStickerData(); let began!: () => void;
+    const encoding = new Promise<void>(resolve => { began = resolve; });
+    const abort = vi.fn();
+    vi.stubGlobal('FileReader', class {
+      onload?: () => void; onerror?: () => void; onabort?: () => void;
+      readAsDataURL() { began(); }
+      abort() { abort(); this.onabort?.(); }
+    });
+    stickerImage(1); const events: RemoteEvent[] = [], connector = new DomConnector(document, event => events.push(event)); connector.start();
+    try {
+      await encoding; connector.stop(); await Promise.resolve();
+      expect(abort).toHaveBeenCalledTimes(1); expect(events.filter(event => event.type === 'sticker')).toEqual([]);
+      expect(connector['failedSources'].size).toBe(0);
+    } finally { connector.stop(); }
+  });
+
+  test('discovery bounds retained history while preserving mounted send lookup sources', () => {
+    fixture(); const connector = new DomConnector(document, () => {}), mounted = stickerImage(0);
+    connector['stickerSources'].set(mounted.src, 'mounted-hash');
+    for (let i = 0; i < 1500; i++) { connector['stickerSources'].set(`blob:gone${i}`, 'hash'); connector['failedSources'].add(`blob:failed${i}`); }
+    connector['trimSources'](); expect(connector['stickerSources'].size).toBe(1000); expect(connector['failedSources'].size).toBe(1000);
+    expect(connector['stickerSources'].get(mounted.src)).toBe('mounted-hash');
+  });
+
+  test('navigation measures each rail item once before DOM writes and retains chrome geometry', async () => {
+    fixture(); const { Navigation } = await import('../src/connector/navigation');
+    const top = document.createElement('button'), bottom = document.createElement('button');
+    top.dataset.navbarItem = bottom.dataset.navbarItem = 'true'; document.body.append(top, bottom);
+    let wrote = false;
+    top.getBoundingClientRect = vi.fn(() => { expect(wrote).toBe(false); return { left: 12, right: 52, top: 10, width: 40 } as DOMRect; });
+    bottom.getBoundingClientRect = vi.fn(() => { expect(wrote).toBe(false); return { left: 12, right: 52, top: 700, width: 40 } as DOMRect; });
+    const header = document.querySelector('#main header')!, nativeInsert = header.insertBefore.bind(header);
+    vi.spyOn(header, 'insertBefore').mockImplementation((node, child) => { wrote = true; return nativeInsert(node, child); });
+    const events: RemoteEvent[] = [], navigation = new Navigation(document, event => events.push(event));
+    try {
+      navigation.refresh(true);
+      expect(top.getBoundingClientRect).toHaveBeenCalledTimes(1); expect(bottom.getBoundingClientRect).toHaveBeenCalledTimes(1);
+      expect(navigation.chatHost.parentElement).toBe(header);
+      expect(events.at(-1)).toMatchObject({ type: 'chrome', rail: 64, listWidth: 430 });
+    } finally { navigation.stop(); }
+  });
+
+  test('dots opacity ticks reuse geometry until scroll/input/resize invalidate it', async () => {
+    vi.useFakeTimers(); fixture(); const connector = new DomConnector(document, () => {}); connector.start();
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      connector.command({ type: 'thinking', origin: 'user', key: suggestionKey(connector.read()), requestId: 'dots-budget' });
+      clearInterval(connector['timer']);
+      await vi.advanceTimersByTimeAsync(400); // First post-layout measurement.
+      const ghost = vi.spyOn(connector['ghost'], 'getBoundingClientRect'), trigger = vi.spyOn(connector['button'], 'getBoundingClientRect');
+      await vi.advanceTimersByTimeAsync(1200); expect(ghost).not.toHaveBeenCalled(); expect(trigger).not.toHaveBeenCalled();
+      document.querySelector('[role="textbox"]')!.dispatchEvent(new Event('scroll')); expect(ghost).toHaveBeenCalledTimes(1);
+    } finally { connector.stop(); }
+  });
+
+  test('cached context keys match public keys and avoid reserializing messages during activity/draft changes', () => {
+    fixture(); const snapshot = new DomConnector(document, () => {}).read(), keys = new SnapshotKeys();
+    expect(keys.keys(snapshot)).toEqual({ snapshot: snapshotKey(snapshot), suggestion: suggestionKey(snapshot) });
+    const value = snapshot.messages[0].text, text = vi.fn(() => value);
+    Object.defineProperty(snapshot.messages[0], 'text', { get: text, configurable: true });
+    const changed = { ...snapshot, activity: 10, editRevision: 2, draft: 'Changed', focused: true };
+    const cached = keys.keys(changed); expect(text).not.toHaveBeenCalled();
+    expect(cached).toEqual({ snapshot: snapshotKey(changed), suggestion: suggestionKey(changed) });
+    Object.defineProperty(snapshot.messages[0], 'text', { value, writable: true, configurable: true });
+    const next = { ...changed, messages: [{ ...snapshot.messages[0], directionFallback: true as const }] };
+    expect(keys.keys(next)).toEqual({ snapshot: snapshotKey(next), suggestion: suggestionKey(next) });
+  });
 });
