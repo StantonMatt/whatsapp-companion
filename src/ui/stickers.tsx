@@ -1,11 +1,11 @@
 import { StickerGroupToggles, useStickerGroups } from './sticker-groups';
 import { stickerURL } from '../shared/sticker-url';
 import React, { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { Status, Sticker } from '../shared/model';
+import type { Panel, Status, Sticker } from '../shared/model';
 import type { StickerSend } from '../shared/sticker-transfer';
 import { useStickerViewport } from './sticker-grid';
 import type { Act } from './index';
-import { BackIcon, EditIcon } from './icons';
+import { BackIcon, EditIcon, TrashIcon } from './icons';
 
 const locationMessages = {
   looking: 'Looking in WhatsApp…',
@@ -36,25 +36,34 @@ const cancellable = (send: StickerSend | null) => send?.state === 'finding' || s
 
 const CheckIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" d="m5.5 12.5 4.2 4.2 8.8-9.2"/></svg>;
 
-type Exit = 'done' | 'panel' | 'settings';
+type Exit = 'done' | 'panel' | 'settings' | 'chat';
 type Editor = { id: string; prompt?: { next: string | null; exit?: Exit } };
 type Draft = Editor & { text: string };
+type DeleteQuestion = { kind: 'bar'; ids: string[]; from?: string; auto?: string } | { kind: 'editor'; id: string };
 type FocusTarget = { id: string; button: 'tile' | 'offer' | 'last' } | 'search'
-  | { id: string; field: 'textarea' | 'keep'; open?: boolean; scroll?: boolean };
+  | 'delete-keep' | 'delete-trigger'
+  | { id: string; field: 'textarea' | 'keep' | 'delete-keep' | 'delete-trigger'; open?: boolean; scroll?: boolean };
 
-export function Stickers({ status, act }: { status: Status; act: Act }) {
+export function Stickers({ status, act, navigation }: { status: Status; act: Act; navigation?: React.RefObject<((panel: Panel) => void) | null> }) {
   const [broken, setBroken] = useState(() => new Set<string>());
   const [imageRevisions, setImageRevisions] = useState(() => new Map<string, number>());
   const [query, setQuery] = useState('');
   const [editMode, setEditMode] = useState(false);
-  const groups = useStickerGroups(status.state, act, editMode);
   const [columns, setColumns] = useState(3);
+  const [deleteQuestion, setDeleteQuestion] = useState<DeleteQuestion | null>(null);
+  const deleteQuestionRef = useRef(deleteQuestion); deleteQuestionRef.current = deleteQuestion;
+  const [deleting, setDeleting] = useState(false);
+  const deleteLock = useRef(false);
+  const pendingDelete = useRef<{ ids: string[]; disappeared: Set<string> } | null>(null);
+  const [deletedNotice, setDeletedNotice] = useState('');
+  const [deletionSequence, setDeletionSequence] = useState(0);
+  const groups = useStickerGroups(status.state, act, editMode, () => dismissDelete());
   const [busyNotice, setBusyNotice] = useState('');
   const [dismissedStop, setDismissedStop] = useState<number | null>(null);
   const countId = useId();
   const [editor, setEditor] = useState<Editor | null>(null);
   // Filtering may hide an editor without discarding its sticker's unsaved text.
-  // Both states belong to this panel instance, so closing it discards all drafts.
+  // Every editor/panel exit goes through requestClose, including main's rail/menu requests.
   const [drafts, setDrafts] = useState(() => new Map<string, string>());
   const [local, setLocal] = useState<{ id: string; nonce: string; name: string } | null>(null);
   // A result left over from before the panel opened is not shown again.
@@ -69,6 +78,10 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const [focus, setFocus] = useState<FocusTarget | null>(null);
   const locating = useRef<{ id: string; source: Element | null; state: Status['stickerLocation'] } | null>(null);
   const all = status.state.stickers;
+  useLayoutEffect(() => {
+    const pending = pendingDelete.current;
+    if (pending) for (const id of pending.ids) if (!all.some(sticker => sticker.id === id)) pending.disappeared.add(id);
+  }, [all]);
   // Status updates preserve order, so a send/lookup never moves a card under the pointer. A new query refreshes the lastSeen order.
   const order = useRef<{ query: string; ids: string[] }>({ query, ids: [] });
   const ordered = useMemo(() => {
@@ -116,9 +129,17 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const message = shown && (shown.state === 'missing' || shown.state === 'failed') ? shown : null;
   const editingSticker = editor ? all.find(s => s.id === editor.id) : null;
   const editing: Draft | null = editor && editingSticker ? { ...editor, text: drafts.get(editor.id) ?? editingSticker.searchTerms } : null;
-  const latest = useRef({ editor, drafts, all, message }); latest.current = { editor, drafts, all, message };
+  const latest = useRef({ editor, drafts, all, message, stickers }); latest.current = { editor, drafts, all, message, stickers };
+  useEffect(() => {
+    if (deleteQuestion?.kind === 'bar' && (deleteQuestion.ids.length !== groups.selected.size || deleteQuestion.ids.some(id => !groups.selected.has(id)))) dismissDelete();
+  }, [groups.selected, deleteQuestion]);
+  useEffect(() => { if (!editMode) dismissDelete(); }, [editMode]);
   // One detail row at a time: an open editor defers a message for another card.
   const visibleEditing = editing && visible.current.has(editing.id) ? editing : null;
+  const editorQuestionVisible = !!visibleEditing && !visibleEditing.prompt && editMode;
+  useLayoutEffect(() => {
+    if (deleteQuestion?.kind === 'editor' && (!editorQuestionVisible || deleteQuestion.id !== visibleEditing?.id)) dismissDelete();
+  }, [deleteQuestion, editorQuestionVisible, visibleEditing?.id]);
   const detailId = visibleEditing?.id ?? (editing?.prompt ? null : message?.id);
   const detailIndex = stickers.findIndex(s => s.id === detailId);
   const viewport = useStickerViewport(grid, stickers.length, columns, detailIndex, editMode);
@@ -147,7 +168,10 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
   }, []);
   useLayoutEffect(() => { grid.current?.closest<HTMLElement>('.panel')?.scrollTo({ top: 0 }); viewport.refresh(); }, [query, groups.filter]);
-  useEffect(() => { queryRevision.current++; locating.current = null; setFocus(null); }, [groups.filter]);
+  useEffect(() => {
+    queryRevision.current++; locating.current = null; setFocus(null);
+    dismissDelete();
+  }, [groups.filter]);
   useEffect(() => { if (!busy && status.chat.stickerSendBlockedReason !== 'busy') setBusyNotice(''); }, [busy?.nonce, busy?.state, status.chat.stickerSendBlockedReason]);
   useEffect(() => { if (local && live?.nonce === local.nonce) setLocal(null); }, [local, live?.nonce]);
   useEffect(() => {
@@ -160,6 +184,10 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     });
   }, [all]);
   useEffect(() => { if (stale) setHidden(send!.nonce); }, [stale]);
+  // New send activity takes over the live region. Hiding/expiring an old result,
+  // cancelling a deleted sticker's send, or clearing a busy warning must not
+  // erase a later deletion announcement.
+  useEffect(() => { if (send && all.some(sticker => sticker.id === send.id)) setDeletedNotice(''); }, [send?.nonce, send?.state]);
   useEffect(() => {
     if (!send || inFlight(send) || send.nonce === hidden || stale) return;
     const timers: ReturnType<typeof setTimeout>[] = [];
@@ -174,18 +202,18 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   useLayoutEffect(() => {
     const target = focus; if (!target) return;
     // Mount an offscreen focus target before consuming the explicit action.
-    if (target !== 'search' && viewport.reveal(stickers.findIndex(sticker => sticker.id === target.id))) return;
+    if (typeof target !== 'string' && viewport.reveal(stickers.findIndex(sticker => sticker.id === target.id))) return;
     setFocus(null);
     const row = grid.current?.querySelector<HTMLElement>('.sticker-detail');
-    const card = target !== 'search' ? grid.current?.querySelector<HTMLElement>(`[data-sticker="${target.id}"]`) : null;
+    const card = typeof target !== 'string' ? grid.current?.querySelector<HTMLElement>(`[data-sticker="${target.id}"]`) : null;
     const fallback = card?.querySelector<HTMLElement>('.sticker-art') ?? search.current;
-    const element = (target === 'search' ? search.current
-      : 'field' in target ? editing?.id === target.id ? row?.querySelector<HTMLElement>(target.field === 'textarea' ? 'textarea' : '.discard button') : null
+    const element = (typeof target === 'string' ? target === 'search' ? search.current : groups.barElement.current?.querySelector<HTMLElement>(`.${target}`)
+      : 'field' in target ? editing?.id === target.id ? row?.querySelector<HTMLElement>(target.field === 'textarea' ? 'textarea' : target.field === 'keep' ? '.discard button' : `.${target.field}`) : null
       : target.button === 'offer' ? row?.querySelector<HTMLElement>('.msg button')
       : target.button === 'last' ? [...(card?.querySelectorAll<HTMLElement>('button') ?? [])].at(-1)
       : card?.querySelector<HTMLElement>('.sticker-art')) ?? fallback;
-    element?.focus({ preventScroll: target !== 'search' && 'field' in target && !!target.open });
-    if (element && target !== 'search' && 'field' in target) {
+    element?.focus({ preventScroll: typeof target !== 'string' && 'field' in target && !!target.open });
+    if (element && typeof target !== 'string' && 'field' in target) {
       if (target.open && element instanceof HTMLTextAreaElement) element.setSelectionRange(element.value.length, element.value.length);
       if (target.scroll) row?.scrollIntoView({ block: 'nearest' });
     }
@@ -205,9 +233,9 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const start = (event: React.MouseEvent, id: string, still = false) => {
     // Native button activation handles click, Enter and Space; synthetic events grant no send permission.
     if (!event.nativeEvent.isTrusted) return false;
-    if (busy || status.chat.stickerSendBlockedReason === 'busy') { setBusyNotice('Wait for the current sticker'); return false; }
+    if (busy || status.chat.stickerSendBlockedReason === 'busy') { setDeletedNotice(''); setBusyNotice('Wait for the current sticker'); return false; }
     if (sendBlocked || !status.chat.destinationToken) return false;
-    setBusyNotice('');
+    setBusyNotice(''); setDeletedNotice('');
     const nonce = crypto.randomUUID();
     if (send) setHidden(send.nonce);
     origin.current.set(nonce, { chatId: status.chat.chatId, settingsId: status.chat.settingsId, name: status.chat.name });
@@ -224,7 +252,70 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
   const clearDraft = (id: string) => {
     setDrafts(current => { if (!current.has(id)) return current; const next = new Map(current); next.delete(id); return next; });
   };
+  function dismissDelete() {
+    if (deleteQuestion?.kind === 'bar' && deleteQuestion.auto) groups.removeSelection(deleteQuestion.auto);
+    setDeleteQuestion(null);
+  }
+  const keepDelete = () => {
+    if (!deleteQuestion || deleteLock.current) return;
+    dismissDelete();
+    if (deleteQuestion.kind === 'editor') setFocus({ id: deleteQuestion.id, field: 'delete-trigger' });
+    else {
+      setFocus(deleteQuestion.from ? { id: deleteQuestion.from, button: 'tile' } : 'delete-trigger');
+    }
+  };
+  const askDelete = (from?: string) => {
+    if (deleteLock.current) return;
+    // Reopening the same question keeps ownership of its temporary selection
+    // and the original return-focus target, including through the trash action.
+    if (deleteQuestion?.kind === 'bar') { setFocus('delete-keep'); return; }
+    groups.closePopover();
+    const ids = all.filter(sticker => groups.selected.has(sticker.id)).map(sticker => sticker.id);
+    const auto = !ids.length ? from : undefined;
+    if (auto) { groups.toggleSelection(auto); ids.push(auto); }
+    if (!ids.length) return;
+    editorSession.current++;
+    setDeleteQuestion({ kind: 'bar', ids, from, auto });
+    setFocus('delete-keep');
+  };
+  const remove = async (ids: string[], single = false) => {
+    if (deleteLock.current) return;
+    deleteLock.current = true; setDeleting(true);
+    const source = document.activeElement;
+    editorSession.current++;
+    const selectionRevision = groups.selectionRevision.current, question = deleteQuestion;
+    const deletedEditor = grid.current?.querySelector('.sticker-detail');
+    const request = { ids, disappeared: new Set<string>() }; pendingDelete.current = request;
+    const removed = new Set(ids), at = stickers.findIndex(sticker => removed.has(sticker.id));
+    setDeletedNotice(''); setBusyNotice('');
+    let ok = false;
+    try { ok = await act(single ? { type: 'forgetSticker', id: ids[0] } : { type: 'forgetStickers', ids }); }
+    finally { pendingDelete.current = null; deleteLock.current = false; setDeleting(false); }
+    if (!ok) return;
+    setDeletedNotice(`${ids.length} sticker${ids.length === 1 ? '' : 's'} deleted`);
+    setDeletionSequence(sequence => sequence + 1);
+    // An identity removed and reindexed before this acknowledgement belongs to
+    // a new library visit. Preserve its newer editor/draft as well.
+    for (const id of request.disappeared) if (latest.current.all.some(sticker => sticker.id === id)) removed.delete(id);
+    // Cleanup belongs to deleted identities, not to whichever editor is now open.
+    const active = document.activeElement;
+    const activeTile = active?.closest<HTMLElement>('[data-sticker]')?.dataset.sticker;
+    const inDeletedEditor = !!active?.closest('.sticker-detail') && !!latest.current.editor && removed.has(latest.current.editor.id);
+    const onRemovedControl = !!active && (!active.isConnected && (active === source || deletedEditor?.contains(active)) || !!activeTile && removed.has(activeTile) || inDeletedEditor);
+    if (latest.current.message && removed.has(latest.current.message.id)) setHidden(latest.current.message.nonce);
+    // Confirming deletion explicitly discards that sticker's draft, never a surviving sticker's.
+    for (const id of removed) { clearDraft(id); saving.current.delete(id); }
+    if (locating.current && removed.has(locating.current.id)) locating.current = null;
+    setEditor(current => current && removed.has(current.id) ? null : current);
+    if (deleteQuestionRef.current === question) setDeleteQuestion(null);
+    groups.completeDeletion(selectionRevision);
+    const after = latest.current.stickers.filter(sticker => !removed.has(sticker.id));
+    const next = after[at] ?? after.at(-1);
+    const onConfirmation = active?.closest('.sticker-select-bar[aria-label], .actions.confirm');
+    if (active === source || onConfirmation && deleteQuestionRef.current === question || onRemovedControl || !active || active === document.body) setFocus(next ? { id: next.id, button: 'tile' } : 'search');
+  };
   const open = (id: string) => {
+    dismissDelete();
     editorSession.current++;
     locating.current = null;
     // Opening any editor withdraws an offer to send; a plain failure follows its own card into the editor.
@@ -237,28 +328,43 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     locating.current = null;
     clearDraft(closing);
     if (latest.current.message?.id === closing) setHidden(latest.current.message.nonce);
-    if (exit) { groups.reset(); setEditMode(false); if (exit !== 'done') void act({ type: 'panel', panel: exit === 'panel' ? null : 'settings' }); }
+    if (exit) { groups.reset(); setEditMode(false); if (exit !== 'done') void act({ type: 'panel', panel: exit === 'panel' ? null : exit }); }
     if (next && all.some(s => s.id === next)) open(next);
     else { setEditor(current => current?.id === closing ? null : current); if (returnFocus) setFocus({ id: closing, button: 'tile' }); }
   };
   const requestClose = (next: string | null, exit?: Exit) => {
-    if (!editing) { if (exit) { groups.reset(); setEditMode(false); if (exit !== 'done') void act({ type: 'panel', panel: exit === 'panel' ? null : 'settings' }); } return; }
+    dismissDelete();
+    editorSession.current++;
+    if (!editing) { if (exit) { groups.reset(); setEditMode(false); if (exit !== 'done') void act({ type: 'panel', panel: exit === 'panel' ? null : exit }); } return; }
     locating.current = null;
     if (editingSticker && editing.text !== editingSticker.searchTerms) { setEditor({ id: editing.id, prompt: { next, exit } }); setFocus({ id: editing.id, field: 'keep', scroll: true }); }
     else finish(editing.id, next, true, exit);
   };
-  const keep = () => { setEditor(current => current && { id: current.id }); if (editing) setFocus({ id: editing.id, field: 'textarea' }); };
+  const keep = () => {
+    editorSession.current++;
+    // A detached prompt must lead back to an editable, visible draft.
+    if (editing && !visible.current.has(editing.id)) { queryRevision.current++; setQuery(''); groups.showAll(); }
+    setEditor(current => current && { id: current.id });
+    if (editing) setFocus({ id: editing.id, field: 'textarea', scroll: true });
+  };
+  useLayoutEffect(() => {
+    if (navigation) navigation.current = panel => { if (panel !== 'stickers') requestClose(null, panel ?? 'panel'); };
+    return () => { if (navigation) navigation.current = null; };
+  });
   const toggle = (id: string) => { if (editing) requestClose(editing.id === id ? null : id); else open(id); };
 
   const escape = useRef<() => boolean>(() => false);
   escape.current = () => {
+    if (deleteQuestion && (deleteQuestion.kind === 'bar' ? editMode : editorQuestionVisible)) { keepDelete(); return true; }
     if (groups.closePopover()) return true;
     if (document.activeElement === search.current && query) { queryRevision.current++; setQuery(''); return true; }
     if (editing?.prompt) { keep(); return true; }
-    if (editing) { requestClose(null); return true; }
+    if (visibleEditing) { requestClose(null); return true; }
     if (groups.cancelInline()) return true;
-    if (groups.clearSelection()) return true;
-    if (editMode) { groups.reset(); setEditMode(false); return true; }
+    if (groups.clearSelection(true)) return true;
+    if (editMode) { requestClose(null, 'done'); return true; }
+    // Also guard a draft if a panel-level Escape reaches us outside edit mode.
+    if (editing && editingSticker && editing.text !== editingSticker.searchTerms) { requestClose(null, 'panel'); return true; }
     if (cancellable(busy)) { cancel(); return true; }
     if (busy) return true;
     if (message) { dismiss(message.id); return true; }
@@ -304,20 +410,13 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
         locating.current = request;
         void act({ type: 'locateSticker', id: editing.id, destinationToken: status.chat.destinationToken }).then(ok => { if (!ok && locating.current === request) locating.current = null; });
       }}
-      forget={async () => {
-        const source = document.activeElement;
-        const revision = queryRevision.current;
-        const session = ++editorSession.current;
-        const id = editing.id, at = stickers.findIndex(s => s.id === id), next = stickers[at + 1] ?? stickers[at - 1];
-        if (!await act({ type: 'forgetSticker', id })) return;
-        if (editorSession.current !== session) return;
-        if (latest.current.message?.id === id) setHidden(latest.current.message.nonce);
-        clearDraft(id);
-        saving.current.delete(id);
-        if (locating.current?.id === id) locating.current = null;
-        setEditor(current => current?.id === id ? null : current);
-        if (queryRevision.current === revision && (document.activeElement === source || (!source?.isConnected && document.activeElement === document.body))) setFocus(next ? { id: next.id, button: 'tile' } : 'search');
-      }}/>;
+      deleting={deleting} confirmDelete={deleteQuestion?.kind === 'editor' && deleteQuestion.id === editing.id}
+      askDelete={() => {
+        if (deleteLock.current) return;
+        dismissDelete();
+        editorSession.current++;
+        groups.closePopover(); setDeleteQuestion({ kind: 'editor', id: editing.id }); setFocus({ id: editing.id, field: 'delete-keep' });
+      }} keepDelete={keepDelete} forget={() => void remove([editing.id], true)}/>;
     if (message) return <div key={`message-${message.nonce}`} className="sticker-detail sticker-message" role="region" aria-label="Send result" style={{ '--col': col } as React.CSSProperties}>
       <MessageBody message={message} retry={retry} sendBlocked={sendBlocked} dismiss={() => dismiss(message.id)}/>
     </div>;
@@ -362,6 +461,9 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     }
     if (!button.matches('.sticker-art, .sticker-pick, .cancel-send')) return;
     const index = stickers.findIndex(sticker => sticker.id === button.closest<HTMLElement>('[data-sticker]')?.dataset.sticker);
+    if (editMode && (event.key === 'Delete' || event.key === 'Backspace') && button.matches('.sticker-art, .sticker-pick')) {
+      event.preventDefault(); askDelete(stickers[index].id); return;
+    }
     const step = event.key === 'ArrowDown' ? columns : event.key === 'ArrowUp' ? -columns : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
     if (step) {
       const next = Math.max(0, Math.min(stickers.length - 1, index + step));
@@ -417,7 +519,7 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
         <button className="back" data-preserve-auto="" aria-label="Close panel" onClick={() => requestClose(null, 'panel')}><BackIcon/></button>
         <h1>Stickers</h1>
         <div className="sticker-search" style={{ '--count-width': `${count.length}ch` } as React.CSSProperties}>
-          <input ref={search} className="search" aria-label="Search stickers" aria-describedby={countId} placeholder="Search" value={query} onChange={e => { queryRevision.current++; locating.current = null; setFocus(null); setQuery(e.target.value); }}/>
+          <input ref={search} className="search" aria-label="Search stickers" aria-describedby={countId} placeholder="Search" value={query} onChange={e => { dismissDelete(); queryRevision.current++; locating.current = null; setFocus(null); setQuery(e.target.value); }}/>
           <span className="count" aria-hidden="true">{count}</span><span className="sr-only" id={countId}>{all.length} stickers indexed</span>
         </div>
         <button className={`sticker-mode${editMode ? ' mode-done' : ''}`} aria-label={editMode ? undefined : 'Edit stickers'} title={editMode ? undefined : 'Edit stickers'} onClick={() => editMode ? requestClose(null, 'done') : setEditMode(true)}>{editMode ? 'Done' : <EditIcon/>}</button>
@@ -428,14 +530,14 @@ export function Stickers({ status, act }: { status: Status; act: Act }) {
     </header>
     <div className="panel-body sticker-body" data-mode={editMode ? 'edit' : 'normal'}>
       {status.pending && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
-      <p className="sr-only" aria-live="polite">{busyNotice || (shown ? announcement(shown) : '')}</p>
-      {!stickers.length && <div className="empty"><span aria-hidden="true">▧</span><p>{groupName ? `${query ? 'No matches' : 'No stickers'} in ${groupName}` : query ? 'No matching stickers' : 'Your stickers will appear here'}</p>{groups.filter ? <button onClick={groups.showAll}>{query ? 'Search all groups' : 'Show all groups'}</button> : <small>{query ? 'Try another word or phrase.' : 'Open WhatsApp’s sticker picker and select Favorites. Wait for your stickers to load.'}</small>}</div>}
+      <p className="sr-only" aria-live="polite" aria-atomic="true">{deletedNotice ? <span key={deletionSequence}>{deletedNotice}</span> : busyNotice || (shown ? announcement(shown) : '')}</p>
+      {!stickers.length && <div className="empty"><span aria-hidden="true">▧</span><p>{groupName ? `${query ? 'No matches' : 'No stickers'} in ${groupName}` : query ? 'No matching stickers' : 'Your stickers will appear here'}</p>{groups.filter ? <button onClick={groups.showAll}>{query ? 'Search all groups' : 'Show all groups'}</button> : query ? <small>Try another word or phrase.</small> : !status.state.hasForgotten && !deletionSequence && <small>Open WhatsApp’s sticker picker and select Favorites. Wait for your stickers to load.</small>}</div>}
       <div className="sticker-grid" ref={grid} style={{ '--cols': columns } as React.CSSProperties} onKeyDown={navigate}>
         {gridContent.map(node => node === 'detail' ? detail(detailIndex) : node)}
         {editing?.prompt && !visibleEditing && detail(0)}
       </div>
     </div>
-    {groups.bar(stickers)}
+    {groups.bar(stickers, { confirming: deleteQuestion?.kind === 'bar', discardingDraft: deleteQuestion?.kind === 'bar' && deleteQuestion.ids.some(id => drafts.has(id) && drafts.get(id) !== all.find(sticker => sticker.id === id)?.searchTerms), busy: deleting, open: () => askDelete(), keep: keepDelete, remove: () => { if (deleteQuestion?.kind === 'bar') void remove(deleteQuestion.ids); } })}
   </>;
 }
 
@@ -478,12 +580,12 @@ function MessageBody({ message, retry, sendBlocked, dismiss }: { message: Sticke
   </>;
 }
 
-function StickerEditor({ col, detached, sticker, groupControls, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget }: {
+function StickerEditor({ col, detached, sticker, groupControls, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget, confirmDelete, deleting, askDelete, keepDelete }: {
   col: number; detached: boolean; sticker: Sticker; groupControls: React.ReactNode; draft: Draft; location: Status['stickerLocation']; message: StickerSend | null;
   retry: (event: React.MouseEvent, send: StickerSend, original?: boolean) => void;
   sendBlocked: boolean;
   change: (text: string) => void; close: () => void; keep: () => void; discard: () => void;
-  save: () => void; locate: () => void; forget: () => void;
+  save: () => void; locate: () => void; forget: () => void; confirmDelete: boolean; deleting: boolean; askDelete: () => void; keepDelete: () => void;
 }) {
   const id = useId();
   const result = location?.id === sticker.id ? location.state : null;
@@ -495,7 +597,8 @@ function StickerEditor({ col, detached, sticker, groupControls, draft, location,
     {!draft.prompt && groupControls}
     {draft.prompt
       ? <div className="discard" role="group" aria-label="Discard changes?"><span aria-hidden="true">Discard changes?</span><button onClick={keep}>Keep editing</button><button className="quiet" onClick={discard}>Discard</button></div>
-      : <div className="actions"><button className="primary" disabled={draft.text === sticker.searchTerms} onClick={save}>Save</button><button onClick={locate}>Locate in WhatsApp</button><button className="quiet" onClick={forget}>Forget</button></div>}
-    {result && !draft.prompt && <p className="sticker-location" role="status">{locationMessages[result]}</p>}
+      : confirmDelete ? <div className="actions confirm" role="group" aria-label="Delete this sticker?"><span>Delete this sticker?{draft.text !== sticker.searchTerms && ' Unsaved changes will be discarded.'}</span><button className="primary" aria-busy={deleting || undefined} aria-disabled={deleting || undefined} onClick={forget}>Delete</button><button className="quiet delete-keep" disabled={deleting} onClick={keepDelete}>Keep</button></div>
+      : <div className="actions"><button className="primary" disabled={draft.text === sticker.searchTerms} onClick={save}>Save</button><button onClick={locate}>Locate in WhatsApp</button><button className="icon-btn delete-trigger" aria-label="Delete sticker" title="Delete sticker" onClick={askDelete}><TrashIcon/></button></div>}
+    {result && !draft.prompt && !confirmDelete && <p className="sticker-location" role="status">{locationMessages[result]}</p>}
   </div>;
 }

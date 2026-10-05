@@ -5,7 +5,7 @@ function controlsState(state: State): ControlsState {
   let projected = projections.get(state);
   if (!projected) {
     const { conversations: _anchors, ledger: _ledger, forgottenStickers: _forgotten, stickers, ...settings } = state;
-    projected = { ...settings, stickers: stickers.map(({ fingerprint: _fingerprint, ...sticker }) => sticker) };
+    projected = { ...settings, hasForgotten: _forgotten.length > 0, stickers: stickers.map(({ fingerprint: _fingerprint, ...sticker }) => sticker) };
     projections.set(state, projected);
   }
   return projected;

@@ -172,3 +172,15 @@ test.each(Array.from({ length: 12 }, (_, seed) => seed + 1))('interleaved reads 
     }
   }
 });
+
+test('forgotten stickers project only a boolean on initial status and deletion deltas', () => {
+  const initial = status(), cache = new StatusCache();
+  const first = statusUpdate(initial); expect(first.state?.hasForgotten).toBe(false); cache.accept(first);
+  const deleted = { ...initial, sequence: 2, state: { ...initial.state, forgottenStickers: [sticker.id] } };
+  const delta = statusUpdate(deleted, initial.state, initial);
+  expect(delta.state).toEqual({ hasForgotten: true }); expect(cache.accept(delta)?.state.hasForgotten).toBe(true);
+  const reopened = new StatusCache().accept(statusUpdate(deleted));
+  expect(reopened?.state.hasForgotten).toBe(true); expect(reopened?.state.forgottenStickers).toEqual([]);
+  const more = { ...deleted, sequence: 3, state: { ...deleted.state, forgottenStickers: [...deleted.state.forgottenStickers, 'b'.repeat(64)] } };
+  expect(statusUpdate(more, deleted.state, deleted)).toEqual({ sequence: 3 });
+});

@@ -98,7 +98,7 @@ test('filtering keeps hidden drafts, resets scrolling and Select all selects the
   expect(host.scrollTop).toBe(0); expect(host.querySelector('.count')?.textContent).toBe('494');
   fill('.search', 'sticker 10'); expect(host.querySelector('textarea')).toBeNull();
   click('Select all'); expect(host.querySelector('.sticker-select-bar')?.textContent).toContain('15 selected');
-  click('Clear'); fill('.search', ''); expect(host.querySelector('textarea')?.value).toBe('hidden draft');
+  click('Clear selection'); fill('.search', ''); expect(host.querySelector('textarea')?.value).toBe('hidden draft');
 });
 
 test('editor typing and unrelated statuses do not rerender tiles, normalize library text, or measure unchanged layout', () => {
@@ -178,4 +178,18 @@ test('group membership counts and chip fades stay memoized during unrelated rend
   status = { ...status, message: 'Unrelated update' }; draw();
   expect(memberships.every(iterator => iterator.mock.calls.length === 0)).toBe(true);
   expect(widths).not.toHaveBeenCalled();
+});
+
+
+test('an editor question remains usable when virtualization removes its tile, and filtering dismisses it', () => {
+  click('Edit stickers'); act(() => tile(1).click()); click('Delete sticker');
+  const editor = host.querySelector('.sticker-detail')!;
+  scroll(2400); expect(tile(1)).toBeNull(); expect(editor.isConnected).toBe(true);
+  click('Keep'); expect(document.activeElement).toBe(host.querySelector('[aria-label="Delete sticker"]'));
+  click('Delete sticker'); fill('.search', 'sticker 40');
+  expect(host.querySelector('.actions.confirm')).toBeNull(); expect(editor.isConnected).toBe(false);
+  click('Select all');
+  key(host.querySelector('.clear-selection')!, 'Escape');
+  expect(document.activeElement).toBe(host.querySelector('.select-all'));
+  fill('.search', ''); expect(host.querySelector('textarea')).not.toBeNull(); expect(host.querySelector('.actions.confirm')).toBeNull();
 });

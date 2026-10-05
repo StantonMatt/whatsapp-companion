@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { State, Sticker, StickerGroup } from '../shared/model';
 import type { Act } from './index';
-import { EditIcon } from './icons';
+import { EditIcon, TrashIcon } from './icons';
 
 type GroupForm = { type: 'new'; name: string; stickerIds: string[] } | { type: 'rename' | 'delete'; id: string; name: string };
 const Check = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" d="m5.5 12.5 4.2 4.2 8.8-9.2"/></svg>;
@@ -10,7 +10,11 @@ const updateChipFades = (row: HTMLElement) => {
   row.toggleAttribute('data-fade-end', row.scrollLeft + row.clientWidth < row.scrollWidth - 1);
 };
 
-export function useStickerGroups(state: State, act: Act, editMode: boolean) {
+export function useStickerGroups(state: State, act: Act, editMode: boolean, selectionChanged: () => void) {
+  // Explicit selection/group-control interactions invalidate pending deletion cleanup.
+  // Passive status pruning and temporary-selection removal do not.
+  const selectionRevision = useRef(0);
+  const changed = () => { selectionRevision.current++; selectionChanged(); };
   const groups = state.stickerGroups;
   const [filter, setFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState(() => new Set<string>());
@@ -19,6 +23,8 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
   const [submitting, setSubmitting] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const session = useRef(0);
+  const [barFocus, setBarFocus] = useState<'clear-selection' | 'select-all' | null>(null);
+  const barElement = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const popup = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -52,6 +58,11 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
   useLayoutEffect(() => { if (chips.current) updateChipFades(chips.current); }, [groups, editMode, filter, form?.type]);
   const stickerIds = useMemo(() => new Set(state.stickers.map(sticker => sticker.id)), [state.stickers]);
   const selectedStickers = useMemo(() => state.stickers.filter(sticker => selected.has(sticker.id)), [state.stickers, selected]);
+  useLayoutEffect(() => {
+    if (!barFocus) return;
+    barElement.current?.querySelector<HTMLButtonElement>(`.${barFocus}`)?.focus();
+    setBarFocus(null);
+  }, [barFocus, selectedStickers.length]);
   const membership = useMemo(() => {
     const counts = new Map<string, number>();
     for (const sticker of selectedStickers) for (const id of sticker.groups) counts.set(id, (counts.get(id) ?? 0) + 1);
@@ -84,16 +95,26 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
     return () => document.removeEventListener('pointerdown', outside);
   }, [popover]);
   const cancelForm = () => { session.current++; setCreated(null); setForm(null); setSubmitting(false); };
-  const clear = () => { setSelected(new Set()); setPopover(false); };
+  const clear = () => { changed(); setSelected(new Set()); setPopover(false); };
   const reset = () => { clear(); cancelForm(); };
-  const toggleSelection = (id: string) => setSelected(previous => {
-    const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next;
+  const removeSelection = (id: string) => setSelected(previous => {
+    if (!previous.has(id)) return previous;
+    const next = new Set(previous); next.delete(id); return next;
   });
+  const toggleSelection = (id: string) => {
+    // Remember the explicit toggle before dismissing a question removes its temporary selection.
+    const wasSelected = selected.has(id);
+    changed(); setSelected(previous => {
+      const next = new Set(previous); if (wasSelected) next.delete(id); else next.add(id); return next;
+    });
+  };
   const newGroup = (assign = false) => {
+    changed();
     session.current++; setCreated(null); setSubmitting(false); setPopover(false);
     setForm({ type: 'new', name: '', stickerIds: assign ? selectedStickers.map(s => s.id) : [] });
   };
   const choose = (group: StickerGroup | null) => {
+    changed();
     cancelForm();
     if (group && activeFilter === group.id && editMode) setForm({ type: 'rename', id: group.id, name: group.name });
     else setFilter(group?.id ?? null);
@@ -134,12 +155,16 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
       </>}
     </div>}
   </>;
-  const bar = (visible: Sticker[]) => editMode && <div className="sticker-select-bar">
-    {selectedStickers.length ? <>
-      <span>{selectedStickers.length} selected</span><button className="quiet" onClick={clear}>Clear</button>
-      <button ref={trigger} aria-expanded={popover} onClick={() => setPopover(!popover)}>Groups ▾</button>
-    </> : <button className="link" disabled={!visible.length} onClick={() => setSelected(new Set(visible.map(s => s.id)))}>Select all</button>}
-    {popover && selectedStickers.length > 0 && <div ref={popup} className="sticker-groups-popover" role="group" aria-label={`Groups for ${selectedStickers.length} stickers`}>
+  const bar = (visible: Sticker[], deletion: { confirming: boolean; discardingDraft?: boolean; busy: boolean; open: () => void; keep: () => void; remove: () => void }) => editMode && <div ref={barElement} className="sticker-select-bar" role={deletion.confirming ? 'group' : undefined} aria-label={deletion.confirming ? `Delete ${selectedStickers.length} sticker${selectedStickers.length === 1 ? '' : 's'}?` : undefined}>
+    {deletion.confirming ? <>
+      <span>Delete {selectedStickers.length} sticker{selectedStickers.length === 1 ? '' : 's'}?{deletion.discardingDraft && ' Unsaved changes will be discarded.'}</span>
+      <button className="primary" aria-busy={deletion.busy || undefined} aria-disabled={deletion.busy || undefined} onClick={deletion.remove}>Delete</button><button className="quiet delete-keep" disabled={deletion.busy} onClick={deletion.keep}>Keep</button>
+    </> : selectedStickers.length ? <>
+      <button className="icon-close clear-selection" aria-label="Clear selection" title="Clear selection" onClick={() => { clear(); setBarFocus('select-all'); }}>×</button><span>{selectedStickers.length} selected</span>
+      <button ref={trigger} aria-expanded={popover} onClick={() => { changed(); setPopover(!popover); }}>Groups ▾</button>
+      <button className="icon-btn delete-trigger" aria-label={`Delete ${selectedStickers.length} sticker${selectedStickers.length === 1 ? '' : 's'}`} title="Delete" onClick={deletion.open}><TrashIcon/></button>
+    </> : <button className="link select-all" disabled={!visible.length} onClick={() => { changed(); setSelected(new Set(visible.map(s => s.id))); setBarFocus('clear-selection'); }}>Select all</button>}
+    {!deletion.confirming && popover && selectedStickers.length > 0 && <div ref={popup} className="sticker-groups-popover" role="group" aria-label={`Groups for ${selectedStickers.length} stickers`}>
       {groups.map(group => {
         const count = membership.get(group.id) ?? 0;
         const checked = count === 0 ? false : count === selectedStickers.length ? true : 'mixed';
@@ -150,10 +175,14 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
       <button className="pop-row new" onClick={() => newGroup(true)}>New group…</button>
     </div>}
   </div>;
-  return { filter: activeFilter, selected, header, bar, toggleSelection, reset, showAll: () => choose(null),
+  return { filter: activeFilter, selected, selectionRevision,
+    completeDeletion: (revision: number) => {
+      if (selectionRevision.current !== revision) return;
+      setSelected(new Set()); setPopover(false);
+    }, header, bar, barElement, toggleSelection, removeSelection, reset, showAll: () => choose(null),
     closePopover: () => { if (!popover) return false; setPopover(false); trigger.current?.focus(); return true; },
     cancelInline: () => { if (!form) return false; cancelForm(); return true; },
-    clearSelection: () => { if (!selectedStickers.length) return false; clear(); return true; }
+    clearSelection: (focus = false) => { if (!selectedStickers.length) return false; clear(); if (focus) setBarFocus('select-all'); return true; }
   };
 }
 

@@ -30,3 +30,15 @@ test('every controls subscription requests a full publication after registering 
     expect(mocks.removeListener).toHaveBeenLastCalledWith('companion:status', listener);
   }
 });
+
+
+test('local panel navigation subscription validates destinations and removes its listener', () => {
+  const receive = vi.fn(), stop = mocks.api!.subscribePanelNavigation(receive);
+  const [channel, listener] = mocks.on.mock.calls[0];
+  expect(channel).toBe('companion:panel-navigation');
+  for (const panel of [null, 'settings', 'chat', 'stickers']) listener({}, panel);
+  expect(receive.mock.calls).toEqual([[null], ['settings'], ['chat'], ['stickers']]);
+  for (const invalid of [undefined, 'quit', { panel: null }]) listener({}, invalid);
+  expect(receive).toHaveBeenCalledTimes(4);
+  stop(); expect(mocks.removeListener).toHaveBeenCalledWith(channel, listener);
+});

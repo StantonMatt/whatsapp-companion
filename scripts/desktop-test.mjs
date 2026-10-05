@@ -1228,7 +1228,7 @@ try {
   await groupPopover.getByRole('checkbox', { name: 'Selected', exact: true }).click();
   await expect(stickerPanel.locator('.sticker-art')).toHaveCount(2);
   await local.keyboard.press('Escape'); await expect(groupPopover).toHaveCount(0);
-  await selectionBar.getByRole('button', { name: 'Clear', exact: true }).click();
+  await selectionBar.getByRole('button', { name: 'Clear selection', exact: true }).click();
   await groupChips.getByRole('button', { name: 'All', exact: true }).click();
   await selectionBar.getByRole('button', { name: 'Select all', exact: true }).click();
   await expect(selectionBar).toContainText('3 selected');
@@ -1286,7 +1286,16 @@ try {
   await expect(stickerCard).toHaveCount(0); await expect(stickerEditor).toHaveCount(0);
   await editTile(otherDraftCard);
   await expect(discardPrompt).toBeVisible(); await expect(stickerTerms).toHaveValue('unsaved draft for sticker A');
-  await local.keyboard.press('Escape'); await expect(stickerEditor).toHaveCount(0);
+  await local.keyboard.press('Escape'); await expect(stickerTerms).toHaveValue('unsaved draft for sticker A');
+  await expect(stickerTerms).toBeFocused(); await expect(stickerSearch).toHaveValue('');
+  // A hidden dirty editor must intercept Escape before leaving edit mode or closing the panel.
+  await stickerSearch.fill('draft recovery fixture'); await otherDraftCard.locator('.sticker-art').focus();
+  await local.keyboard.press('Escape'); await expect(discardPrompt).toBeVisible();
+  await expect(stickerPanel.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
+  expect((await local.evaluate(() => window.companion.status())).panel).toBe('stickers');
+  await local.keyboard.press('Escape'); await expect(stickerTerms).toHaveValue('unsaved draft for sticker A');
+  await expect(stickerTerms).toBeFocused(); await expect(stickerSearch).toHaveValue('');
+  await stickerSearch.fill('draft recovery fixture');
   await editTile(otherDraftCard); await discardPrompt.getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(stickerTerms).toHaveValue('draft recovery fixture');
   await stickerSearch.fill(''); await stickerTerms.fill('another unsaved draft');
@@ -1360,12 +1369,14 @@ try {
   await editTile(temporaryCard);
   const forgottenFixtureImage = `data:image/webp;base64,${(await readFile(join(dir, 'stickers', `${otherStickerId}.webp`))).toString('base64')}`;
   await remote.locator('#fixture-extra-sticker').evaluate(image => image.remove());
-  await stickerEditor.getByRole('button', { name: 'Forget', exact: true }).click();
+  await stickerEditor.getByRole('button', { name: 'Delete sticker', exact: true }).click();
+  await expect(stickerEditor.getByRole('button', { name: 'Keep', exact: true })).toBeFocused();
+  await stickerEditor.getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(temporaryCard).toHaveCount(0); await expect(stickerEditor).toHaveCount(0);
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
-  await expect(sendCard()).toBeFocused();
+  await expect.poll(() => sendCard().evaluate(tile => document.activeElement === tile)).toBe(true);
   await leaveEditMode();
-  console.log('PASS Save closes the editor and Forget removes the disposable card and returns focus to the remaining tile');
+  console.log('PASS Save closes the editor and confirmed deletion removes the disposable card and returns focus to the remaining tile');
   const observeFixtureImage = async (application, image) => application.evaluate(({ ipcMain, BrowserWindow }, image) => {
     const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
     ipcMain.emit('companion:event', { sender: contents, senderFrame: contents.mainFrame }, { type: 'sticker', image });
@@ -1393,10 +1404,23 @@ try {
   const deduped = (await local.evaluate(() => window.companion.status())).state.stickers;
   expect(deduped.filter(s => s.searchTerms === 'dedupe original')).toHaveLength(1);
   expect((await savedState()).stickers.filter(s => s.fingerprint?.animated)).toHaveLength(2);
-  for (const saved of deduped.filter(s => s.id !== firstStickerId)) {
-    expect((await local.evaluate(id => window.companion.action({ type: 'forgetSticker', id }), saved.id)).ok).toBe(true);
-  }
+  await stickerPanel.getByRole('button', { name: 'Edit stickers', exact: true }).click();
+  const bulkIds = deduped.filter(s => s.id !== firstStickerId).map(s => s.id);
+  for (const id of bulkIds) await stickerPanel.locator(`[data-sticker="${id}"]`).getByRole('checkbox').click();
+  await expect(selectionBar).toContainText('3 selected');
+  await selectionBar.getByRole('button', { name: 'Delete 3 stickers', exact: true }).click();
+  await expect(selectionBar.getByRole('button', { name: 'Keep', exact: true })).toBeFocused();
+  await local.keyboard.press('Escape');
+  await expect(selectionBar.getByRole('button', { name: 'Delete 3 stickers', exact: true })).toBeFocused();
+  await selectionBar.getByRole('button', { name: 'Delete 3 stickers', exact: true }).click();
+  await selectionBar.getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(async () => (await local.evaluate(() => window.companion.status())).state.stickers.length).toBe(1);
+  await expect(selectionBar.getByRole('button', { name: 'Select all', exact: true })).toBeVisible();
+  await expect.poll(() => sendCard().evaluate(tile => document.activeElement === tile)).toBe(true);
+  await expect(stickerPanel.locator('[aria-live="polite"]')).toHaveText('3 stickers deleted');
+  expect((await savedState()).forgottenStickers).toEqual(expect.arrayContaining(bulkIds));
+  await leaveEditMode();
+  console.log('PASS bulk trash confirmation, Escape/Keep focus, atomic deletion, bar reset and announcement');
   console.log('PASS trusted canvas fingerprints suppress a re-encoding, retain different content and separate animation');
 
   // Populate real fixture library entries so the grid genuinely overflows the panel.

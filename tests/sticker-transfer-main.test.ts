@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   errors: [] as unknown[],
   diagnostics: [] as any[],
   menu: [] as any[],
-  store: undefined as { update: (change: (state: State) => void) => void } | undefined
+  store: undefined as { update: (change: (state: State) => void) => void; durabilityWarning: boolean } | undefined
 }));
 
 vi.mock('electron', async () => {
@@ -87,12 +87,14 @@ vi.mock('../src/main/sticker-send-diagnostics', () => ({ StickerSendDiagnostics:
   append(send: unknown, diagnostics: unknown) { mocks.diagnostics.push({ send, diagnostics }); }
 } }));
 vi.mock('../src/main/store', () => ({ Store: class {
+  durabilityWarning = false;
   state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
   constructor() { mocks.store = this; }
   readSticker = (id: string) => { mocks.reads.push(id); if (mocks.readFailure) throw new Error('Sticker file is missing or damaged.'); return { image: 'data:image/webp;base64,UklGRg==', bytes: Buffer.alloc(12), animated: mocks.animated }; };
   readStickerBytes = async (id: string) => { const { image: _image, ...verified } = this.readSticker(id); return verified; };
   update(change: (state: State) => void) { const next = structuredClone(this.state); change(next); this.state = next; }
-  forgetSticker(id: string) { this.update(state => { state.stickers = state.stickers.filter(s => s.id !== id); state.forgottenStickers.push(id); }); }
+  forgetSticker(id: string) { this.forgetStickers([id]); }
+  forgetStickers(ids: string[]) { const removed = ids.filter(id => this.state.stickers.some(s => s.id === id)); if (removed.length) this.update(state => { state.stickers = state.stickers.filter(s => !removed.includes(s.id)); state.forgottenStickers.push(...removed); }); return removed; }
   stickerFiles = {
     write: ({ image: _image, ...metadata }: any) => { mocks.readFailure = false; return { ...metadata, size: 12, groups: [], kind: 'static' as const }; }
   };
@@ -253,7 +255,8 @@ test.each([false, true])('recent exact-hash discovery is suppressed only while i
 const interruptions = [
   { name: 'Escape / cancelSticker', run: () => action({ type: 'cancelSticker' }) },
   { name: 'panel close', run: () => action({ type: 'panel', panel: null }) },
-  { name: 'trusted rail navigation', run: () => remoteEvent({ type: 'navigate', panel: null }) },
+  // A controls fixture with no draft immediately accepts the rail request.
+  { name: 'trusted rail navigation', run: () => { remoteEvent({ type: 'navigate', panel: null }); return action({ type: 'panel', panel: null }); } },
   { name: 'chat change', run: () => remoteEvent({ type: 'snapshot', snapshot: { ...snapshot, chatId: '456@c.us', name: 'B', revision: '2' } }) },
   { name: 'conversation hidden', run: () => remoteEvent({ type: 'snapshot', snapshot: { ...snapshot, conversationOpen: false, ready: false, stickerPreparation: nonce } }) },
   { name: 'remote chat cancellation', run: () => remoteEvent({ type: 'stickerCancelled', nonce, reason: 'chat-changed', detail: 'chat-changed' }) },
@@ -964,4 +967,142 @@ test('main rejects unknown sticker/group ids, duplicate/invalid names and remote
     expect(await action(raw)).toMatchObject({ ok: false }); expect(status().state).toEqual(before);
   }
   expect(await mocks.handlers.get('companion:action')!(eventFor(remote()), { type: 'createStickerGroup', name: 'Remote' })).toEqual({ ok: false, error: 'Denied' });
+});
+
+
+test('bulk forget validates ids before mutation and runs per-id inbox, send and error cleanup after one update', async () => {
+  const { StickerInbox } = await import('../src/main/sticker-inbox');
+  const discard = vi.spyOn(StickerInbox.prototype, 'discard');
+  const a = 'a'.repeat(64), b = 'b'.repeat(64);
+  mocks.store!.update(state => { state.stickers.push({ ...state.stickers[0], id: b }); });
+  mocks.readFailure = true;
+  for (const id of [a, b]) await action({ type: 'locateSticker', id, destinationToken: status().chat.destinationToken });
+  const update = vi.spyOn(mocks.store!, 'update');
+  for (const ids of [[], [a, a], ['invalid']]) expect(await action({ type: 'forgetStickers', ids })).toMatchObject({ ok: false });
+  expect(update).not.toHaveBeenCalled(); expect(discard).not.toHaveBeenCalled();
+  expect(await action({ type: 'forgetStickers', ids: [a, b] })).toEqual({ ok: true });
+  expect(update).toHaveBeenCalledOnce(); expect(discard).toHaveBeenCalledTimes(2);
+  for (const id of [a, b]) expect(discard).toHaveBeenCalledWith(id);
+  expect(status().state.stickers).toEqual([]); expect(status().stickerLibraryError).toBeUndefined();
+  expect(status().stickerSend?.state).toBe('cancelled');
+});
+
+test('failed bulk persistence does not run any per-id cleanup or cancel the live transfer', async () => {
+  const { StickerInbox } = await import('../src/main/sticker-inbox');
+  const discard = vi.spyOn(StickerInbox.prototype, 'discard');
+  vi.spyOn(mocks.store!, 'update').mockImplementation(() => { throw new Error('disk full'); });
+  expect(await action({ type: 'forgetStickers', ids: ['a'.repeat(64)] })).toMatchObject({ ok: false, error: 'disk full' });
+  expect(discard).not.toHaveBeenCalled(); expect(status().state.stickers).toHaveLength(1);
+  expect(status().stickerSend?.state).toBe('preparing');
+});
+
+test.each(['single', 'bulk'])('%s deletion cancels an ungranted prepared picker and clears its watchdog', async path => {
+  const nextNonce = await newSend(snapshot, true);
+  const { StickerTransfer } = await import('../src/core/sticker-transfer');
+  const prepared = StickerTransfer.prototype.prepared;
+  let deletion!: Promise<unknown>;
+  vi.spyOn(StickerTransfer.prototype, 'prepared').mockImplementationOnce(function (this: InstanceType<typeof StickerTransfer>, ...args) {
+    const ticket = prepared.apply(this, args);
+    expect(status().stickerSend?.state).toBe('sending');
+    // Delete in the prepared-but-not-queued window, before main issues Send.
+    deletion = action(path === 'single' ? { type: 'forgetSticker', id: 'a'.repeat(64) } : { type: 'forgetStickers', ids: ['a'.repeat(64)] });
+    return ticket;
+  });
+  remote().send.mockClear();
+  remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: true });
+  expect(await deletion).toEqual({ ok: true });
+  expect(status().stickerSend?.state).toBe('cancelled'); expect(status().chat.stickerSendBlockedReason).not.toBe('busy');
+  expect(remote().send).toHaveBeenCalledWith('companion:command', { type: 'cancelSticker' });
+  expect(remote().send.mock.calls.some(([, command]) => command.type === 'sendSticker')).toBe(false);
+  expect(mocks.handlers.get('companion:authorize-sticker')!(eventFor(remote()), { nonce: nextNonce, phase: 'send', snapshot })).toBe(false);
+  await vi.advanceTimersByTimeAsync(STICKER_MAKER_WATCHDOG_MS); expect(status().stickerSend?.state).toBe('cancelled');
+});
+
+test.each(['cancelSticker', 'panel close', 'single deletion', 'bulk deletion'])('held picker Send survives %s before remote authorization', async interruption => {
+  const nextNonce = await newSend(snapshot, true);
+  let held: unknown;
+  remote().send.mockImplementationOnce((channel, command) => { expect(channel).toBe('companion:command'); held = command; });
+  remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: true });
+  expect(held).toMatchObject({ type: 'sendSticker', nonce: nextNonce });
+  remote().send.mockClear();
+  const request = interruption === 'cancelSticker' ? { type: 'cancelSticker' }
+    : interruption === 'panel close' ? { type: 'panel', panel: null }
+    : interruption === 'single deletion' ? { type: 'forgetSticker', id: 'a'.repeat(64) }
+    : { type: 'forgetStickers', ids: ['a'.repeat(64)] };
+  expect(await action(request)).toEqual({ ok: true });
+  expect(status().stickerSend?.state).toBe('sending');
+  expect(remote().send).not.toHaveBeenCalledWith('companion:command', { type: 'cancelSticker' });
+  // A real Store cannot read a forgotten sticker; queued Send must use its
+  // already-verified command rather than needing the deleted library file.
+  const reads = mocks.reads.length;
+  mocks.readFailure = true;
+  expect(mocks.handlers.get('companion:authorize-sticker')!(eventFor(remote()), { nonce: nextNonce, phase: 'send', snapshot })).toBe(true);
+  expect(mocks.reads).toHaveLength(reads);
+  remoteEvent({ type: 'stickerSent', nonce: nextNonce, clicked: true, confirmed: true });
+  expect(status().stickerSend?.state).toBe('sent');
+});
+
+test.each([['picker', 'single'], ['picker', 'bulk'], ['maker', 'single'], ['maker', 'bulk']])('%s granted send finishes after %s deletion', async (route, path) => {
+  const nextNonce = route === 'picker' ? await newSend(snapshot, true) : nonce;
+  if (route === 'picker') {
+    remoteEvent({ type: 'stickerPrepared', nonce: nextNonce, found: true });
+    expect(mocks.handlers.get('companion:authorize-sticker')!(eventFor(remote()), { nonce: nextNonce, phase: 'send', snapshot })).toBe(true);
+  } else expect(authorize('send')).toBe(true);
+  remote().send.mockClear();
+  expect(await action(path === 'single' ? { type: 'forgetSticker', id: 'a'.repeat(64) } : { type: 'forgetStickers', ids: ['a'.repeat(64)] })).toEqual({ ok: true });
+  expect(status().stickerSend?.state).toBe('sending'); expect(remote().send).not.toHaveBeenCalledWith('companion:command', { type: 'cancelSticker' });
+  remoteEvent({ type: 'stickerSent', nonce: nextNonce, clicked: true, confirmed: true });
+  expect(status().stickerSend?.state).toBe('sent');
+});
+
+test.each(['unknown only', 'unknown single', 'mixed'])('%s deletion preserves unknown pending intake and cleans up only removed ids', async path => {
+  const { createHash } = await import('node:crypto');
+  const { StickerInbox } = await import('../src/main/sticker-inbox');
+  const add = vi.spyOn(StickerInbox.prototype, 'add'), discard = vi.spyOn(StickerInbox.prototype, 'discard');
+  const bytes = Buffer.alloc(12); bytes.write('RIFF'); bytes.writeUInt32LE(4, 4); bytes.write('WEBP', 8);
+  const unknown = createHash('sha256').update(bytes).digest('hex');
+  remoteEvent({ type: 'sticker', image: `data:image/webp;base64,${bytes.toString('base64')}` });
+  expect(add).toHaveBeenCalledOnce();
+  const ids = path === 'mixed' ? ['a'.repeat(64), unknown] : [unknown];
+  expect(await action(path === 'unknown single' ? { type: 'forgetSticker', id: unknown } : { type: 'forgetStickers', ids })).toEqual({ ok: true });
+  expect(discard.mock.calls.map(([id]) => id)).toEqual(path === 'mixed' ? ['a'.repeat(64)] : []);
+  expect(await (add.mock.contexts[0] as InstanceType<typeof StickerInbox>).flush()).toBe(true);
+  expect(status().state.stickers.some(sticker => sticker.id === unknown)).toBe(true);
+});
+
+test.each(['single', 'bulk'])('%s deletion publishes durability status and a later successful sync clears it', async path => {
+  const update = mocks.store!.update.bind(mocks.store);
+  vi.spyOn(mocks.store!, 'update').mockImplementation(change => { update(change); mocks.store!.durabilityWarning = false; }).mockImplementationOnce(change => { update(change); mocks.store!.durabilityWarning = true; });
+  expect(await action(path === 'single' ? { type: 'forgetSticker', id: 'a'.repeat(64) } : { type: 'forgetStickers', ids: ['a'.repeat(64)] })).toEqual({ ok: true });
+  expect(status().stickerLibraryError).toBe('Sticker changes saved; disk sync pending.');
+  expect(await action({ type: 'createStickerGroup', name: 'Recovered' })).toEqual({ ok: true });
+  expect(status().stickerLibraryError).toBeUndefined();
+  expect(publications().at(-1)?.stickerLibraryError).toBeUndefined();
+});
+
+
+test.each([null, 'settings', 'chat'] as const)('rail navigation to %s waits for the local draft guard before changing panels', async panel => {
+  await action({ type: 'cancelSticker' });
+  controls().send.mockClear();
+  remoteEvent({ type: 'navigate', panel });
+  expect(controls().send).toHaveBeenCalledWith('companion:panel-navigation', panel);
+  expect(status().panel).toBe('stickers');
+  expect(publications()).toHaveLength(0);
+  // Keeping the draft means no panel action; a later accepted request completes once.
+  expect(await action({ type: 'panel', panel })).toEqual({ ok: true });
+  expect(status().panel).toBe(panel);
+});
+
+test('clicking the active sticker rail requests a guarded panel close', async () => {
+  controls().send.mockClear();
+  remoteEvent({ type: 'navigate', panel: 'stickers' });
+  expect(controls().send).toHaveBeenCalledWith('companion:panel-navigation', null);
+  expect(status().panel).toBe('stickers');
+});
+
+test.each(['AI settings', 'Chat AI settings'])('%s application menu navigation waits for the draft guard', label => {
+  controls().send.mockClear();
+  mocks.menu[0].submenu.find((item: any) => item.label === label).click();
+  expect(controls().send).toHaveBeenCalledWith('companion:panel-navigation', label === 'AI settings' ? 'settings' : 'chat');
+  expect(status().panel).toBe('stickers');
 });

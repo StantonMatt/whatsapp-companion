@@ -244,3 +244,14 @@ button.primary { background: var(--green); color: var(--bg); }
 .sticker-detail-groups > span { font-size: 13px; color: var(--muted); margin-right: 4px; }
 .sticker-detail .sticker-detail-groups .chip { background: var(--bg); height: auto; min-height: 28px; line-height: 18px; padding-block: 5px; font-size: 12px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .sticker-detail .sticker-detail-groups .chip[aria-pressed=true] { background: var(--selected); box-shadow: inset 0 0 0 1px var(--green); }
+
+/* Round trash controls and inline confirmation, shared by the bar and editor. */
+.icon-btn { display: grid; place-items: center; width: 40px; height: 40px; min-height: 40px; padding: 0; border-radius: 50%; flex-shrink: 0; }
+.icon-btn svg { width: 20px; height: 20px; }
+.sticker-select-bar .icon-btn { width: 36px; height: 36px; min-height: 36px; padding: 0; }
+.sticker-detail .actions .icon-btn { margin-left: auto; }
+.sticker-select-bar .icon-close { width: 32px; height: 32px; min-height: 32px; padding: 0; font-size: 20px; margin-left: -6px; }
+.actions.confirm { flex-wrap: nowrap; align-items: center; }
+.actions.confirm .quiet { padding-inline: 6px; }
+.actions.confirm button[aria-disabled=true], .sticker-select-bar button[aria-disabled=true] { opacity: .45; cursor: default; }
+.actions.confirm > span { flex: 1; min-width: 0; font-size: 13px; }

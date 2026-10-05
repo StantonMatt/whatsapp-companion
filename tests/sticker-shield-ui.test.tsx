@@ -419,12 +419,12 @@ test('Done and Back prompt for a filtered dirty editor without changing the sear
   clickText('Discard'); expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'panel', panel: null });
 });
 
-test('Save closes the editor and Locate and Forget retain the existing actions', async () => {
+test('Save closes the editor and Locate and confirmed deletion retain the existing actions', async () => {
   const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit stickers'); act(() => tile().click());
   clickText('Locate in WhatsApp'); expect(action).toHaveBeenLastCalledWith({ type: 'locateSticker', id: next.state.stickers[0].id, destinationToken: 'destination-1' });
   inputText('textarea', 'saved terms'); await act(async () => clickText('Save'));
   expect(action).toHaveBeenLastCalledWith({ type: 'sticker', id: next.state.stickers[0].id, searchTerms: 'saved terms' }); expect(host.querySelector('.sticker-detail')).toBeNull();
-  act(() => tile().click()); await act(async () => clickText('Forget'));
+  act(() => tile().click()); act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Delete sticker"]')!.click()); await act(async () => clickText('Delete'));
   expect(action).toHaveBeenLastCalledWith({ type: 'forgetSticker', id: next.state.stickers[0].id }); expect(host.querySelector('.sticker-detail')).toBeNull();
 });
 
@@ -451,7 +451,7 @@ test('a broken image retries in normal mode and remains editable and forgettable
   expect(tile().getAttribute('aria-label')).toBe('Image unavailable. Retry');
   clickText('Edit stickers'); act(() => tile().click());
   expect(host.querySelector('textarea')?.value).toBe('sticker 0');
-  expect([...host.querySelectorAll('button')].some(button => button.textContent === 'Forget')).toBe(true);
+  expect([...host.querySelectorAll('button')].some(button => button.getAttribute('aria-label') === 'Delete sticker')).toBe(true);
 });
 
 test('a filtered dirty prompt defers a send message and renders only one detail without an arrow target', () => {
