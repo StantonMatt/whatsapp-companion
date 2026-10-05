@@ -292,7 +292,7 @@ describe('incremental desktop status', () => {
     const a = full(1), b = full(2), c = full(3), cache = new StatusCache();
     const sticker = { id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, searchTerms: '', firstSeen: 1, lastSeen: 1 };
     a.state.stickers = [sticker]; b.state.stickers = [sticker, { ...sticker, id: 'b'.repeat(64) }]; c.state = { ...b.state, global: { ...b.state.global, tone: 'friendly' } };
-    const delta = statusUpdate(b, a.state); expect(delta.stickerChanges?.upsert).toHaveLength(1); expect(delta.state).not.toHaveProperty('stickers');
+    const delta = statusUpdate(b, a.state); expect(delta.stickerChanges?.upsert).toHaveLength(1); expect(delta.state).toBeUndefined();
     cache.accept(delta); cache.accept(statusUpdate(c, b.state)); const result = cache.accept(a);
     expect(result?.state.stickers).toHaveLength(2); expect(result?.state.global.tone).toBe('friendly');
     const d = { ...c, sequence: 4, state: { ...c.state, stickers: [] } }; cache.accept(statusUpdate(d, c.state)); expect(cache.accept(a)?.state.stickers).toHaveLength(0);

@@ -439,8 +439,11 @@ export class Assistant {
     this.resumeAdmission(); this.changed();
   }
   activity(editing = false) {
-    if (this.automatic || (editing && !this.live?.request)) this.cancel();
-    else if (editing && this.live) {
+    const before = { message: this.message, pending: this.pending, state: this.store.state, paused: this.isRuntimePaused() };
+    if (this.automatic || (editing && !this.live?.request)) {
+      if (this.live || this.automatic || this.pending || this.attempt || this.admission || this.displayRefresh) this.cancel();
+      else this.gate.cancel();
+    } else if (editing && this.live && (!this.live.awaitingSnapshot || this.live.offer || this.displayRefresh)) {
       // Hide stale text now; the following snapshot decides whether recovery is
       // compatible. Whitespace input must not lose its backoff or replay.
       this.live.offer = undefined; this.live.awaitingSnapshot = true;
@@ -449,13 +452,14 @@ export class Assistant {
       this.connector.send({ type: 'clear' }); this.armTimer();
     }
     const id = this.snapshot.chatId;
-    if (id && this.store.state.auto[id]?.enabled && !this.store.state.auto[id].paused) {
+    if (id && this.store.state.auto[id]?.enabled && !this.store.state.auto[id].paused && !this.runtimePaused.has(id)) {
       this.runtimePaused.add(id); // Safety cannot depend on the disk write succeeding.
       try { this.store.update(s => { s.auto[id].paused = true; }); }
       catch { this.message = 'Automatic replies paused for this session; saving the pause failed. Resume explicitly after fixing local storage.'; this.changed(); return; }
       this.message = 'Automatic replies paused because you took over. Resume in this chat’s settings.';
     }
-    this.changed();
+    this.reconcileLive();
+    if (before.message !== this.message || before.pending !== this.pending || before.state !== this.store.state || before.paused !== this.isRuntimePaused()) this.onChanged();
   }
   receive(next: Snapshot, force = false, refreshNonce?: string) {
     try { this.receiveSnapshot(next, force, refreshNonce); }

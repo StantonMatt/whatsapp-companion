@@ -1,4 +1,5 @@
 import { constants, fstatSync, fchmodSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync, existsSync, openSync, fsyncSync, closeSync, linkSync, unlinkSync, readdirSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { dirname, join } from 'node:path';
 import { initialState, legacyStateSchema, stateSchema, type State } from '../shared/model';
 import { StickerFiles } from './sticker-files';
@@ -135,14 +136,33 @@ export class Store {
     if (this.manifestDurabilityWarning) this.manifestDurabilityWarning = !syncSavedDirectory(dirname(this.path), this.fault, 'manifest:retry');
     const next = structuredClone(this.state);
     mutator(next);
+    if (isDeepStrictEqual(next, this.state)) { this.finishRecovery(!this.manifestDurabilityWarning); return; }
     stateSchema.parse(next);
     this.manifestDurabilityWarning = !atomicWrite(this.path, JSON.stringify(next), this.fault);
     this.state = next;
     this.finishRecovery(!this.manifestDurabilityWarning);
   }
 
+  private indexedState?: State;
+  private stickerIndex = new Map<string, State['stickers'][number]>();
+  private indexedSticker(id: string) {
+    if (this.indexedState !== this.state) {
+      this.stickerIndex = new Map(this.state.stickers.map(s => [s.id, s])); this.indexedState = this.state;
+    }
+    return this.stickerIndex.get(id);
+  }
+  async readStickerBytes(id: string) {
+    const sticker = this.indexedSticker(id);
+    if (!sticker) throw new Error('Sticker no longer indexed.');
+    try {
+      const verified = await this.stickerFiles.readBytes(id);
+      const current = this.indexedSticker(id);
+      if (!current || verified.bytes.length !== current.size || verified.animated !== (current.kind === 'animated')) throw new Error('Sticker metadata mismatch.');
+      return verified;
+    } catch { throw new Error('Sticker file is missing or damaged. Restore the file from a backup, or let the app rediscover the sticker.'); }
+  }
   readSticker(id: string) {
-    const sticker = this.state.stickers.find(s => s.id === id);
+    const sticker = this.indexedSticker(id);
     if (!sticker) throw new Error('Sticker no longer indexed.');
     try {
       const verified = this.stickerFiles.read(id);
@@ -152,6 +172,7 @@ export class Store {
   }
   forgetSticker(id: string) {
     this.update(state => forgetSticker(state, id));
+    this.stickerFiles.invalidate(id, 'removed');
     // Durable tombstone first. A failed deletion leaves only an orphan for GC.
     this.fault?.('forget:manifest');
     // Until the tombstone is crash-durable, keep the blob as an orphan for startup GC.

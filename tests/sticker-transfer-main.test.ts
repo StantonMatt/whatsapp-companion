@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, test, expect, vi } from 'vitest';
 import type { EventEmitter } from 'node:events';
-import { emptySnapshot, initialState, type Snapshot, type Status, type ViewBounds } from '../src/shared/model';
+import { emptySnapshot, initialState, type Snapshot, type Status, type State, type ViewBounds } from '../src/shared/model';
 import { STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS } from '../src/shared/sticker-transfer';
 
 type Contents = EventEmitter & { mainFrame: { url: string }; send: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; isFocused: ReturnType<typeof vi.fn>; session: { protocol: { handle: ReturnType<typeof vi.fn> } } };
@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => ({
   reads: [] as string[],
   errors: [] as unknown[],
   diagnostics: [] as any[],
-  menu: [] as any[]
+  menu: [] as any[],
+  store: undefined as { update: (change: (state: State) => void) => void } | undefined
 }));
 
 vi.mock('electron', async () => {
@@ -86,9 +87,11 @@ vi.mock('../src/main/sticker-send-diagnostics', () => ({ StickerSendDiagnostics:
 } }));
 vi.mock('../src/main/store', () => ({ Store: class {
   state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
+  constructor() { mocks.store = this; }
   readSticker = (id: string) => { mocks.reads.push(id); if (mocks.readFailure) throw new Error('Sticker file is missing or damaged.'); return { image: 'data:image/webp;base64,UklGRg==', bytes: Buffer.alloc(12), animated: mocks.animated }; };
-  update(change: (state: ReturnType<typeof initialState>) => void) { change(this.state); }
-  forgetSticker(id: string) { this.state.stickers = this.state.stickers.filter(s => s.id !== id); this.state.forgottenStickers.push(id); }
+  readStickerBytes = async (id: string) => { const { image: _image, ...verified } = this.readSticker(id); return verified; };
+  update(change: (state: State) => void) { const next = structuredClone(this.state); change(next); this.state = next; }
+  forgetSticker(id: string) { this.update(state => { state.stickers = state.stickers.filter(s => s.id !== id); state.forgottenStickers.push(id); }); }
   stickerFiles = {
     write: ({ image: _image, ...metadata }: any) => { mocks.readFailure = false; return { ...metadata, size: 12, groups: [], kind: 'static' as const }; }
   };
@@ -151,7 +154,7 @@ test.each([false, true])('recent exact-hash discovery is suppressed only while i
   const add = vi.spyOn(StickerInbox.prototype, 'add').mockImplementation(() => {});
   const bytes = Buffer.alloc(12); bytes.write('RIFF'); bytes.writeUInt32LE(4, 4); bytes.write('WEBP', 8);
   const id = createHash('sha256').update(bytes).digest('hex');
-  status().state.stickers[0].id = id; status().state.stickers[0].lastSeen = Date.now();
+  mocks.store!.update(state => { state.stickers[0].id = id; state.stickers[0].lastSeen = Date.now(); });
   mocks.readFailure = damaged; mocks.reads.length = 0;
   remoteEvent({ type: 'sticker', image: `data:image/webp;base64,${bytes.toString('base64')}` });
   expect(mocks.reads).toEqual([id]); expect(add).toHaveBeenCalledTimes(damaged ? 1 : 0);
@@ -726,26 +729,26 @@ test('sticker protocol handler is installed only on the controls session', () =>
   expect(status().state.stickers.every(sticker => !('image' in sticker))).toBe(true);
 });
 
-test('successful protocol retry publishes cleared blob errors only for the verified id', async () => {
+test('successful protocol retry clears only the verified id and publishes observable error changes', async () => {
   const first = 'a'.repeat(64), second = 'b'.repeat(64);
-  status().state.stickers.push({ ...status().state.stickers[0], id: second });
+  mocks.store!.update(state => { state.stickers.push({ ...state.stickers[0], id: second }); });
   mocks.readFailure = true;
   for (const id of [first, second]) expect(await action({ type: 'locateSticker', id, destinationToken: status().chat.destinationToken })).toMatchObject({ ok: false });
-  const handle = controls().session.protocol.handle.mock.calls[0][1] as (request: { url: string; method: string }) => Response;
+  const handle = controls().session.protocol.handle.mock.calls[0][1] as (request: { url: string; method: string }) => Promise<Response>;
   controls().send.mockClear();
-  const failed = handle({ url: `companion-sticker://${first}`, method: 'GET' });
+  const failed = await handle({ url: `companion-sticker://${first}`, method: 'GET' });
   expect(failed.status).toBe(404); expect(failed.headers.get('Cache-Control')).toBe('no-store');
   expect(controls().send).not.toHaveBeenCalled();
   mocks.readFailure = false;
-  expect(handle({ url: `companion-sticker://${first}`, method: 'GET' }).status).toBe(200);
+  expect((await handle({ url: `companion-sticker://${first}`, method: 'GET' })).status).toBe(200);
   let updates = controls().send.mock.calls.filter(([channel]) => channel === 'companion:status');
-  expect(updates).toHaveLength(1); expect(updates[0][1].stickerLibraryError).toBe('Sticker file is missing or damaged.');
+  expect(updates).toHaveLength(0); expect(status().stickerLibraryError).toBe('Sticker file is missing or damaged.');
   controls().send.mockClear();
-  expect(handle({ url: `companion-sticker://${second}`, method: 'GET' }).status).toBe(200);
+  expect((await handle({ url: `companion-sticker://${second}`, method: 'GET' })).status).toBe(200);
   updates = controls().send.mock.calls.filter(([channel]) => channel === 'companion:status');
   expect(updates).toHaveLength(1); expect(updates[0][1].stickerLibraryError).toBeUndefined();
   controls().send.mockClear();
-  for (const id of [first, second]) expect(handle({ url: `companion-sticker://${id}`, method: 'GET' }).status).toBe(200);
+  for (const id of [first, second]) expect((await handle({ url: `companion-sticker://${id}`, method: 'GET' })).status).toBe(200);
   expect(controls().send).not.toHaveBeenCalled();
 });
 
@@ -790,7 +793,7 @@ test('blob errors clear after verified Locate recovery and Forget, without clear
   expect(await action({ type: 'locateSticker', id: 'a'.repeat(64), destinationToken: status().chat.destinationToken })).toEqual({ ok: true });
   expect(status().stickerLibraryError).toBeUndefined();
   const second = 'b'.repeat(64);
-  status().state.stickers.push({ ...status().state.stickers[0], id: second });
+  mocks.store!.update(state => { state.stickers.push({ ...state.stickers[0], id: second }); });
   mocks.readFailure = true;
   for (const id of ['a'.repeat(64), second]) expect(await action({ type: 'locateSticker', id, destinationToken: status().chat.destinationToken })).toMatchObject({ ok: false });
   expect(await action({ type: 'forgetSticker', id: 'a'.repeat(64) })).toEqual({ ok: true });
@@ -806,7 +809,7 @@ test('verified rediscovery clears an authorization blob error', async () => {
   const bytes = Buffer.alloc(12); bytes.write('RIFF'); bytes.writeUInt32LE(4, 4); bytes.write('WEBP', 8);
   const id = createHash('sha256').update(bytes).digest('hex');
   // Start a new send with the discovered identity.
-  await action({ type: 'cancelSticker' }); status().state.stickers[0].id = id;
+  await action({ type: 'cancelSticker' }); mocks.store!.update(state => { state.stickers[0].id = id; });
   mocks.readFailure = true;
   expect(await action({ type: 'locateSticker', id, destinationToken: status().chat.destinationToken })).toMatchObject({ ok: false });
   expect(status().stickerLibraryError).toBe('Sticker file is missing or damaged.');
@@ -823,7 +826,7 @@ test('verified recent rediscovery publishes cleared errors even when intake is s
   const add = vi.spyOn(StickerInbox.prototype, 'add');
   const bytes = Buffer.alloc(12); bytes.write('RIFF'); bytes.writeUInt32LE(4, 4); bytes.write('WEBP', 8);
   const id = createHash('sha256').update(bytes).digest('hex');
-  status().state.stickers[0].id = id; status().state.stickers[0].lastSeen = Date.now();
+  mocks.store!.update(state => { state.stickers[0].id = id; state.stickers[0].lastSeen = Date.now(); });
   mocks.readFailure = true;
   expect(await action({ type: 'locateSticker', id, destinationToken: status().chat.destinationToken })).toMatchObject({ ok: false });
   expect(status().stickerLibraryError).toBe('Sticker file is missing or damaged.');

@@ -7,12 +7,13 @@ import { z } from 'zod';
 import { actionSchema, snapshotSchema, discoveredStickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
 import { accountSafetyEventSchema, displayAckSchema, dismissEventSchema, type AccountSafetyReason } from '../shared/connector';
 import { Store } from './store';
+import { ChromeSync } from './chrome-sync';
 import { Conversations } from './conversations';
 import { Vault, promptKey, configuredBackend } from './vault';
 import { Assistant } from './assistant';
 import { setPreferences, resetStylePreferences } from '../core/settings';
 import { learnStyle, styleSamples, minimumStyleSamples } from '../core/style';
-import { statusUpdate } from '../core/status';
+import { statusUpdate, StatusPublisher } from '../core/status';
 import { StickerTransfer, stickerRoute } from '../core/sticker-transfer';
 import { StickerReadiness } from '../core/sticker-readiness';
 import { STICKER_PICKER_WATCHDOG_MS, STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS, stickerMakerDetails, stickerLookupDiagnosticsSchema, type StickerLookupDiagnostics } from '../shared/sticker-transfer';
@@ -61,7 +62,7 @@ async function start() {
   const root = __dirname;
   const uiURL = pathToFileURL(join(root, 'ui/index.html')).href;
   const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href : 'https://web.whatsapp.com/';
-  const conversations = new Conversations(store);
+  const conversations = new Conversations(store, () => { assistant.message = 'Conversation observations could not be saved. Check disk space and the data directory.'; publish(); });
   const stickerTransfer = new StickerTransfer();
   const directStickerSafety = new DirectStickerSafety(store, stickerTransfer, () => {
     assistant.message = 'Direct sticker sending turned off for this session; saving the setting failed. Check disk space and the data directory before re-enabling it.';
@@ -111,7 +112,19 @@ async function start() {
   const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), partition: fixture ? 'persist:fixture' : 'persist:whatsapp', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true } });
   installEditContextMenus([remote.webContents, controls.webContents], win, Menu);
   // Scheme privileges are global; the handler exists only in the local session.
-  controls.webContents.session.protocol.handle(STICKER_SCHEME, request => stickerResponse({ readSticker }, request));
+  controls.webContents.session.protocol.handle(STICKER_SCHEME, request => stickerResponse({ readStickerBytes: async id => {
+    try {
+      const bytes = await store.readStickerBytes(id);
+      if (stickerBlobErrors.delete(id)) publish();
+      return bytes;
+    } catch (error) {
+      if (store.state.stickers.some(s => s.id === id)) {
+        const message = error instanceof Error ? error.message : 'Sticker file unavailable.';
+        if (stickerBlobErrors.get(id) !== message) { stickerBlobErrors.set(id, message); publish(); }
+      }
+      throw error;
+    }
+  } }, request));
   // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
   const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
   remote.webContents.setUserAgent(`Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`);
@@ -126,11 +139,13 @@ async function start() {
     notify: message => { if (!win.isDestroyed()) void dialog.showMessageBox(win, { type: 'info', message, buttons: ['OK'] }).catch(() => {}); }
   });
   let pendingChrome = false;
+  const chromeSync = new ChromeSync();
   const syncChrome = () => {
     if (remote.webContents.isDestroyed()) return;
     const bounds = shieldPanel ?? controls.getBounds(), zoom = remote.webContents.getZoomFactor();
-    remote.webContents.send('companion:command', { type: 'chrome', panel, pending: pendingChrome,
+    const command = chromeSync.next({ type: 'chrome', panel, pending: pendingChrome,
       panelBounds: panel ? { left: bounds.x / zoom, right: (bounds.x + bounds.width) / zoom } : null });
+    if (command) remote.webContents.send('companion:command', command);
   };
   const layout = () => {
     if (win.isDestroyed() || remote.webContents.isDestroyed()) return;
@@ -196,7 +211,8 @@ async function start() {
     if (!controls.webContents.isDestroyed()) controls.webContents.focus();
   });
   remote.webContents.on('focus', () => { if (makerInputOwner && !controls.webContents.isDestroyed()) controls.webContents.focus(); });
-  let sequence = 0, lastState: Status['state'] | undefined;
+  let sequence = 0;
+  const statusPublisher = new StatusPublisher();
   // Presentation can hold composer readiness during maker teardown. Send
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
@@ -238,12 +254,11 @@ async function start() {
       console.warn('Sticker maker result', { state: makerResult.state, detail: makerResult.detail });
       lastMakerDiagnostic = makerResult;
     }
-    sequence++;
     if (panel === 'chat' && panelChat !== assistant.snapshot.settingsId) { panel = null; panelChat = null; layout(); }
     const next = status();
     pendingChrome = Boolean(assistant.pending); syncChrome();
-    controls.webContents.send('companion:status', statusUpdate(next, lastState));
-    lastState = next.state;
+    const update = statusPublisher.next({ ...next, sequence: sequence + 1 });
+    if (update) { sequence++; controls.webContents.send('companion:status', update); }
   };
   const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => { if (!makerInputOwner) remote.webContents.focus(); } }, publish, fixture);
   let accountSafety: AccountSafetyReason = null;
@@ -438,7 +453,7 @@ async function start() {
     const nonce = z.string().uuid().safeParse(raw);
     if (nonce.success && nonce.data === shieldRestoreNonce && !stickerShield) restoreShieldBounds();
   });
-  ipcMain.handle('companion:status', event => { if (!isLocal(event)) throw new Error('Denied'); return status(); });
+  ipcMain.handle('companion:status', event => { if (!isLocal(event)) throw new Error('Denied'); return statusUpdate(status()); });
   ipcMain.handle('companion:models', (event, raw: unknown, refresh: unknown = false) => {
     if (!isLocal(event)) return { models: [], error: 'Denied' };
     const parsed = providerSchema.safeParse(raw);
@@ -542,7 +557,7 @@ async function start() {
         }
         case 'panel': openPanel(action.panel); break;
         case 'reload': cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); await remote.webContents.loadURL(remoteURL); break;
-        case 'cancelAuto': assistant.activity(); break;
+        case 'cancelAuto': assistant.activity(); return { ok: true };
       }
       publish(); return { ok: true };
     } catch (error) {
@@ -654,7 +669,7 @@ async function start() {
         }
         case 'chrome': {
           const v = z.object({ type: z.literal('chrome'), rail: z.number().finite().min(0).max(100), listWidth: z.number().finite().min(0).max(1500), theme: z.enum(['dark', 'light']) }).strict().safeParse(raw);
-          if (v.success) { chrome = v.data; layout(); publish(); } break;
+          if (v.success && (chrome.rail !== v.data.rail || chrome.listWidth !== v.data.listWidth || chrome.theme !== v.data.theme)) { chrome = v.data; layout(); publish(); } break;
         }
         case 'cancelAuto': assistant.activity(); break;
         case 'activity': { const v = z.object({ type: z.literal('activity'), editing: z.boolean().optional() }).strict().safeParse(raw); if (v.success) assistant.activity(v.data.editing); break; }
@@ -701,12 +716,13 @@ async function start() {
   controls.webContents.session.setPermissionCheckHandler(() => false);
   controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
-  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); } });
+  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); } });
   controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); });
-  remote.webContents.on('did-finish-load', () => assistant.refresh(true));
+  remote.webContents.on('did-finish-load', () => { chromeSync.reset(); syncChrome(); assistant.refresh(true); });
   remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
   win.on('close', event => {
+    try { conversations.close(); } catch { /* Observations are noncritical; explicit settings saves remain durable. */ }
     cancelSticker(); stopMakerInput(); assistant.cancel(true); publish(); clearStickerShield(true);
     if (!indexDrained) {
       event.preventDefault();
@@ -716,7 +732,7 @@ async function start() {
       }
     }
   });
-  app.on('before-quit', () => { assistant.cancel(true); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); requestCounts.close(); cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
+  app.on('before-quit', () => { try { conversations.close(); } catch { /* Noncritical observations. */ } assistant.cancel(true); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); requestCounts.close(); cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
   win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(true); remote.webContents.close(); controls.webContents.close(); app.quit(); });
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
