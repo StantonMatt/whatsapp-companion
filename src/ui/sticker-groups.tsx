@@ -1,6 +1,5 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { State, Sticker, StickerGroup } from '../shared/model';
-import { groupSelectionState } from '../core/sticker-groups';
 import type { Act } from './index';
 import { EditIcon } from './icons';
 
@@ -50,17 +49,23 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
     };
   }, []);
   // Chip contents can change without resizing the row itself.
-  useLayoutEffect(() => { if (chips.current) updateChipFades(chips.current); });
-  const selectedStickers = state.stickers.filter(s => selected.has(s.id));
+  useLayoutEffect(() => { if (chips.current) updateChipFades(chips.current); }, [groups, editMode, filter, form?.type]);
+  const stickerIds = useMemo(() => new Set(state.stickers.map(sticker => sticker.id)), [state.stickers]);
+  const selectedStickers = useMemo(() => state.stickers.filter(sticker => selected.has(sticker.id)), [state.stickers, selected]);
+  const membership = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const sticker of selectedStickers) for (const id of sticker.groups) counts.set(id, (counts.get(id) ?? 0) + 1);
+    return counts;
+  }, [selectedStickers]);
   const activeFilter = groups.some(g => g.id === filter) ? filter : null;
   useEffect(() => {
     if (filter && !groups.some(g => g.id === filter)) setFilter(null);
     if (form && form.type !== 'new' && !groups.some(g => g.id === form.id)) { session.current++; setForm(null); }
     setSelected(previous => {
-      const next = new Set([...previous].filter(id => state.stickers.some(s => s.id === id)));
+      const next = new Set([...previous].filter(id => stickerIds.has(id)));
       return next.size === previous.size ? previous : next;
     });
-  }, [groups, state.stickers]);
+  }, [groups, stickerIds]);
   useEffect(() => { if (!selectedStickers.length) setPopover(false); }, [selectedStickers.length]);
   useEffect(() => {
     const group = created && groups.find(g => g.name === created);
@@ -136,7 +141,8 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean) {
     </> : <button className="link" disabled={!visible.length} onClick={() => setSelected(new Set(visible.map(s => s.id)))}>Select all</button>}
     {popover && selectedStickers.length > 0 && <div ref={popup} className="sticker-groups-popover" role="group" aria-label={`Groups for ${selectedStickers.length} stickers`}>
       {groups.map(group => {
-        const checked = groupSelectionState(selectedStickers, group.id);
+        const count = membership.get(group.id) ?? 0;
+        const checked = count === 0 ? false : count === selectedStickers.length ? true : 'mixed';
         return <button key={group.id} className="pop-row" role="checkbox" aria-checked={checked} onClick={() => void act({ type: 'bulkStickerGroupMembership', stickerIds: selectedStickers.map(s => s.id), groupId: group.id, member: checked !== true })}>
           <span className="box" aria-hidden="true">{checked === true ? <Check/> : checked === 'mixed' ? <span className="dash"/> : null}</span>{group.name}
         </button>;

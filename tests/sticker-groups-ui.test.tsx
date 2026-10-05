@@ -197,7 +197,7 @@ test('chip fades remeasure changed chip contents, edit-mode chips, and observed 
     constructor(public callback: () => void) { observers.push(this); }
   });
   status = { ...status, state: { ...status.state, stickerGroups: [] } }; act(draw);
-  click('Edit stickers'); const row = header() as HTMLDivElement, observer = observers.at(-1)!;
+  click('Edit stickers'); const row = header() as HTMLDivElement, observer = observers.find(observer => observer.observe.mock.calls.some(([element]) => element === row))!;
   expect(observer.observe).toHaveBeenCalledWith(row);
   dimensions(row); act(() => observer.callback()); expect(row.hasAttribute('data-fade-end')).toBe(true);
   dimensions(row, 900, 900); click('+ New group'); expect(row.hasAttribute('data-fade-end')).toBe(false);

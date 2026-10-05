@@ -108,6 +108,7 @@ input[type=checkbox]:checked::after { transform: translateX(16px); }
 .sticker-strip a { color: var(--green); text-decoration: none; }
 .sticker-body { padding-inline: 20px; }
 .sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.sticker-spacer { grid-column: 1 / -1; pointer-events: none; }
 .sticker { position: relative; min-width: 0; }
 .sticker-art { display: block; width: 100%; aspect-ratio: 1; padding: 6px; border-radius: 10px; background: var(--surface); min-height: 0; position: relative; transition: scale .1s, background .15s; }
 .sticker-art:hover { filter: none; background: var(--menu-hover); }

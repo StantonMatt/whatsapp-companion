@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { DesktopAPI, Status, StatusUpdate, Action } from '../shared/model';
 import { StatusCache } from '../core/status';
@@ -34,10 +34,10 @@ function App() {
       for (const name of ['pointerdown', 'keydown', 'beforeinput', 'wheel']) document.removeEventListener(name, activity, true);
     };
   }, []);
-  const act: Act = async action => {
+  const act: Act = useCallback(async action => {
     try { const result = await window.companion.action(action); setError(result.error ?? ''); return result.ok; }
     catch { setError('The desktop operation failed. Try again.'); return false; }
-  };
+  }, []);
   const close = () => { void act({ type: 'panel', panel: null }); };
   useEffect(() => { document.documentElement.dataset.theme = status?.theme ?? 'dark'; }, [status?.theme]);
   useEffect(() => {
