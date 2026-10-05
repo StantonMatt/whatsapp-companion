@@ -44,16 +44,18 @@ export class Navigation {
     this.cancel.hidden = !pending;
   }
   refresh(ready: boolean) {
-    const items = [...this.doc.querySelectorAll<HTMLElement>('[data-navbar-item]')].filter(e => e.getBoundingClientRect().width > 0);
-    const top = items[0]?.getBoundingClientRect();
-    const bottom = items.filter(e => e.getBoundingClientRect().top > this.doc.documentElement.clientHeight / 2)[0]?.getBoundingClientRect();
+    const items = [...this.doc.querySelectorAll<HTMLElement>('[data-navbar-item]')].map(element => element.getBoundingClientRect()).filter(rect => rect.width > 0);
+    const top = items[0];
+    const bottom = items.find(rect => rect.top > this.doc.documentElement.clientHeight / 2);
     const side = this.doc.querySelector('#pane-side')?.getBoundingClientRect();
     const header = this.doc.querySelector<HTMLElement>('#main header');
+    const darkColor = getComputedStyle(header ?? this.doc.body).backgroundColor.match(/[\d.]+/g)?.map(Number);
+    const dark = !darkColor || (darkColor[3] === 0) || darkColor.slice(0, 3).reduce((a, b) => a + b, 0) < 380;
+    const editor = this.doc.querySelector('#main footer')?.getBoundingClientRect();
+    // Finish all geometry/style reads before mounting controls or writing styles.
     if (header && ready) {
       if (this.chatHost.parentElement !== header) header.insertBefore(this.chatHost, header.lastElementChild);
     } else this.chatHost.remove();
-    const darkColor = getComputedStyle(header ?? this.doc.body).backgroundColor.match(/[\d.]+/g)?.map(Number);
-    const dark = !darkColor || (darkColor[3] === 0) || darkColor.slice(0, 3).reduce((a, b) => a + b, 0) < 380;
     this.theme = dark ? 'dark' : 'light';
     for (const host of [this.host, this.chatHost]) {
       host.style.setProperty('--ink', dark ? '#a6aaaa' : '#54656f');
@@ -67,7 +69,6 @@ export class Navigation {
       const b = this.buttons[key]; b.hidden = !top;
       b.style.left = `${top?.left ?? 12}px`; b.style.top = `${y + offset}px`;
     }
-    const editor = this.doc.querySelector('#main footer')?.getBoundingClientRect();
     this.cancel.style.right = '20px'; this.cancel.style.top = `${Math.max(0, (editor?.top ?? 70) - 34)}px`;
     const geometry = JSON.stringify([rail, listWidth, dark]);
     if (geometry !== this.lastGeometry) { this.lastGeometry = geometry; this.emit({ type: 'chrome', rail, listWidth, theme: dark ? 'dark' : 'light' }); }
