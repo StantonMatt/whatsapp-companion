@@ -14,6 +14,7 @@ const api: DesktopAPI = {
   subscribe: fn => {
     const listener = (_event: Electron.IpcRendererEvent, update: StatusUpdate) => fn(update);
     ipcRenderer.on('companion:status', listener);
+    ipcRenderer.send('companion:subscribe');
     return () => { ipcRenderer.removeListener('companion:status', listener); };
   }
 };

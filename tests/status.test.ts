@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { initialState, type Status, type Sticker } from '../src/shared/model';
 import { StatusCache, StatusPublisher, statusUpdate } from '../src/core/status';
 import { ChromeSync } from '../src/main/chrome-sync';
@@ -22,7 +22,7 @@ test('initial and sticker delta omit main-only data and reconstruct a compatible
 });
 
 test('only changed settings/transient fields publish; main-only and fingerprint changes are suppressed', () => {
-  const publisher = new StatusPublisher(), initial = status(); initial.state.stickers = [sticker];
+  const publisher = new StatusPublisher(() => {}), initial = status(); initial.state.stickers = [sticker];
   expect(publisher.next(initial)).toBeDefined();
   expect(publisher.next({ ...initial, sequence: 2, chat: { ...initial.chat } })).toBeUndefined();
   const privateChange = { ...initial, sequence: 2, state: { ...initial.state, conversations: { hidden: ['a'.repeat(64)] },
@@ -34,7 +34,7 @@ test('only changed settings/transient fields publish; main-only and fingerprint 
 });
 
 test('shield bytes cross the publication stream once per nonce and bounds deltas keep the captured image', () => {
-  const publisher = new StatusPublisher(), cache = new StatusCache(), initial = status();
+  const publisher = new StatusPublisher(() => {}), cache = new StatusCache(), initial = status();
   const bounds = { x: 1, y: 0, width: 100, height: 200 };
   const shield = { ...initial, sequence: 2, stickerShield: { nonce: 'one', image: 'large capture', bounds, panel: bounds } };
   cache.accept(publisher.next(initial)!);
@@ -56,9 +56,119 @@ test('projected initial read reconciles queued smaller deltas and ignores older 
 });
 
 test('chrome geometry/pending/panel commands deduplicate and a new document resets the cache', () => {
-  const sync = new ChromeSync(), command = { type: 'chrome' as const, panel: 'stickers' as const, pending: false, panelBounds: { left: 64, right: 494 } };
+  const sync = new ChromeSync(() => {}), command = { type: 'chrome' as const, panel: 'stickers' as const, pending: false, panelBounds: { left: 64, right: 494 } };
   expect(sync.next(command)).toEqual(command); expect(sync.next({ ...command, panelBounds: { ...command.panelBounds } })).toBeUndefined();
   expect(sync.next({ ...command, pending: true })).toBeDefined();
   expect(sync.next({ ...command, panelBounds: { left: 65, right: 495 } })).toBeDefined();
   sync.reset(); expect(sync.next(command)).toBeDefined();
+});
+
+test('reset sends complete unchanged state and the same shield nonce to a fresh controls cache', () => {
+  const publisher = new StatusPublisher(() => {}), bounds = { x: 1, y: 0, width: 100, height: 200 };
+  const initial = { ...status(), panel: 'stickers' as const, stickerShield: { nonce: 'one', image: 'capture', bounds, panel: bounds } };
+  publisher.next(initial);
+  expect(publisher.next(initial)).toBeUndefined();
+  publisher.reset();
+  const update = publisher.next({ ...initial, sequence: 2 })!;
+  expect(update).toEqual(statusUpdate({ ...initial, sequence: 2 }));
+  expect(new StatusCache().accept(update)).toMatchObject({ panel: 'stickers', stickerShield: { nonce: 'one', image: 'capture' } });
+});
+
+test('one-shot reads preserve each subscriber baseline and always include the shield image', () => {
+  const initial = { ...status(), panel: 'stickers' as const, stickerShield: null };
+  const subscribers = [new StatusCache(), new StatusCache()];
+  const publishers = subscribers.map(cache => new StatusPublisher(update => { cache.accept(update); }));
+  publishers.forEach(publisher => publisher.next(initial));
+  const bounds = { x: 1, y: 0, width: 100, height: 200 };
+  const busy = { ...initial, sequence: 2, chat: { ...initial.chat, stickerSendBlockedReason: 'busy' as const },
+    stickerSend: { id: sticker.id, name: 'A friend', nonce: 'maker', route: 'maker' as const, animated: false, state: 'preparing' as const } };
+  expect(statusUpdate(busy)).toMatchObject({ state: { stickers: [] }, stickerSend: busy.stickerSend, chat: busy.chat });
+  const shield = { ...busy, stickerShield: { nonce: 'maker', image: 'capture', bounds, panel: bounds } };
+  publishers[0].next(shield);
+  expect(statusUpdate(shield).stickerShield?.image).toBe('capture');
+  // The second subscriber still needs all fields, despite the first delivery.
+  expect(publishers[1].next(shield)).toMatchObject({ stickerSend: busy.stickerSend, chat: busy.chat, stickerShield: shield.stickerShield });
+  expect(publishers[0].next(shield)).toBeUndefined();
+  expect(statusUpdate(shield).stickerShield?.image).toBe('capture');
+});
+
+test('failed status and chrome deliveries do not advance their baselines', () => {
+  const deliver = vi.fn(), publisher = new StatusPublisher(deliver), initial = status();
+  publisher.next(initial);
+  const changed = { ...initial, sequence: 2, message: 'Sending' };
+  deliver.mockImplementationOnce(() => { throw new Error('delivery failed'); });
+  expect(() => publisher.next(changed)).toThrow('delivery failed');
+  expect(publisher.next(changed)).toEqual({ sequence: 2, message: 'Sending' });
+  expect(publisher.next(changed)).toBeUndefined();
+
+  const sendChrome = vi.fn(), sync = new ChromeSync(sendChrome);
+  const command = { type: 'chrome' as const, panel: 'stickers' as const, pending: false, panelBounds: null };
+  sendChrome.mockImplementationOnce(() => { throw new Error('delivery failed'); });
+  expect(() => sync.next(command)).toThrow('delivery failed');
+  expect(sync.next(command)).toEqual(command);
+  expect(sync.next(command)).toBeUndefined();
+});
+
+test('a changed shield image is delivered even when its nonce is unchanged', () => {
+  const cache = new StatusCache(), publisher = new StatusPublisher(update => { cache.accept(update); });
+  const bounds = { x: 1, y: 0, width: 100, height: 200 };
+  const initial = { ...status(), stickerShield: { nonce: 'one', image: 'old', bounds, panel: bounds } };
+  publisher.next(initial);
+  const changed = { ...initial, sequence: 2, stickerShield: { ...initial.stickerShield, image: 'new' } };
+  expect(publisher.next(changed)?.stickerShield?.image).toBe('new');
+  expect(cache.accept({ sequence: 0 })?.stickerShield?.image).toBe('new');
+});
+
+test.each(Array.from({ length: 12 }, (_, seed) => seed + 1))('interleaved reads and publications reconstruct full state for every subscriber (seed %i)', seed => {
+  let randomState = seed;
+  const random = (max: number) => { randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0; return randomState % max; };
+  let current: Status = { ...status(), stickerSend: null, stickerShield: null, stickerLocation: null, panel: null, theme: 'dark' };
+  const subscribers = Array.from({ length: 2 }, () => {
+    const subscriber = { cache: new StatusCache(), reconstructed: undefined as Status | undefined };
+    const publisher = new StatusPublisher(update => { subscriber.reconstructed = subscriber.cache.accept(structuredClone(update)); });
+    publisher.next(current);
+    return { subscriber, publisher };
+  });
+  const observable = (snapshot: Status) => { const { sequence: _sequence, ...rest } = snapshot; return rest; };
+  for (let step = 1; step <= 120; step++) {
+    current = { ...current, sequence: step + 1 };
+    switch (random(10)) {
+      case 0: current = { ...current, message: `message ${random(5)}`, runtimePaused: Boolean(random(2)) }; break;
+      case 1: current = { ...current, panel: random(2) ? 'stickers' : null, theme: random(2) ? 'dark' : 'light' }; break;
+      case 2: current = { ...current, state: { ...current.state, global: { ...current.state.global, tone: random(2) ? 'friendly' : 'natural' } } }; break;
+      case 3: {
+        const id = String(random(4)).repeat(64), existing = current.state.stickers.find(s => s.id === id);
+        const stickers = existing ? current.state.stickers.map(s => s.id === id ? { ...s, searchTerms: `term ${step}` } : s) :
+          [...current.state.stickers, { ...sticker, id, searchTerms: `term ${step}` }];
+        current = { ...current, state: { ...current.state, stickers } }; break;
+      }
+      case 4: current = { ...current, state: { ...current.state, stickers: current.state.stickers.slice(1) } }; break;
+      case 5: {
+        const busy = Boolean(random(2));
+        current = { ...current, chat: { ...current.chat, ready: true, canSendSticker: !busy, stickerSendBlockedReason: busy ? 'busy' : undefined },
+          stickerSend: busy ? { id: sticker.id, name: 'A friend', nonce: `maker ${step}`, route: 'maker', animated: false, state: 'preparing' } : null }; break;
+      }
+      case 6: {
+        const bounds = { x: 1, y: 0, width: step, height: 200 };
+        current = { ...current, stickerShield: random(3) ? { nonce: current.stickerShield?.nonce ?? `shield ${step}`,
+          image: current.stickerShield?.image ?? `capture ${step}`, bounds, panel: bounds } : null }; break;
+      }
+      case 7: current = { ...current, pending: random(2) ? { text: `pending ${step}`, due: step } : null }; break;
+      case 8: current = { ...current, state: { ...current.state, conversations: { hidden: [String(step)] } } }; break;
+      // No observable change: suppression must also preserve delivered history.
+    }
+    for (let read = 0, count = random(6); read < count; read++) {
+      const full = new StatusCache().accept(statusUpdate(current))!;
+      expect(full.stickerShield).toEqual(current.stickerShield);
+    }
+    if (random(8) === 0) {
+      const { subscriber, publisher } = subscribers[random(subscribers.length)];
+      subscriber.cache = new StatusCache(); subscriber.reconstructed = undefined; publisher.reset();
+    }
+    const full = new StatusCache().accept(statusUpdate(current))!;
+    for (const { subscriber, publisher } of subscribers) {
+      publisher.next(current);
+      expect(observable(subscriber.reconstructed!)).toEqual(observable(full));
+    }
+  }
 });

@@ -1,9 +1,10 @@
 import { beforeEach, afterEach, test, expect, vi } from 'vitest';
 import type { EventEmitter } from 'node:events';
-import { emptySnapshot, initialState, type Snapshot, type Status, type State, type ViewBounds } from '../src/shared/model';
+import { emptySnapshot, initialState, type Snapshot, type Status, type StatusUpdate, type State, type ViewBounds } from '../src/shared/model';
+import { StatusCache } from '../src/core/status';
 import { STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS } from '../src/shared/sticker-transfer';
 
-type Contents = EventEmitter & { mainFrame: { url: string }; send: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; isFocused: ReturnType<typeof vi.fn>; session: { protocol: { handle: ReturnType<typeof vi.fn> } } };
+type Contents = EventEmitter & { mainFrame: { url: string }; send: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; capturePage: ReturnType<typeof vi.fn>; isFocused: ReturnType<typeof vi.fn>; session: { protocol: { handle: ReturnType<typeof vi.fn> } } };
 const mocks = vi.hoisted(() => ({
   views: [] as { webContents: Contents; getBounds: () => ViewBounds }[],
   win: undefined as (EventEmitter & { contentView: EventEmitter; close: () => void }) | undefined,
@@ -147,6 +148,94 @@ const inputBlocked = (input = { type: 'keyDown', key: 'x' }) => {
   const preventDefault = vi.fn(); remote().emit('before-input-event', { preventDefault }, input);
   return preventDefault.mock.calls.length > 0;
 };
+
+const publications = () => controls().send.mock.calls.filter(([channel]) => channel === 'companion:status').map(([, update]) => update as StatusUpdate);
+const chromeCommands = () => remote().send.mock.calls.filter(([channel, command]) => channel === 'companion:command' && command.type === 'chrome');
+
+test('status polling during pending maker capture preserves the subscriber send and busy chat update', async () => {
+  await action({ type: 'cancelSticker' });
+  await vi.advanceTimersByTimeAsync(STICKER_MAKER_CLEANUP_MS);
+  const cache = new StatusCache();
+  mocks.ipc!.emit('companion:subscribe', eventFor(controls()));
+  cache.accept(publications().at(-1)!);
+  expect(status().chat.canSendSticker).toBe(true);
+  controls().send.mockClear();
+  let finishCapture!: () => void;
+  remote().capturePage.mockImplementationOnce(() => new Promise(resolve => {
+    finishCapture = () => resolve({ isEmpty: () => false, resize: () => ({ toJPEG: () => Buffer.from('fixture shield') }) });
+  }));
+  const nextNonce = '550e8400-e29b-41d4-a716-446655440001';
+  const sending = action({ type: 'sendSticker', id: 'a'.repeat(64), nonce: nextNonce, destinationToken: status().chat.destinationToken });
+  for (let read = 0; read < 5; read++) {
+    expect(status()).toMatchObject({ stickerSend: { nonce: nextNonce, state: 'preparing' }, chat: { canSendSticker: false, stickerSendBlockedReason: 'busy' } });
+  }
+  expect(publications()).toHaveLength(0);
+  finishCapture();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(publications()[0]).toMatchObject({ stickerSend: { nonce: nextNonce, state: 'preparing' },
+    chat: { canSendSticker: false, stickerSendBlockedReason: 'busy' }, stickerShield: { nonce: nextNonce, image: expect.any(String) } });
+  for (const update of publications()) cache.accept(update);
+  expect(cache.accept({ sequence: 0 })).toMatchObject({ stickerSend: status().stickerSend, chat: status().chat, stickerShield: status().stickerShield });
+  mocks.handlers.get('companion:shield-ready')!(eventFor(controls()), { nonce: nextNonce, reducedMotion: true });
+  expect(await sending).toEqual({ ok: true });
+});
+
+test.each(['did-start-loading', 'did-finish-load', 'render-process-gone', 'destroyed'])('controls %s resets status and the next publication is complete', async event => {
+  await action({ type: 'cancelSticker' });
+  controls().send.mockClear();
+  controls().emit(event);
+  await action({ type: 'panel', panel: 'stickers' });
+  const update = publications()[0];
+  expect(update.state?.stickers).toHaveLength(1);
+  expect(update).toHaveProperty('chat'); expect(update).toHaveProperty('keys');
+  expect(new StatusCache().accept(update)).toBeDefined();
+});
+
+test.each(['reload', 'crash and reload'])('controls %s closes the panel and publishes a reopened panel to the fresh consumer', async kind => {
+  await action({ type: 'cancelSticker' });
+  if (kind === 'crash and reload') controls().emit('render-process-gone');
+  controls().emit('did-start-navigation', {}, controls().mainFrame.url, false, true);
+  controls().emit('did-start-loading');
+  controls().send.mockClear();
+  controls().emit('did-finish-load');
+  const cache = new StatusCache();
+  expect(cache.accept(publications()[0])?.panel).toBeNull();
+  // One-shot reads remain complete without changing subscription history.
+  expect(cache.accept(status())?.panel).toBeNull();
+  controls().send.mockClear();
+  await action({ type: 'panel', panel: 'stickers' });
+  for (const update of publications()) cache.accept(update);
+  expect(cache.accept({ sequence: 0 })?.panel).toBe('stickers');
+});
+
+test('controls reload resends shield bytes for the same nonce, and subscriptions always receive complete status', () => {
+  controls().send.mockClear();
+  controls().emit('did-start-loading');
+  controls().emit('did-finish-load');
+  expect(publications()[0].stickerShield).toMatchObject({ nonce, image: expect.any(String) });
+  for (let i = 0; i < 2; i++) {
+    controls().send.mockClear();
+    mocks.ipc!.emit('companion:subscribe', eventFor(controls()));
+    expect(publications()).toHaveLength(1);
+    expect(new StatusCache().accept(publications()[0])).toMatchObject({ panel: 'stickers', stickerShield: { nonce, image: expect.any(String) } });
+  }
+  controls().send.mockClear();
+  mocks.ipc!.emit('companion:subscribe', eventFor(remote()));
+  expect(publications()).toHaveLength(0);
+});
+
+test.each(['did-start-loading', 'did-finish-load', 'render-process-gone', 'destroyed', 'navigation'])('remote %s resets chrome delivery even with unchanged geometry', async event => {
+  await action({ type: 'cancelSticker' });
+  remote().send.mockClear();
+  if (event === 'navigation') remote().emit('did-start-navigation', {}, 'https://web.whatsapp.com/', false, true);
+  else remote().emit(event);
+  mocks.win!.contentView.emit('bounds-changed');
+  expect(chromeCommands().length).toBeGreaterThan(0);
+  expect(chromeCommands().at(-1)![1]).toMatchObject({ panel: 'stickers' });
+  remote().send.mockClear();
+  mocks.win!.contentView.emit('bounds-changed');
+  expect(chromeCommands()).toHaveLength(0);
+});
 
 test.each([false, true])('recent exact-hash discovery is suppressed only while its blob verifies (damaged: %s)', async damaged => {
   const { createHash } = await import('node:crypto');

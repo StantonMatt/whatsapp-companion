@@ -23,7 +23,7 @@ export function statusUpdate(status: Status, previous?: State, previousStatus?: 
     stickerShield.nonce === oldShield.nonce && stickerShield.image === oldShield.image &&
     equal(stickerShield.bounds, oldShield.bounds) && equal(stickerShield.panel, oldShield.panel));
   if (!previousStatus || !sameShield) {
-    if (stickerShield && oldShield?.nonce === stickerShield.nonce) {
+    if (stickerShield && oldShield?.nonce === stickerShield.nonce && oldShield.image === stickerShield.image) {
       const { image: _image, ...shield } = stickerShield; update.stickerShield = shield;
     } else update.stickerShield = stickerShield;
   }
@@ -47,14 +47,20 @@ export function statusUpdate(status: Status, previous?: State, previousStatus?: 
   return update;
 }
 
-// Publication history is independent of initial-subscription reads. Sequence
-// advances only for an observable update, including removals/explicit nulls.
+// History belongs to the current controls consumer, including its shield image.
+// A new consumer must receive a complete status before any smaller deltas.
 export class StatusPublisher {
   private previous?: Status;
+  constructor(private readonly deliver: (update: StatusUpdate) => void) {}
+  reset() { this.previous = undefined; }
   next(status: Status): StatusUpdate | undefined {
     const update = statusUpdate(status, this.previous?.state, this.previous);
+    if (Object.keys(update).length <= 1) return undefined;
+    // Suppressed updates and one-shot statusUpdate reads cannot establish
+    // history. A failed send also leaves the consumer's baseline intact.
+    this.deliver(update);
     this.previous = status;
-    return Object.keys(update).length > 1 ? update : undefined;
+    return update;
   }
 }
 

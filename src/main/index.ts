@@ -139,13 +139,12 @@ async function start() {
     notify: message => { if (!win.isDestroyed()) void dialog.showMessageBox(win, { type: 'info', message, buttons: ['OK'] }).catch(() => {}); }
   });
   let pendingChrome = false;
-  const chromeSync = new ChromeSync();
+  const chromeSync = new ChromeSync(command => remote.webContents.send('companion:command', command));
   const syncChrome = () => {
     if (remote.webContents.isDestroyed()) return;
     const bounds = shieldPanel ?? controls.getBounds(), zoom = remote.webContents.getZoomFactor();
-    const command = chromeSync.next({ type: 'chrome', panel, pending: pendingChrome,
+    chromeSync.next({ type: 'chrome', panel, pending: pendingChrome,
       panelBounds: panel ? { left: bounds.x / zoom, right: (bounds.x + bounds.width) / zoom } : null });
-    if (command) remote.webContents.send('companion:command', command);
   };
   const layout = () => {
     if (win.isDestroyed() || remote.webContents.isDestroyed()) return;
@@ -212,7 +211,11 @@ async function start() {
   });
   remote.webContents.on('focus', () => { if (makerInputOwner && !controls.webContents.isDestroyed()) controls.webContents.focus(); });
   let sequence = 0;
-  const statusPublisher = new StatusPublisher();
+  // This publisher belongs only to the authorized controls webContents.
+  const statusPublisher = new StatusPublisher(update => {
+    controls.webContents.send('companion:status', update);
+    sequence = update.sequence;
+  });
   // Presentation can hold composer readiness during maker teardown. Send
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
@@ -257,8 +260,7 @@ async function start() {
     if (panel === 'chat' && panelChat !== assistant.snapshot.settingsId) { panel = null; panelChat = null; layout(); }
     const next = status();
     pendingChrome = Boolean(assistant.pending); syncChrome();
-    const update = statusPublisher.next({ ...next, sequence: sequence + 1 });
-    if (update) { sequence++; controls.webContents.send('companion:status', update); }
+    statusPublisher.next({ ...next, sequence: sequence + 1 });
   };
   const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => { if (!makerInputOwner) remote.webContents.focus(); } }, publish, fixture);
   let accountSafety: AccountSafetyReason = null;
@@ -402,8 +404,11 @@ async function start() {
     assistant.message = 'Provider configuration changed. Use Test connection to check account access.';
   };
   controls.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
-    if (mainFrame && !inPlace) { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); assistant.activity(); }
+    if (mainFrame && !inPlace) { statusPublisher.reset(); panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); assistant.activity(); }
   });
+  controls.webContents.on('did-start-loading', () => statusPublisher.reset());
+  controls.webContents.on('did-finish-load', () => { statusPublisher.reset(); publish(); });
+  controls.webContents.on('destroyed', () => statusPublisher.reset());
   const stickerInbox = new StickerInbox(store, () => {
     for (const id of stickerBlobErrors.keys()) {
       if (!store.state.stickers.some(s => s.id === id)) stickerBlobErrors.delete(id);
@@ -454,6 +459,10 @@ async function start() {
     if (nonce.success && nonce.data === shieldRestoreNonce && !stickerShield) restoreShieldBounds();
   });
   ipcMain.handle('companion:status', event => { if (!isLocal(event)) throw new Error('Denied'); return statusUpdate(status()); });
+  ipcMain.on('companion:subscribe', event => {
+    if (!isLocal(event)) return;
+    statusPublisher.reset(); publish();
+  });
   ipcMain.handle('companion:models', (event, raw: unknown, refresh: unknown = false) => {
     if (!isLocal(event)) return { models: [], error: 'Denied' };
     const parsed = providerSchema.safeParse(raw);
@@ -717,9 +726,11 @@ async function start() {
   controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
   remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); } });
-  controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); });
+  remote.webContents.on('did-start-loading', () => chromeSync.reset());
+  remote.webContents.on('destroyed', () => chromeSync.reset());
+  controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); statusPublisher.reset(); });
   remote.webContents.on('did-finish-load', () => { chromeSync.reset(); syncChrome(); assistant.refresh(true); });
-  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); });
+  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); chromeSync.reset(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
   win.on('close', event => {
     try { conversations.close(); } catch { /* Observations are noncritical; explicit settings saves remain durable. */ }
