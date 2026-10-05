@@ -1,15 +1,119 @@
 import { constants, closeSync, fstatSync, openSync, fsyncSync, readSync, mkdirSync, chmodSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
+import { lstat, open, type FileHandle } from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
 import { join } from 'node:path';
 import { type DiscoveredSticker, type Sticker } from '../shared/model';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
-import { InvalidStickerError, storedSticker } from './sticker-bytes';
+import { InvalidStickerError, storedSticker, verifyStickerBytes } from './sticker-bytes';
 import { atomicWrite, syncDirectory, syncSavedDirectory, type StorageFault } from './store';
 
 export const stickerHash = /^[a-f0-9]{64}$/;
+type ActiveRead = { id: string; invalidated?: 'changed' | 'removed' };
+class StickerReadChangedError extends Error {}
 export class StickerFiles {
   readonly directory: string;
   durabilityWarning = false;
-  constructor(directory: string, private fault?: StorageFault) {
+  private cache = new Map<string, { signature: string; verified: ReturnType<typeof verifyStickerBytes> }>();
+  private cacheBytes = 0;
+  private pending = new Map<string, Promise<ReturnType<typeof verifyStickerBytes>>>();
+  private activeReads = new Set<ActiveRead>();
+  readonly cacheBudget: number;
+  private signature(stat: BigIntStats) {
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  }
+  invalidate(id?: string, reason: 'changed' | 'removed' = 'changed') {
+    // Removal is terminal for requests already in progress, even if the same
+    // hash is subsequently restored before they finish.
+    for (const read of this.activeReads) if ((!id || read.id === id) && read.invalidated !== 'removed') read.invalidated = reason;
+    if (!id) { this.cache.clear(); this.cacheBytes = 0; this.pending.clear(); return; }
+    for (const key of this.pending.keys()) if (key.startsWith(`${id}:`)) this.pending.delete(key);
+    const old = this.cache.get(id);
+    if (old) { this.cacheBytes -= old.verified.bytes.length; this.cache.delete(id); }
+  }
+  // Every request checks the actual opened file, even a cache hit. HTTP cache
+  // revalidation therefore cannot hide deletion, symlinks or later corruption.
+  async readBytes(id: string) {
+    this.path(id);
+    const read: ActiveRead = { id };
+    this.activeReads.add(read);
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const verified = await this.readBytesOnce(id, read);
+          this.checkRead(read);
+          return verified;
+        } catch (error) {
+          // Repairs can replace an opened inode or fix a failed read. Reopen
+          // once, but never revive a request cancelled by Forget or deletion.
+          if (attempt || read.invalidated === 'removed' || (read.invalidated !== 'changed' && !(error instanceof StickerReadChangedError))) throw error;
+          read.invalidated = undefined;
+        }
+      }
+    } finally { this.activeReads.delete(read); }
+  }
+  private checkRead(read: ActiveRead) {
+    if (read.invalidated) throw new StickerReadChangedError('Sticker cache invalidated during read.');
+  }
+  private async readBytesOnce(id: string, read: ActiveRead) {
+    const path = this.path(id);
+    let handle: FileHandle | undefined;
+    try {
+      if (!(await lstat(this.directory)).isDirectory()) throw new InvalidStickerError('Invalid sticker directory.');
+      const fd = handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const stat = await fd.stat({ bigint: true });
+      // Do not let a cancelled attempt register new shared work after the
+      // invalidation has cleared pending entries for its replacement.
+      this.checkRead(read);
+      if (!stat.isFile() || stat.size < 12n || stat.size > BigInt(MAX_STICKER_BYTES)) throw new InvalidStickerError('Invalid sticker file.');
+      const signature = this.signature(stat), cached = this.cache.get(id);
+      if (cached?.signature === signature) {
+        this.checkRead(read);
+        this.cache.delete(id); this.cache.set(id, cached);
+        return cached.verified;
+      }
+      if (cached) { this.cache.delete(id); this.cacheBytes -= cached.verified.bytes.length; }
+      const key = `${id}:${signature}`;
+      let work = this.pending.get(key);
+      if (!work) {
+        work = (async () => {
+          const buffer = Buffer.allocUnsafe(Number(stat.size) + 1);
+          let length = 0;
+          while (length < buffer.length) {
+            const { bytesRead } = await fd.read(buffer, length, buffer.length - length, null);
+            if (!bytesRead) break;
+            length += bytesRead;
+          }
+          if (BigInt(length) !== stat.size || this.signature(await fd.stat({ bigint: true })) !== signature) throw new StickerReadChangedError('Sticker file changed during read.');
+          const verified = verifyStickerBytes(buffer.subarray(0, length), id);
+          this.checkRead(read);
+          if (verified.bytes.length <= this.cacheBudget) {
+            const replaced = this.cache.get(id);
+            if (replaced) { this.cacheBytes -= replaced.verified.bytes.length; this.cache.delete(id); }
+            while (this.cacheBytes + verified.bytes.length > this.cacheBudget && this.cache.size) {
+              const oldest = this.cache.keys().next().value!;
+              this.cacheBytes -= this.cache.get(oldest)!.verified.bytes.length; this.cache.delete(oldest);
+            }
+            this.cache.set(id, { signature, verified }); this.cacheBytes += verified.bytes.length;
+          }
+          return verified;
+        })();
+        this.pending.set(key, work);
+        void work.finally(() => { if (this.pending.get(key) === work) this.pending.delete(key); }).catch(() => {});
+      }
+      const verified = await work;
+      this.checkRead(read);
+      if (this.signature(await fd.stat({ bigint: true })) !== signature) throw new StickerReadChangedError('Sticker file changed during read.');
+      return verified;
+    } catch (error) {
+      const cached = this.cache.get(id);
+      // Invalidation already evicted the old entry; do not evict a newer
+      // request's verified replacement while the old handle is finishing.
+      if (cached && !read.invalidated) { this.cacheBytes -= cached.verified.bytes.length; this.cache.delete(id); }
+      throw error;
+    } finally { await handle?.close(); }
+  }
+  constructor(directory: string, private fault?: StorageFault, cacheBudget = 64 * 1024 * 1024) {
+    this.cacheBudget = cacheBudget;
     this.directory = join(directory, 'stickers');
   }
   private path(id: string) {
@@ -43,7 +147,7 @@ export class StickerFiles {
       }
       if (length !== stat.size || fstatSync(fd).size !== stat.size) throw new Error('Sticker file changed during read.');
       const bytes = buffer.subarray(0, length);
-      return storedSticker(`data:image/webp;base64,${bytes.toString('base64')}`, id);
+      return { ...verifyStickerBytes(bytes, id), image: `data:image/webp;base64,${bytes.toString('base64')}` };
     } finally { closeSync(fd); }
   }
   retryDirectorySync() {
@@ -69,18 +173,28 @@ export class StickerFiles {
       }
     }
     if (exists) {
-      chmodSync(path, 0o600);
+      // chmod, even to the same mode, changes ctime and defeats both cached
+      // and in-flight signature checks on harmless rediscovery.
+      if ((lstatSync(path).mode & 0o7777) !== 0o600) chmodSync(path, 0o600);
       const fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW); // Writable for Windows FlushFileBuffers.
       try { fsyncSync(fd); } finally { closeSync(fd); }
       this.durabilityWarning = !syncSavedDirectory(this.directory, this.fault, `blob:${sticker.id}`);
-    } else this.durabilityWarning = !atomicWrite(path, verified.bytes, this.fault, `blob:${sticker.id}`);
+    } else {
+      this.durabilityWarning = !atomicWrite(path, verified.bytes, this.fault, `blob:${sticker.id}`);
+      this.invalidate(sticker.id);
+    }
     this.read(sticker.id); this.fault?.(`blob:${sticker.id}:verified`);
     return { ...metadata, groups: [], kind: verified.animated ? 'animated' : 'static', size: verified.bytes.length };
   }
   remove(id: string) {
     this.retryDirectorySync();
-    try { unlinkSync(this.path(id)); this.durabilityWarning = !syncSavedDirectory(this.directory, this.fault, 'blob:remove'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try {
+      unlinkSync(this.path(id)); this.invalidate(id, 'removed');
+      this.durabilityWarning = !syncSavedDirectory(this.directory, this.fault, 'blob:remove');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      this.invalidate(id, 'removed');
+    }
   }
   gc(references: string[]) {
     this.ensureDirectory();
@@ -90,7 +204,12 @@ export class StickerFiles {
       if (!match || (live.has(match[1]) && !name.endsWith('.tmp'))) continue;
       const path = join(this.directory, name);
       try {
-        if (lstatSync(path).isFile()) { this.fault?.(`gc:${name}:remove`); unlinkSync(path); this.durabilityWarning = true; }
+        if (lstatSync(path).isFile()) {
+          this.fault?.(`gc:${name}:remove`);
+          unlinkSync(path);
+          if (!name.endsWith('.tmp')) this.invalidate(match[1], 'removed');
+          this.durabilityWarning = true;
+        }
       } catch { /* A failed orphan cleanup must not block other files or library startup. */ }
     }
     this.durabilityWarning = !syncSavedDirectory(this.directory, this.fault, 'blob:gc');

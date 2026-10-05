@@ -3,6 +3,7 @@ import { act } from 'react';
 import type { Root } from 'react-dom/client';
 import { expect, test, vi } from 'vitest';
 import { emptySnapshot, initialState, type Status, type StatusUpdate } from '../src/shared/model';
+import { StatusCache, StatusPublisher, statusUpdate } from '../src/core/status';
 
 const stickerActions = vi.hoisted(() => [] as ((action: { type: 'cancelAuto' }) => Promise<boolean>)[]);
 vi.mock('../src/ui/stickers', async () => {
@@ -67,6 +68,34 @@ test('App keeps its action callback stable through status updates and retains ac
     await act(async () => document.querySelector<HTMLButtonElement>('.panel button')!.click());
     expect(document.querySelector('.error-banner')).toBeNull();
     expect(action).toHaveBeenCalledWith({ type: 'cancelAuto' });
+  } finally {
+    await act(async () => mounted.root?.unmount());
+    expect(unsubscribe).toHaveBeenCalledOnce(); document.body.replaceChildren(); vi.unstubAllGlobals();
+  }
+});
+
+test.each(['reload', 'crash and reload'])('controls %s renders the reopened sticker panel from the refreshed publication baseline', async kind => {
+  vi.resetModules(); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  document.body.innerHTML = '<div id="root"></div>';
+  let receive: (update: StatusUpdate) => void = () => {};
+  const publisher = new StatusPublisher(update => receive(update)), unsubscribe = vi.fn();
+  const previous: Status = { sequence: 1, state: initialState(), chat: { ...emptySnapshot, canSendSticker: false }, runtimePaused: false,
+    keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: '', pending: null, panel: 'stickers' };
+  publisher.next(previous);
+  if (kind === 'crash and reload') publisher.reset();
+  let current: Status = { ...previous, panel: null };
+  Object.assign(window, { companion: {
+    status: async () => new StatusCache().accept(statusUpdate(current))!,
+    subscribe: (callback: typeof receive) => { receive = callback; publisher.reset(); publisher.next(current); return unsubscribe; },
+    action: vi.fn(async () => ({ ok: true }))
+  } });
+  try {
+    await act(async () => { await import('../src/ui/index'); });
+    expect(document.querySelector('aside')).toBeNull();
+    current = { ...current, sequence: 2, panel: 'stickers' };
+    await act(async () => { publisher.next(current); });
+    expect(document.querySelector('aside')?.getAttribute('aria-label')).toBe('Sticker library');
+    expect(document.querySelector('aside')?.textContent).toContain('Fixture action');
   } finally {
     await act(async () => mounted.root?.unmount());
     expect(unsubscribe).toHaveBeenCalledOnce(); document.body.replaceChildren(); vi.unstubAllGlobals();
