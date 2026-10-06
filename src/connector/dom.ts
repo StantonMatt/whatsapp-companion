@@ -368,26 +368,45 @@ export class DomConnector {
     return Boolean(element?.closest('#companion-overlay, #companion-navigation, #companion-chat-settings'));
   }
   private mutations(records: MutationRecord[], schedule = true) {
-    let relevant = false;
+    let relevant = false, traversed = 0, processed = 0;
+    const limit = 512;
+    const overflow = () => {
+      // Reset rather than leave recycled/detached messages cached incorrectly.
+      this.messageCache = new WeakMap(); this.layoutDirty = true; this.stickersDirty = true; relevant = true;
+    };
     for (const record of records) {
-      if (record.type === 'childList') {
-        // Detached edits escape observation. Reattachment/moves target the
-        // container, so invalidate every cached bubble in the changed subtrees,
-        // even if it is connected again by the time records are delivered.
-        for (const node of [...record.addedNodes, ...record.removedNodes]) {
-          if (!(node instanceof Element)) continue;
-          if (node instanceof HTMLElement) this.messageCache.delete(node);
-          // A recycled bubble may have lost its data-id while detached.
-          for (const descendant of node.querySelectorAll<HTMLElement>('*')) this.messageCache.delete(descendant);
-        }
-      }
+      if (++processed > 200) { overflow(); break; }
       if (this.owned(record.target) || (record.target === this.hiddenPlaceholder?.element && record.attributeName === 'style')) continue;
-      const changed = [...record.addedNodes, ...record.removedNodes];
+      const changed: Node[] = [];
+      for (const nodes of [record.addedNodes, record.removedNodes]) {
+        for (const node of nodes) {
+          if (++traversed > limit) break;
+          changed.push(node);
+        }
+        if (traversed > limit) break;
+      }
+      if (traversed > limit) { overflow(); break; }
       if (record.type === 'childList' && changed.length && changed.every(node => this.owned(node))) continue;
       const element = record.target instanceof Element ? record.target : record.target.parentElement;
       if (!element) continue;
+      // Filter before walking descendants. Companion-owned/irrelevant mutations
+      // must never trigger subtree invalidation.
       if (element !== this.doc.body && !element.closest(relevantUI) && !element.querySelector(relevantUI) &&
           !changed.some(node => node instanceof Element && (node.matches(relevantUI) || node.querySelector(relevantUI)))) continue;
+      if (record.type === 'childList') {
+        for (const node of changed) {
+          if (!(node instanceof Element)) continue;
+          if (node instanceof HTMLElement) this.messageCache.delete(node);
+          const walker = this.doc.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+          let descendant: Node | null;
+          while ((descendant = walker.nextNode())) {
+            if (++traversed > limit) break;
+            if (descendant instanceof HTMLElement) this.messageCache.delete(descendant);
+          }
+          if (traversed > limit) break;
+        }
+        if (traversed > limit) { overflow(); break; }
+      }
       // Observe body to retain portalled picker, warning and login detection, but
       // ignore irrelevant attributes and our own DOM. Bubble attributes are all
       // relevant to extraction (emoji, quotes, media and recycled message nodes).
@@ -396,8 +415,11 @@ export class DomConnector {
       const attribute = record.attributeName ?? '';
       if (!bubble && !structural && !/^(?:data-.+|class|style|hidden|title|contenteditable|aria-.+|src|alt)$/.test(attribute)) continue;
       relevant = true;
-      for (let node: HTMLElement | null = bubble; node; node = node.parentElement?.closest<HTMLElement>('[data-id]') ?? null)
+      for (let node: HTMLElement | null = bubble; node; node = node.parentElement?.closest<HTMLElement>('[data-id]') ?? null) {
+        if (++traversed > limit) { overflow(); break; }
         this.messageVersions.set(node, (this.messageVersions.get(node) ?? 0) + 1);
+      }
+      if (traversed > limit) break;
       if (structural || /^(?:class|style|hidden|contenteditable|aria-.+|data-.+)$/.test(attribute)) this.layoutDirty = true;
       if ((structural || ['src', 'srcset', 'alt', 'data-testid'].includes(attribute)) &&
           ((element.matches(stickerSelector) || element.closest('[data-testid*="sticker"], [data-testid="expressions-panel"]')) ||

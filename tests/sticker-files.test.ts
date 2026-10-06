@@ -826,3 +826,84 @@ test('no-op saves still retry outstanding directory durability warnings', () => 
   expect(store.state).toBe(state); expect(store.durabilityWarning).toBe(false);
   expect(steps).toContain('manifest:retry:directory-sync'); expect(steps).not.toContain('manifest:write'); warning.mockRestore();
 });
+
+
+test('deferred startup GC leaves durable migration intact and uses references at collection time', () => {
+  const dir = directory(), legacy = seed(dir), timing = vi.fn();
+  const gc = vi.spyOn(StickerFiles.prototype, 'gc');
+  const store = new Store(dir, undefined, { deferGC: true, timing });
+  expect(gc).not.toHaveBeenCalled();
+  expect(load(dir).version).toBe(2);
+  expect(JSON.parse(readFileSync(join(dir, 'companion.v1-backup.json'), 'utf8'))).toEqual(legacy);
+  for (const entry of legacy.stickers) expect(store.readSticker(entry.id).image).toBe(entry.image);
+  expect(timing).toHaveBeenCalledWith('migration', expect.any(Number));
+  const later = observation('reencoded');
+  const metadata = store.stickerFiles.write(later);
+  store.update(state => { state.stickers.push({ ...metadata, searchTerms: later.searchTerms, firstSeen: later.firstSeen, lastSeen: later.lastSeen }); });
+  store.collectGarbage(timing);
+  expect(gc).toHaveBeenCalledTimes(1);
+  expect(store.readSticker(later.id).image).toBe(later.image);
+  expect(timing).toHaveBeenCalledWith('gc', expect.any(Number));
+});
+test('deferred GC never deletes preserved files after a missing manifest', () => {
+  const dir = directory(); seed(dir); new Store(dir);
+  unlinkSync(manifest(dir));
+  const recovered = new Store(dir, undefined, { deferGC: true });
+  recovered.collectGarbage();
+  expect(existsSync(blob(dir))).toBe(true);
+  expect(existsSync(blob(dir, observation('animated').id))).toBe(true);
+});
+
+
+test.each(['single', 'bulk'] as const)('Forget %s before deferred GC preserves crash-restorable bytes while directory sync fails', mode => {
+  const dir = directory(); seed(dir); new Store(dir);
+  const previousManifest = readFileSync(manifest(dir), 'utf8');
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const store = new Store(dir, step => { if (step.includes('directory-sync') && step.startsWith('manifest')) throw new Error('sync failed'); }, { deferGC: true });
+  const gc = vi.spyOn(store.stickerFiles, 'gc');
+  const ids = mode === 'single' ? [observation().id] : [observation().id, observation('animated').id];
+  if (mode === 'single') store.forgetSticker(ids[0]); else store.forgetStickers(ids);
+  expect(store.durabilityWarning).toBe(true);
+  expect(store.state.forgottenStickers).toEqual(expect.arrayContaining(ids));
+  store.collectGarbage();
+  expect(gc).not.toHaveBeenCalled();
+  for (const id of ids) expect(existsSync(blob(dir, id))).toBe(true);
+  // Simulate a crash losing the unsynced manifest replacement, then reload
+  // the prior durable reference set and perform ordinary startup collection.
+  writeFileSync(manifest(dir), previousManifest);
+  const restarted = new Store(dir);
+  for (const entry of [observation(), observation('animated')]) expect(restarted.readSticker(entry.id).image).toBe(entry.image);
+});
+test('deferred GC resumes only after a later write confirms manifest durability', () => {
+  const dir = directory(); seed(dir); new Store(dir);
+  let fail = true;
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const store = new Store(dir, step => { if (fail && step.startsWith('manifest') && step.includes('directory-sync')) throw new Error('sync failed'); }, { deferGC: true });
+  store.forgetSticker(observation().id); store.collectGarbage();
+  expect(existsSync(blob(dir))).toBe(true);
+  fail = false; store.update(() => {});
+  expect(store.durabilityWarning).toBe(false);
+  store.collectGarbage();
+  expect(existsSync(blob(dir))).toBe(false);
+  expect(store.readSticker(observation('animated').id).image).toBe(observation('animated').image);
+});
+test.each(['backup', 'manifest', 'recovery'] as const)('startup GC skips collection with an outstanding %s durability warning and keeps recovery anchors', prefix => {
+  const dir = directory(), legacy = seed(dir);
+  const ids = legacy.stickers.map(sticker => sticker.id);
+  const recoveryPath = join(dir, 'sticker-recovery.json');
+  writeFileSync(recoveryPath, JSON.stringify(ids));
+  let fail = true;
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const gc = vi.spyOn(StickerFiles.prototype, 'gc');
+  const store = new Store(dir, step => { if (fail && step === `${prefix}:directory-sync`) throw new Error('sync failed'); });
+  expect(store.durabilityWarning).toBe(true);
+  expect(gc).not.toHaveBeenCalled();
+  // A manifest/backup warning must also prevent recovery record cleanup;
+  // recovery cleanup sync can itself fail after unlinking the resolved record.
+  expect(existsSync(recoveryPath)).toBe(prefix !== 'recovery');
+  for (const entry of legacy.stickers) expect(store.readSticker(entry.id).image).toBe(entry.image);
+  fail = false; store.update(() => {}); store.collectGarbage();
+  expect(store.durabilityWarning).toBe(false);
+  expect(gc).toHaveBeenCalledTimes(1);
+  expect(existsSync(recoveryPath)).toBe(false);
+});

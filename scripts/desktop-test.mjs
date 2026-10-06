@@ -4,16 +4,24 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
+const fixturePage = page => page.url().split('#')[0].endsWith('fixture.html');
 const dir = await mkdtemp(join(tmpdir(), 'companion-desktop-'));
 // Main-only state (forgotten ids, fingerprints) is not sent to the controls view; read it from the saved manifest.
 const savedState = async (dataDir = dir) => JSON.parse(await readFile(join(dataDir, 'companion.json'), 'utf8'));
 await mkdir('.local/screenshots', { recursive: true });
 let app;
 try {
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } });
+  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-splash', `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } });
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const local = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
-  const remote = await expect.poll(async () => (await app.windows()).find(p => p.url().endsWith('fixture.html'))).not.toBeUndefined().then(async () => (await app.windows()).find(p => p.url().endsWith('fixture.html')));
+  const remote = await expect.poll(async () => (await app.windows()).find(p => fixturePage(p))).not.toBeUndefined().then(async () => (await app.windows()).find(p => fixturePage(p)));
+  await expect(remote.locator('#initial_startup')).toBeVisible();
+  expect(await remote.locator('#companion-overlay').count()).toBe(0);
+  expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(false);
+  await expect(remote.locator('#pane-side')).toBeVisible({ timeout: 10000 });
+  await expect(remote.locator('#companion-overlay')).toHaveCount(1);
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(true);
+  console.log('PASS splash defers connector activation and throttling restores on shell');
   // Exercise the page's native copy APIs with trusted user input. The fixture
   // has the same scoped permission policy, with no renderer clipboard bridge.
   try {
@@ -699,12 +707,26 @@ try {
     document.addEventListener('selectionchange', selection); editor.addEventListener('input', input);
     window.finishSelectionFixture = () => { document.removeEventListener('selectionchange', selection); editor.removeEventListener('input', input); };
   });
-  const bounds = await editor.boundingBox();
-  await remote.mouse.click(bounds.x + bounds.width - 17, bounds.y - 16);
+  // The previous draft was tall and wrapped; its trigger geometry can still
+  // be awaiting a frame after fill shrinks the editor. Click the actual control
+  // and verify its field, so Enter cannot reach the fixture's native send path.
+  await clickAssistant('Refine draft');
+  const refinementField = async () => {
+    // The earlier consent check detached its session; use a fresh one per probe.
+    const session = await remote.context().newCDPSession(remote);
+    try { return (await session.send('Accessibility.getFullAXTree')).nodes.find(node => node.role?.value === 'textbox' && node.name?.value === 'Refinement instruction'); }
+    finally { await session.detach(); }
+  };
+  await expect.poll(async () => Boolean(await refinementField())).toBe(true);
   await remote.waitForTimeout(700); // The refinement form must survive snapshot polling while the user thinks.
+  await expect.poll(async () => (await refinementField())?.properties?.some(property => property.name === 'focused' && property.value?.value === true)).toBe(true);
+  // Keep the fixture reply pending long enough to observe the loading dots on a busy machine.
+  await app.evaluate(() => { globalThis.fixtureGenerationDelayMs = 2000; });
   await remote.keyboard.type('Make it warmer');
   await remote.keyboard.press('Enter');
+  expect(await remote.evaluate(() => window.fixtureSent)).toEqual([]);
   await expectDots('A long draft to make warmer');
+  await app.evaluate(() => { delete globalThis.fixtureGenerationDelayMs; });
   await editor.click(); // Refocusing must not cancel the in-flight edit.
   await expect(editor).toHaveText('That sounds lovely. See you then!');
   await remote.screenshot({ path: '.local/screenshots/refinement.png' });
@@ -1053,7 +1075,8 @@ try {
   const capturePickerLayout = () => app.evaluate(({ Menu }) => {
     Menu.getApplicationMenu().items.find(item => item.label === 'Companion').submenu.items.find(item => item.label === 'Capture sticker picker layout').click();
   });
-  const diagnosticFiles = async () => readdir(join(dir, 'diagnostics')).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  // Other diagnostics (e.g. startup.log) share the folder; only picker captures matter here.
+  const diagnosticFiles = async () => (await readdir(join(dir, 'diagnostics')).catch(error => { if (error.code === 'ENOENT') return []; throw error; })).filter(name => name.startsWith('sticker-picker-'));
   try {
     await expect(nativeStickerPicker).toHaveCount(0);
     await capturePickerLayout();
@@ -2530,7 +2553,7 @@ try {
   await assertDirectPreference(true, reopened);
   console.log('PASS direct sticker opt-in survives unrelated preference patches and actual application restart');
   await reopened.getByLabel('Close panel').click();
-  const remoteReopened = (await app.windows()).find(p => p.url().endsWith('fixture.html'));
+  const remoteReopened = (await app.windows()).find(p => fixturePage(p));
   expect((await savedState()).forgottenStickers).toContain(otherStickerId);
   await observeFixtureImage(app, forgottenFixtureImage);
   await remoteReopened.waitForTimeout(750);
@@ -2592,6 +2615,29 @@ try {
   await expect.poll(() => migrated.locator(`[data-sticker="${migrationId}"] img`).evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
   await expect(migrated.getByRole('button', { name: 'Image unavailable. Retry' })).toHaveCount(0);
   console.log('PASS missing blobs retain cards, sends fail closed, and restoring the file plus Retry recovers the image');
+
+  await app.close(); app = undefined;
+  const watchdogDir = join(dir, 'startup-watchdog');
+  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-watchdog', `--data-dir=${watchdogDir}`], timeout: 30000 });
+  const startupRecords = async () => {
+    try { return (await readFile(join(watchdogDir, 'diagnostics/startup.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
+    catch { return []; }
+  };
+  await expect.poll(async () => (await startupRecords()).filter(record => record.event === 'reload').length, { timeout: 20000 }).toBe(2);
+  await expect.poll(async () => (await startupRecords()).some(record => record.decision === 'exhausted'), { timeout: 10000 }).toBe(true);
+  const stuck = (await app.windows()).find(fixturePage);
+  expect(await stuck.locator('#companion-overlay').count()).toBe(0);
+  await stuck.waitForTimeout(2500);
+  expect((await startupRecords()).filter(record => record.event === 'reload')).toHaveLength(2);
+  // Exercise the close race against real disposed frames and thrown IPC sends.
+  await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    win.contentView.children[0].webContents.close();
+    win.contentView.children[1].webContents.send = () => { throw new Error('fixture disposed send'); };
+  });
+  await app.close(); app = undefined;
+  expect((await startupRecords()).some(record => record.event === 'quit')).toBe(true);
+  console.log('PASS stuck splash uses exactly two ordinary reloads, then stops; disposed frames still quit');
 
 } catch (error) {
   if (app) { const pages = await app.windows(); for (const page of pages) console.log(page.url(), (await page.locator('body').innerText()).slice(0, 2500)); }

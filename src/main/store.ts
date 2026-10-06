@@ -65,7 +65,7 @@ export class Store {
   private manifestDurabilityWarning = false;
   get durabilityWarning() { return this.manifestDurabilityWarning || this.stickerFiles.durabilityWarning; }
   recoveryHint?: string;
-  constructor(directory: string, private fault?: StorageFault) {
+  constructor(directory: string, private fault?: StorageFault, options: { deferGC?: boolean; timing?: (phase: 'migration' | 'gc', durationMs: number) => void } = {}) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.path = join(directory, 'companion.json');
     this.stickerFiles = new StickerFiles(directory, fault);
@@ -85,6 +85,7 @@ export class Store {
     if (loadedManifest) {
       const original = readFileSync(this.path, 'utf8'), raw: unknown = JSON.parse(original);
       if ((raw as { version?: unknown })?.version === 1) {
+        const migrationStarted = performance.now();
         const legacy = legacyStateSchema.parse(raw);
         // Validate ALL bytes and metadata before writing even the backup.
         const stickers = legacy.stickers.map(({ image, ...metadata }) => {
@@ -99,6 +100,7 @@ export class Store {
         fault?.('migration:verified');
         this.manifestDurabilityWarning = !atomicWrite(this.path, JSON.stringify(next), fault) || this.manifestDurabilityWarning;
         this.state = next;
+        options.timing?.('migration', performance.now() - migrationStarted);
       } else this.state = stateSchema.parse(raw);
     } else this.state = initialState();
     // No manifest means no authoritative reference set: preserve any blobs
@@ -108,11 +110,20 @@ export class Store {
       this.recoveryHint = 'Sticker files were preserved after companion.json was missing. Restore companion.json or companion.v1-backup.json to recover the library.';
       if (loadedManifest) this.finishRecovery();
     }
-    if (loadedManifest) {
-      try { this.stickerFiles.gc([...this.state.stickers.map(s => s.id), ...preserved]); }
-      catch { /* GC is best effort; a valid manifest remains usable during IO failures. */ }
-    }
+    this.gcAllowed = loadedManifest;
+    if (!options.deferGC) this.collectGarbage(options.timing);
     for (const rules of Object.values(this.state.auto)) rules.paused = true;
+  }
+  private gcAllowed = false;
+  collectGarbage(timing?: (phase: 'gc', durationMs: number) => void) {
+    // In-memory references may include a Forget whose replacement manifest
+    // is not crash-durable yet. Keep its bytes (and recovery anchors) until
+    // a subsequent write confirms the containing directory was synced.
+    if (!this.gcAllowed || this.manifestDurabilityWarning) return;
+    const started = performance.now();
+    try { this.stickerFiles.gc([...this.state.stickers.map(s => s.id), ...this.preservedStickerIds]); }
+    catch { /* Best effort; migration/reference validation must finish first. */ }
+    finally { timing?.('gc', performance.now() - started); }
   }
   private finishRecovery(clearRecord = true) {
     if (!this.preservedStickerIds.length || !this.preservedStickerIds.every(id => this.state.stickers.some(s => s.id === id) || this.state.forgottenStickers.includes(id))) return;
@@ -121,7 +132,7 @@ export class Store {
     this.recoveryHint = undefined;
     // Keep the crash-recovery guard until the replacement manifest's directory
     // sync succeeds. The in-memory library is already saved and usable.
-    if (!clearRecord) return;
+    if (!clearRecord || this.manifestDurabilityWarning) return;
     try { this.fault?.('recovery:clear'); unlinkSync(this.recoveryPath); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
