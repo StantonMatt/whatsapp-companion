@@ -4,6 +4,12 @@ import { BootDetector, classifyBoot, BOOT_MAX_DEFERRAL_MS, BOOT_UNKNOWN_GRACE_MS
 import { DomConnector } from '../src/connector/dom';
 import type { RemoteEvent } from '../src/shared/connector';
 import { StartupWatchdog } from '../src/main/startup-watchdog';
+import { bootHeartbeatSchema, bootStructureSchema } from '../src/shared/boot';
+import { StartupDiagnostics } from '../src/main/startup-diagnostics';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { z } from 'zod';
 
 // jsdom has no layout; visible fixture markers need explicit positive geometry.
 beforeEach(() => { vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({ width: 100, height: 100 } as DOMRect); });
@@ -12,24 +18,236 @@ test.each([
   ['<div id="initial_startup"><progress max="100" value="43"></progress></div>', 'splash', 4],
   ['<div id="initial_startup"><progress value="0.5"></progress></div>', 'splash', 5],
   ['<div data-testid="startup-screen"><div role="progressbar" aria-valuenow="75" aria-valuemax="100"></div></div>', 'splash', 7],
+  ['<section><div><progress value="43" max="100"></progress></div></section>', 'splash', 4],
+  ['<div role="progressbar" aria-valuenow="75" aria-valuemax="100"></div>', 'splash', 7],
   ['<div data-testid="qrcode" data-ref="PRIVATE"><canvas></canvas></div>', 'login', null],
   ['<div class="landing-wrapper"></div>', 'login', null],
   ['<div id="pane-side"></div>', 'shell', null],
+  ['<div id="pane-side"><progress value="0.5"></progress></div>', 'shell', null],
+  ['<div data-testid="qrcode"><canvas></canvas><progress value="0.5"></progress></div>', 'login', null],
+  ['<div data-testid="account-warning"></div><progress></progress>', 'blocked', null],
   ['<nav><button data-navbar-item="true"></button></nav>', 'shell', null],
   ['<div data-testid="side-panel"></div>', 'shell', null],
   ['<div data-testid="account-restriction"></div>', 'blocked', null],
-  ['<div>Loading PRIVATE CHAT QR VALUE</div><div role="progressbar"></div>', 'unknown', null],
+  ['<div>Loading PRIVATE CHAT QR VALUE</div><div role="progressbar"></div>', 'splash', null],
   ['<div hidden><div id="pane-side"></div></div>', 'unknown', null]
 ])('fixed markers classify %s', (html, phase, progress) => {
   document.body.innerHTML = html!;
   expect(classifyBoot(document)).toMatchObject({ phase, progress });
   expect(JSON.stringify(classifyBoot(document))).not.toContain('PRIVATE');
 });
+test.each([
+  '<progress hidden></progress>', '<div hidden><progress></progress></div>',
+  '<div aria-hidden="true"><div role="progressbar"></div></div>',
+  '<div style="display:none"><progress></progress></div>',
+  '<progress style="visibility:hidden"></progress>', '<progress style="visibility:collapse"></progress>',
+  '<dialog><progress></progress></dialog>'
+])('hidden generic progress remains unknown: %s', html => {
+  document.body.innerHTML = html;
+  expect(classifyBoot(document)).toMatchObject({ phase: 'unknown', progress: null,
+    structure: { visibleProgress: false, tagName: null, ancestors: [] } });
+});
+test('progress fallback skips hidden candidates and requires positive geometry', () => {
+  document.body.innerHTML = '<progress hidden value="0.1"></progress><progress value="0.7"></progress>';
+  expect(classifyBoot(document)).toMatchObject({ phase: 'splash', progress: 7 });
+  document.body.lastElementChild!.getBoundingClientRect = () => ({ width: 0, height: 100 } as DOMRect);
+  expect(classifyBoot(document).phase).toBe('unknown');
+});
+test('fallback signature contains only bounded allowlisted ancestor structure, never page content', () => {
+  document.body.innerHTML = '<article id="not-collected"><section id="app" data-testid="loading-spinner" class="PRIVATE CLASS"><div id="contact@PRIVATE" data-testid="PRIVATE QR VALUE"><div id="main" data-testid="popup-contents" title="PRIVATE NAME"><progress value="0.4" data-ref="PRIVATE QR">PRIVATE MESSAGE</progress></div></div></section></article>';
+  const observation = classifyBoot(document);
+  expect(observation.structure).toEqual({ visibleProgress: true, tagName: 'PROGRESS', ancestors: [
+    { tagName: 'DIV', id: 'main', idPresent: true, testId: 'popup-contents', testIdPresent: true },
+    { tagName: 'DIV', id: 'other', idPresent: true, testId: 'other', testIdPresent: true },
+    { tagName: 'SECTION', id: 'app', idPresent: true, testId: 'loading-spinner', testIdPresent: true }
+  ] });
+  expect(bootStructureSchema.safeParse(observation.structure).success).toBe(true);
+  expect(JSON.stringify(observation)).not.toMatch(/PRIVATE|class|text|title|data-ref|not-collected/);
+});
+test.each(['contact@domain', 'private name', 'qr/value', '1234', 'x'.repeat(42), 'safe\n', 'user_AliceSmith', 'token_abcdEFGH1234', 'safe-child', ''])('nonallowlisted structural identifiers are redacted and rejected: %j', value => {
+  document.body.innerHTML = '<section><progress></progress></section>';
+  document.body.firstElementChild!.setAttribute('id', value);
+  document.body.firstElementChild!.setAttribute('data-testid', value);
+  const signature = classifyBoot(document).structure!;
+  expect(signature.ancestors[0]).toEqual({ tagName: 'SECTION', id: 'other', idPresent: true, testId: 'other', testIdPresent: true });
+  expect(bootStructureSchema.safeParse(signature).success).toBe(true);
+  for (const field of ['id', 'testId']) expect(bootStructureSchema.safeParse({ ...signature,
+    ancestors: [{ ...signature.ancestors[0], [field]: value }] }).success).toBe(false);
+  if (value) expect(JSON.stringify(signature)).not.toContain(value);
+});
+test('signature distinguishes absent attributes from present but unrecognized attributes', () => {
+  document.body.innerHTML = '<section><progress></progress></section>';
+  expect(classifyBoot(document).structure?.ancestors[0]).toEqual({
+    tagName: 'SECTION', id: null, idPresent: false, testId: null, testIdPresent: false
+  });
+});
+test.each(['user-AliceSmith', 'token-abcdEFGH1234'])('custom tag %s is redacted and cannot reach startup.log', async tag => {
+  document.body.innerHTML = `<${tag} role="progressbar"></${tag}>`;
+  expect(classifyBoot(document).structure?.tagName).toBe('other');
+  document.body.innerHTML = `<${tag}><progress></progress></${tag}>`;
+  const signature = classifyBoot(document).structure!;
+  expect(signature.ancestors[0].tagName).toBe('other');
+  const directory = await mkdtemp(join(tmpdir(), 'startup-tag-privacy-'));
+  try {
+    const logger = new StartupDiagnostics(directory);
+    logger.record('structure', { structure: signature });
+    await logger.flush();
+    const raw = await readFile(join(directory, 'diagnostics/startup.log'), 'utf8');
+    expect(raw.toLowerCase()).not.toContain(tag.toLowerCase());
+    expect(JSON.parse(raw).structure).toEqual(signature);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+  for (const value of [tag, tag.toUpperCase()]) {
+    expect(bootStructureSchema.safeParse({ ...signature, tagName: value }).success).toBe(false);
+    expect(bootStructureSchema.safeParse({ ...signature, ancestors: [{ ...signature.ancestors[0], tagName: value }] }).success).toBe(false);
+  }
+});
+test('standard SVG structural tags remain allowlisted', () => {
+  document.body.innerHTML = '<svg><g><rect role="progressbar"></rect></g></svg>';
+  expect(classifyBoot(document).structure).toMatchObject({ tagName: 'rect', ancestors: [{ tagName: 'g' }, { tagName: 'svg' }, { tagName: 'BODY' }] });
+  expect(bootStructureSchema.safeParse(classifyBoot(document).structure).success).toBe(true);
+});
+test('heartbeat schema contains no unbounded or free-form string fields', () => {
+  let stringFields = 0;
+  function check(node: unknown, path = '') {
+    if (!node || typeof node !== 'object') return;
+    const schema = node as Record<string, unknown>;
+    if (schema.type === 'string') {
+      stringFields++;
+      // The session nonce is a fixed-width UUID; all page-derived strings are enums.
+      expect(Array.isArray(schema.enum) || (path.endsWith('.nonce') && schema.format === 'uuid' &&
+        schema.minLength === 36 && schema.maxLength === 36), path).toBe(true);
+    }
+    for (const [key, value] of Object.entries(schema)) check(value, `${path}.${key}`);
+  }
+  check(z.toJSONSchema(bootHeartbeatSchema));
+  expect(stringFields).toBeGreaterThan(0);
+});
+test.each(['user_AliceSmith', 'token_abcdEFGH1234'])('page identifier %s never reaches startup.log', async value => {
+  document.body.innerHTML = `<section id="${value}" data-testid="${value}"><progress></progress></section>`;
+  const observation = classifyBoot(document);
+  const directory = await mkdtemp(join(tmpdir(), 'startup-page-privacy-'));
+  try {
+    const logger = new StartupDiagnostics(directory);
+    logger.record('structure', { structure: observation.structure });
+    await logger.flush();
+    const raw = await readFile(join(directory, 'diagnostics/startup.log'), 'utf8');
+    expect(raw).not.toContain(value);
+    expect(JSON.parse(raw).structure.ancestors[0]).toEqual({
+      tagName: 'SECTION', id: 'other', idPresent: true, testId: 'other', testIdPresent: true
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test.each(['app', 'main', 'pane-side', 'side', 'initial_startup', 'startup-screen'])('main validation accepts allowlisted structural identifier %s', value => {
+  expect(bootStructureSchema.safeParse({ visibleProgress: true, tagName: 'PROGRESS', ancestors: [
+    { tagName: 'DIV', id: value, idPresent: true, testId: value, testIdPresent: true }
+  ] }).success).toBe(true);
+});
+test('strict heartbeat validation rejects extra content and unbounded or inconsistent signatures', () => {
+  const signature = { visibleProgress: true, tagName: 'PROGRESS', ancestors: [{ tagName: 'DIV', id: null, idPresent: false, testId: null, testIdPresent: false }] };
+  const heartbeat = { nonce: '00000000-0000-4000-8000-000000000001', generation: 1, phase: 'splash', progress: null, visible: true, online: true };
+  expect(bootHeartbeatSchema.safeParse({ ...heartbeat, structure: signature }).success).toBe(true);
+  for (const structure of [
+    { ...signature, text: 'PRIVATE MESSAGE' }, { ...signature, classes: 'PRIVATE' },
+    { ...signature, ancestors: [{ ...signature.ancestors[0], title: 'PRIVATE NAME' }] },
+    { ...signature, ancestors: [{ ...signature.ancestors[0], idPresent: true }] },
+    { ...signature, ancestors: [{ ...signature.ancestors[0], testId: 'other' }] },
+    { ...signature, ancestors: Array(4).fill(signature.ancestors[0]) },
+    { ...signature, visibleProgress: false }, { ...signature, tagName: null },
+    { ...signature, tagName: 'PRIVATE TEXT' }, { ...signature, tagName: 'DIV\n' }
+  ]) expect(bootHeartbeatSchema.safeParse({ ...heartbeat, structure }).success).toBe(false);
+});
+test.each(['', '<section><progress value="0.5"></progress></section>'])('signature is emitted on only the first eligible heartbeat, including after stop/start: %s', html => {
+  vi.useFakeTimers(); document.body.innerHTML = html;
+  vi.spyOn(document, 'readyState', 'get').mockReturnValue('complete');
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {});
+  detector.start();
+  try {
+    expect(Boolean(heartbeat.mock.calls[0][0].structure)).toBe(Boolean(html));
+    vi.advanceTimersByTime(6000);
+    expect(heartbeat.mock.calls.filter(([observation]) => observation.structure)).toHaveLength(1);
+    detector.stop(); detector.start(); vi.advanceTimersByTime(4000);
+    expect(heartbeat.mock.calls.filter(([observation]) => observation.structure)).toHaveLength(1);
+  } finally { detector.stop(); }
+});
+test('known splash markers emit the one-shot signature immediately even while loading', () => {
+  vi.useFakeTimers(); document.body.innerHTML = '<div id="initial_startup"></div>';
+  vi.spyOn(document, 'readyState', 'get').mockReturnValue('loading');
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {});
+  detector.start();
+  try {
+    expect(heartbeat.mock.calls[0][0].structure).toEqual({ visibleProgress: false, tagName: null, ancestors: [] });
+    document.body.innerHTML = '<progress></progress>'; vi.advanceTimersByTime(2000);
+    expect(heartbeat.mock.calls[1][0].structure).toBeUndefined();
+    vi.advanceTimersByTime(4000);
+    expect(heartbeat.mock.calls.filter(([observation]) => observation.structure)).toHaveLength(1);
+  } finally { detector.stop(); }
+});
+test.each(['loading', 'interactive'] as const)('empty %s document preserves its signature for a later progress-only splash', readyState => {
+  vi.useFakeTimers(); vi.spyOn(document, 'readyState', 'get').mockReturnValue(readyState);
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {}, 1000);
+  detector.start();
+  try {
+    vi.advanceTimersByTime(BOOT_UNKNOWN_GRACE_MS + 1000);
+    expect(heartbeat.mock.calls.every(([observation]) => observation.structure === undefined)).toBe(true);
+    document.body.innerHTML = '<section><progress></progress></section>';
+    vi.advanceTimersByTime(1000);
+    expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'splash', structure: expect.objectContaining({
+      visibleProgress: true, tagName: 'PROGRESS', ancestors: expect.arrayContaining([expect.objectContaining({ tagName: 'SECTION' })])
+    }) }));
+    vi.advanceTimersByTime(6000);
+    expect(heartbeat.mock.calls.filter(([observation]) => observation.structure)).toHaveLength(1);
+  } finally { detector.stop(); }
+});
+test('unknown diagnostic requires completion and the existing grace, even beyond the activation cap', () => {
+  vi.useFakeTimers(); const state = vi.spyOn(document, 'readyState', 'get').mockReturnValue('loading');
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {}, 1000);
+  detector.start();
+  try {
+    vi.advanceTimersByTime(BOOT_MAX_DEFERRAL_MS);
+    expect(heartbeat.mock.calls.every(([observation]) => observation.structure === undefined)).toBe(true);
+    state.mockReturnValue('complete'); vi.advanceTimersByTime(1000);
+    expect(heartbeat.mock.calls.at(-1)![0].structure).toBeUndefined();
+    vi.advanceTimersByTime(1000);
+    expect(heartbeat.mock.calls.at(-1)![0].structure).toEqual({ visibleProgress: false, tagName: null, ancestors: [] });
+    vi.advanceTimersByTime(3000);
+    expect(heartbeat.mock.calls.filter(([observation]) => observation.structure)).toHaveLength(1);
+  } finally { detector.stop(); }
+});
 test('indeterminate or malformed progress never invents progress', () => {
   for (const html of ['<progress></progress>', '<progress value="NaN"></progress>', '<progress value="1" max="0"></progress>']) {
     document.body.innerHTML = `<div id="initial_startup">${html}</div>`;
     expect(classifyBoot(document).progress).toBeNull();
   }
+});
+test.each(['id="initial_startup"', 'data-testid="startup-screen"'])('known splash %s ignores progress outside its container', marker => {
+  document.body.innerHTML = `<progress value="0.1"></progress><section ${marker}><progress value="0.7"></progress></section>`;
+  expect(classifyBoot(document)).toMatchObject({ phase: 'splash', progress: 7 });
+  const progress = document.querySelector('section progress')!;
+  progress.setAttribute('hidden', '');
+  expect(classifyBoot(document)).toMatchObject({ phase: 'splash', progress: null });
+  progress.remove();
+  expect(classifyBoot(document)).toMatchObject({ phase: 'splash', progress: null });
+});
+test('stationary outer indicator cannot trigger reload while known splash progress advances', () => {
+  vi.useFakeTimers();
+  document.body.innerHTML = '<progress value="0"></progress><section id="initial_startup"><progress value="0" max="100"></progress></section>';
+  const progress = document.querySelector('section progress')!;
+  const session = { nonce: '00000000-0000-4000-8000-000000000001', generation: 1 };
+  const watchdog = new StartupWatchdog(); watchdog.navigate(session);
+  const started = Date.now(), observations: number[] = [];
+  const detector = new BootDetector(document, observation => {
+    observations.push(observation.progress!);
+    watchdog.accept({ ...session, ...observation }, Date.now() - started, { visible: true, closing: false });
+  }, () => {});
+  detector.start();
+  try {
+    for (let value = 10; value <= 80; value += 10) {
+      progress.setAttribute('value', String(value));
+      vi.advanceTimersByTime(10_000);
+      expect(watchdog.reloads).toBe(0);
+    }
+    expect(new Set(observations)).toEqual(new Set([0, 1, 2, 3, 4, 5, 6, 7, 8]));
+  } finally { detector.stop(); }
 });
 test.each([
   ['<div id="pane-side"></div>', 'shell'],
@@ -59,7 +277,7 @@ test('early empty document then splash keeps connector work deferred', () => {
     expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'unknown' }));
     expect(start).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1000);
-    document.body.innerHTML = '<div id="initial_startup"></div>'; state.mockReturnValue('complete');
+    document.body.innerHTML = '<section><progress></progress></section>'; state.mockReturnValue('complete');
     vi.advanceTimersByTime(9000);
     expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'splash' }));
     expect(start).not.toHaveBeenCalled(); expect(observer).not.toHaveBeenCalled();
@@ -117,7 +335,7 @@ test('unknown document still loading activates unconditionally at the 20s cap', 
 });
 test('timer heartbeat works without rAF; splash defers full connector work then shell activates once', () => {
   vi.useFakeTimers();
-  document.body.innerHTML = '<div id="initial_startup"></div>';
+  document.body.innerHTML = '<section><progress></progress></section>';
   const observer = vi.spyOn(MutationObserver.prototype, 'observe');
   const start = vi.spyOn(DomConnector.prototype, 'start');
   const connector = new DomConnector(document, () => {});
@@ -141,8 +359,8 @@ test('timer heartbeat works without rAF; splash defers full connector work then 
     expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'shell' }));
   } finally { detector.stop(); if (start.mock.calls.length) connector.stop(); }
 });
-test('recognized splash activates at the 20s deadline even between heartbeat ticks', () => {
-  vi.useFakeTimers(); document.body.innerHTML = '<div id="initial_startup"></div>';
+test('progress-only splash activates at the 20s deadline even between heartbeat ticks', () => {
+  vi.useFakeTimers(); document.body.innerHTML = '<section><progress></progress></section>';
   const activate = vi.fn(), heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, activate, 7000);
   detector.start();
   try {
@@ -166,6 +384,7 @@ test('stopping during splash cancels deferred activation and heartbeats', () => 
 });
 test.each([
   ['<div id="initial_startup"></div>', 1],
+  ['<section><progress value="0.1"></progress></section>', 1],
   ['<div>Unrecognized WhatsApp markup</div>', 0],
   ['<div data-testid="qrcode"></div>', 0],
   ['<div data-testid="account-warning"></div>', 0]

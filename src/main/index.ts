@@ -124,7 +124,7 @@ async function start() {
   const startupWatchdog = new StartupWatchdog(fixture && process.argv.includes('--fixture-startup-watchdog') ? { splashMs: 600, stalledMs: 300, spacingMs: 1200, heartbeatGapMs: 6000 } : undefined);
   let bootSession = { nonce: randomUUID(), generation: 0 };
   startupWatchdog.navigate(bootSession);
-  let detectorSeen = false, shellChromeSynced = false, connectorReady = false;
+  let detectorSeen = false, structureLogged = false, shellChromeSynced = false, connectorReady = false;
   let lastBoot: { phase: string; progress: number | null; visible: boolean; online: boolean } | undefined;
   let lastDecision: string | undefined;
   let stickerIntakeError: string | undefined;
@@ -506,6 +506,10 @@ async function start() {
     if (!result) return;
     const { observation, decision } = result;
     if (!detectorSeen) { detectorSeen = true; startupDiagnostics.record('detector-ready', { generation: bootSession.generation }); }
+    if (!structureLogged && observation.structure && (observation.phase === 'unknown' || observation.phase === 'splash')) {
+      structureLogged = true;
+      startupDiagnostics.record('structure', { structure: observation.structure, generation: bootSession.generation });
+    }
     if (lastBoot?.phase !== observation.phase) startupDiagnostics.record('phase', { phase: observation.phase, generation: bootSession.generation });
     if (lastBoot?.progress !== observation.progress) startupDiagnostics.record('progress', { progress: observation.progress });
     if (lastBoot?.visible !== observation.visible || lastBoot?.online !== observation.online) startupDiagnostics.record('visibility', { visible: observation.visible, online: observation.online });
@@ -843,7 +847,7 @@ async function start() {
   remote.webContents.on('did-start-navigation', details => {
     if (!details.isMainFrame || details.isSameDocument || closing) return;
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
-    startupWatchdog.navigate(bootSession); detectorSeen = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
+    startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
     startupDiagnostics.record('remote-navigation', { generation: bootSession.generation });
     chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend();
   });
@@ -858,7 +862,7 @@ async function start() {
   remote.webContents.on('render-process-gone', (_event, details) => {
     startupDiagnostics.record('render-process-gone', { reason: ['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction'].includes(details.reason) ? details.reason : 'other' });
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
-    startupWatchdog.navigate(bootSession); detectorSeen = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
+    startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
     pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); chromeSync.reset(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
   const stopRuntime = cleanupOnce([
