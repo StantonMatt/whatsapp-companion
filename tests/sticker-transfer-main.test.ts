@@ -4,7 +4,7 @@ import { emptySnapshot, initialState, type Snapshot, type Status, type StatusUpd
 import { StatusCache } from '../src/core/status';
 import { STICKER_MAKER_CLEANUP_MS, STICKER_MAKER_WATCHDOG_MS } from '../src/shared/sticker-transfer';
 
-type Contents = EventEmitter & { mainFrame: { url: string }; send: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; capturePage: ReturnType<typeof vi.fn>; isFocused: ReturnType<typeof vi.fn>; session: { protocol: { handle: ReturnType<typeof vi.fn> } } };
+type Contents = EventEmitter & { mainFrame: { url: string; isDestroyed: () => boolean }; send: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; capturePage: ReturnType<typeof vi.fn>; isFocused: ReturnType<typeof vi.fn>; session: { protocol: { handle: ReturnType<typeof vi.fn> } } };
 const mocks = vi.hoisted(() => ({
   views: [] as { webContents: Contents; getBounds: () => ViewBounds }[],
   win: undefined as (EventEmitter & { contentView: EventEmitter; close: () => void }) | undefined,
@@ -26,7 +26,7 @@ vi.mock('electron', async () => {
     protocol: { handle: vi.fn() }, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn()
   });
   class WebContents extends EventEmitter {
-    mainFrame = { url: '' };
+    mainFrame = { url: '', isDestroyed: () => false };
     session = permissions();
     send = vi.fn();
     loadURL = vi.fn(async (url: string) => { this.mainFrame.url = url; });
@@ -90,6 +90,7 @@ vi.mock('../src/main/store', () => ({ Store: class {
   durabilityWarning = false;
   state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
   constructor() { mocks.store = this; }
+  collectGarbage = vi.fn();
   readSticker = (id: string) => { mocks.reads.push(id); if (mocks.readFailure) throw new Error('Sticker file is missing or damaged.'); return { image: 'data:image/webp;base64,UklGRg==', bytes: Buffer.alloc(12), animated: mocks.animated }; };
   readStickerBytes = async (id: string) => { const { image: _image, ...verified } = this.readSticker(id); return verified; };
   update(change: (state: State) => void) { const next = structuredClone(this.state); change(next); this.state = next; }
@@ -229,7 +230,8 @@ test('controls reload resends shield bytes for the same nonce, and subscriptions
 test.each(['did-start-loading', 'did-finish-load', 'render-process-gone', 'destroyed', 'navigation'])('remote %s resets chrome delivery even with unchanged geometry', async event => {
   await action({ type: 'cancelSticker' });
   remote().send.mockClear();
-  if (event === 'navigation') remote().emit('did-start-navigation', {}, 'https://web.whatsapp.com/', false, true);
+  if (event === 'navigation') remote().emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  else if (event === 'render-process-gone') remote().emit(event, {}, { reason: 'crashed' });
   else remote().emit(event);
   mocks.win!.contentView.emit('bounds-changed');
   expect(chromeCommands().length).toBeGreaterThan(0);
@@ -262,9 +264,9 @@ const interruptions = [
   { name: 'remote chat cancellation', run: () => remoteEvent({ type: 'stickerCancelled', nonce, reason: 'chat-changed', detail: 'chat-changed' }) },
   { name: 'reload action', run: () => action({ type: 'reload' }) },
   { name: 'reload menu', run: () => mocks.menu[0].submenu.find((item: any) => item.label === 'Reload WhatsApp').click() },
-  { name: 'remote navigation', run: () => remote().emit('did-start-navigation', {}, 'https://web.whatsapp.com/', false, true) },
+  { name: 'remote navigation', run: () => remote().emit('did-start-navigation', { isMainFrame: true, isSameDocument: false }) },
   { name: 'controls navigation', run: () => controls().emit('did-start-navigation', {}, controls().mainFrame.url, false, true) },
-  { name: 'remote renderer gone', run: () => remote().emit('render-process-gone') },
+  { name: 'remote renderer gone', run: () => remote().emit('render-process-gone', {}, { reason: 'crashed' }) },
   { name: 'controls renderer gone', run: () => controls().emit('render-process-gone') },
   { name: 'resize', run: () => mocks.win!.contentView.emit('bounds-changed') },
   { name: 'shield cap', run: () => vi.advanceTimersByTimeAsync(10_000 - Date.now()) }
@@ -335,7 +337,7 @@ test('clicked replenishes the confirmation and cleanup budget after a delayed gr
 const inputExits = interruptions.filter(({ name }) => name !== 'shield cap');
 inputExits.push(
   { name: 'window close', run: () => mocks.win!.close() },
-  { name: 'app quit', run: () => mocks.app!.emit('before-quit') },
+  { name: 'app quit', run: () => mocks.app!.emit('before-quit', { preventDefault: vi.fn() }) },
   { name: 'window closed', run: () => mocks.win!.emit('closed') }
 );
 test.each(inputExits)('maker input exclusion ends on $name before authorization', async ({ name, run }) => {
@@ -582,6 +584,20 @@ test.each(inputExits)('$name releases an undisclosed held command immediately an
   expect(inputBlocked()).toBe(false);
   expect(status().stickerSend?.state).toBe('cancelled');
   expect(remote().send.mock.calls.some(([, command]) => ['makeSticker', 'sendSticker', 'prepareSticker'].includes(command.type))).toBe(false);
+});
+
+test.each(inputExits.filter(({ name }) => ['remote navigation', 'remote renderer gone', 'window close', 'window closed', 'app quit'].includes(name)))('$name revokes held commands synchronously even if cleanup IPC throws', async ({ run }) => {
+  const heldNonce = await nextHeldMaker();
+  remote().send.mockImplementation(() => { throw new Error('disposed renderer'); });
+  controls().send.mockImplementation(() => { throw new Error('disposed controls'); });
+  run();
+  expect(status().stickerSend).toMatchObject({ nonce: heldNonce, state: 'cancelled' });
+  expect(inputBlocked()).toBe(false);
+  for (const phase of ['disclose', 'send']) {
+    expect(mocks.handlers.get('companion:authorize-sticker')!(eventFor(remote()), {
+      nonce: heldNonce, phase, snapshot: { ...snapshot, ready: false, stickerPreparation: heldNonce }
+    })).toBe(false);
+  }
 });
 
 test.each(['disclose', 'send'] as const)('late %s permission from an old command cannot cancel or release a newer maker', async phase => {

@@ -614,7 +614,8 @@ export class Assistant {
         if (!alive()) { this.decision('stale_context', 'completion', work.signature); return; }
         work.running = true;
         let text = this.fixture ? instruction ? 'That sounds lovely. See you then!' : snapshot.draft ? ' see you then!' : 'Sounds good, see you then!' : await this.generator({ ...input, key: this.vault.get(input.provider), reason: attempt ? 'retry' : request.reason, signal: ticket?.signal ?? work.controller.signal });
-        if (this.fixture) await new Promise(resolve => setTimeout(resolve, 200));
+        // Fixture-only latency; desktop checks may lengthen it to observe loading states under load.
+        if (this.fixture) await new Promise(resolve => setTimeout(resolve, Number((globalThis as { fixtureGenerationDelayMs?: number }).fixtureGenerationDelayMs) || 200));
         if (!alive()) { this.decision('stale_context', 'completion', work.signature); return; }
         if (!automatic && !this.validContext(request.contextKey) && request.contextKey) { this.decision('stale_context', 'completion', work.signature); finish(); if (this.live === work) this.cancel(); return; }
         if (!snapshot.draft || instruction) text = text.trim();

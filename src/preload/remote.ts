@@ -1,11 +1,43 @@
 import { ipcRenderer } from 'electron';
 import { DomConnector } from '../connector/dom';
+import { BootDetector } from '../connector/boot';
+import { bootSessionSchema, type BootSession } from '../shared/boot';
 import type { RemoteCommand } from '../shared/connector';
 
-// No contextBridge, window bindings, page postMessage listener, or privileged API exposure.
-window.addEventListener('DOMContentLoaded', () => {
-  const connector = new DomConnector(document, event => ipcRenderer.send('companion:event', event), nonce => ipcRenderer.invoke('companion:authorize-auto', nonce), nonce => ipcRenderer.invoke('companion:authorize-sticker', nonce));
-  ipcRenderer.on('companion:command', (_event, command: RemoteCommand) => connector.command(command));
-  connector.start();
-  window.addEventListener('beforeunload', () => connector.stop(), { once: true });
-});
+// Isolated preload only: no contextBridge, window bindings or page-callable API.
+let connector: DomConnector | undefined;
+let detector: BootDetector | undefined;
+let bootSession: BootSession | undefined;
+let disposed = false;
+function startConnector() {
+  if (disposed || connector || !bootSession) return;
+  try {
+    connector = new DomConnector(document, event => ipcRenderer.send('companion:event', event), nonce => ipcRenderer.invoke('companion:authorize-auto', nonce), nonce => ipcRenderer.invoke('companion:authorize-sticker', nonce));
+    connector.start();
+    // Load completion can precede activation by up to 20s. Main must request
+    // its nonce-tagged recovery snapshot only once commands can be handled.
+    ipcRenderer.send('companion:connector-ready', bootSession);
+  } catch {
+    try { connector?.stop(); } catch { /* Partial activation must not escape into the page. */ }
+    connector = undefined; ipcRenderer.send('companion:boot-error');
+  }
+}
+ipcRenderer.on('companion:command', (_event, command: RemoteCommand) => { if (!disposed) connector?.command(command); });
+void ipcRenderer.invoke('companion:boot-session').then(raw => {
+  const session = bootSessionSchema.safeParse(raw);
+  if (!session.success || disposed) return;
+  bootSession = session.data;
+  detector = new BootDetector(document, observation => ipcRenderer.send('companion:boot-heartbeat', { ...session.data, ...observation }), reason => {
+    if (reason === 'timeout') ipcRenderer.send('companion:boot-deferral-expired', session.data);
+    // At document start an unknown page may not have a body yet. The connector's
+    // observer needs that target; activation remains one-shot once it exists.
+    if (document.body) startConnector();
+    else document.addEventListener('DOMContentLoaded', startConnector, { once: true });
+  });
+  detector.start();
+}).catch(() => { if (!disposed) ipcRenderer.send('companion:boot-error'); });
+window.addEventListener('beforeunload', () => {
+  disposed = true; detector?.stop();
+  document.removeEventListener('DOMContentLoaded', startConnector);
+  try { connector?.stop(); } catch { /* Main owns view disposal. */ }
+}, { once: true });

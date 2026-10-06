@@ -32,6 +32,10 @@ import { DirectStickerSender } from './direct-sticker-sender';
 import { DirectStickerSafety } from './direct-sticker-safety';
 import { installEditContextMenus } from './context-menu';
 import { installRemotePermissions } from './permissions';
+import { StartupDiagnostics } from './startup-diagnostics';
+import { StartupWatchdog } from './startup-watchdog';
+import { bootSessionSchema } from '../shared/boot';
+import { safeRendererSend, requireRendererSend, positiveBounds, startupThrottling, cleanupOnce, quitAfterFlush } from './lifecycle';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -47,13 +51,38 @@ app.setName('WhatsApp Companion');
 if (process.platform === 'linux' && !app.commandLine.hasSwitch('password-store')) {
   try { const backend = configuredBackend(app.getPath('userData')); if (backend) app.commandLine.appendSwitch('password-store', backend === 'gnome_libsecret' ? 'gnome-libsecret' : backend); } catch { /* Startup reports damaged data below. */ }
 }
-if (!app.requestSingleInstanceLock()) app.quit();
-else void app.whenReady().then(start).catch(() => {
-  dialog.showErrorBox('WhatsApp Companion could not start', 'The local data file or OS credential store could not be opened. Your files have been preserved. See README for recovery steps.'); app.quit();
+const acquired = app.requestSingleInstanceLock();
+const startupDiagnostics = new StartupDiagnostics(app.getPath('userData'), acquired);
+let quitStarted = false, quitAllowed = false;
+let closeWindow: (() => void) | undefined;
+const quit = () => {
+  if (quitStarted) return;
+  quitStarted = true;
+  startupDiagnostics.record('before-quit'); startupDiagnostics.record('quit');
+  void quitAfterFlush(() => startupDiagnostics.flush(), () => { quitAllowed = true; app.quit(); });
+};
+// Install before initialization: failures and early OS/menu quits need the same
+// bounded flush as a fully initialized window, without recursively vetoing quit.
+app.on('before-quit', event => {
+  if (quitAllowed) return;
+  event.preventDefault();
+  if (closeWindow) closeWindow(); else quit();
+});
+app.on('window-all-closed', () => quit());
+startupDiagnostics.record('lock', { acquired, app: app.getVersion(), electron: process.versions.electron, chromium: process.versions.chrome });
+if (!acquired) quit();
+else void app.whenReady().then(() => { if (!quitStarted) return start(); }).catch(() => {
+  try {
+    dialog.showErrorBox('WhatsApp Companion could not start', 'The local data file or OS credential store could not be opened. Your files have been preserved. See README for recovery steps.');
+  } catch { /* A native error dialog failure must not prevent shutdown. */ }
+  finally { if (closeWindow) closeWindow(); else quit(); }
 });
 
 async function start() {
-  const store = new Store(app.getPath('userData'));
+  startupDiagnostics.record('app-ready');
+  const storeStarted = performance.now();
+  const store = new Store(app.getPath('userData'), undefined, { deferGC: true, timing: (phase, durationMs) => startupDiagnostics.record(phase, { durationMs }) });
+  startupDiagnostics.record('store-load', { durationMs: performance.now() - storeStarted });
   const requestCounts = new RequestCounts(app.getPath('userData'));
   useRequestCounts(requestCounts);
   const vault = new Vault(app.getPath('userData'));
@@ -61,7 +90,7 @@ async function start() {
   const modelCatalog = new ModelCatalog();
   const root = __dirname;
   const uiURL = pathToFileURL(join(root, 'ui/index.html')).href;
-  const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href : 'https://web.whatsapp.com/';
+  const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href + (process.argv.includes('--fixture-startup-watchdog') ? '#startup-stuck' : process.argv.includes('--fixture-startup-splash') ? '#startup-splash' : '') : 'https://web.whatsapp.com/';
   const conversations = new Conversations(store, () => { assistant.message = 'Conversation observations could not be saved. Check disk space and the data directory.'; publish(); });
   const stickerTransfer = new StickerTransfer();
   const directStickerSafety = new DirectStickerSafety(store, stickerTransfer, () => {
@@ -89,6 +118,15 @@ async function start() {
   let shieldRestoreNonce: string | undefined;
   let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
   let closing = false, indexDrained = false;
+  let gcTimer: ReturnType<typeof setTimeout> | undefined;
+  let permissionDialogsOpen = 0;
+  // Test thresholds are fixed, main-only and impossible to enable in packaged/live mode.
+  const startupWatchdog = new StartupWatchdog(fixture && process.argv.includes('--fixture-startup-watchdog') ? { splashMs: 600, stalledMs: 300, spacingMs: 1200, heartbeatGapMs: 6000 } : undefined);
+  let bootSession = { nonce: randomUUID(), generation: 0 };
+  startupWatchdog.navigate(bootSession);
+  let detectorSeen = false, shellChromeSynced = false, connectorReady = false;
+  let lastBoot: { phase: string; progress: number | null; visible: boolean; online: boolean } | undefined;
+  let lastDecision: string | undefined;
   let stickerIntakeError: string | undefined;
   const stickerBlobErrors = new Map<string, string>();
   const readSticker = (id: string) => {
@@ -108,8 +146,13 @@ async function start() {
   const win = new BrowserWindow({ width: 1280, height: 860, minWidth: 880, minHeight: 620, backgroundColor: '#161717', title: 'WhatsApp Companion',
     icon: join(root, 'icon.png'),
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
+  startupDiagnostics.record('window-created');
   const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
-  const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), partition: fixture ? 'persist:fixture' : 'persist:whatsapp', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true } });
+  const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), partition: fixture ? 'persist:fixture' : 'persist:whatsapp', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true, backgroundThrottling: false } });
+  startupDiagnostics.record('views-created');
+  const restoreThrottling = startupThrottling(remote.webContents);
+  const sendRemote = (command: unknown) => safeRendererSend(remote.webContents, closing, 'companion:command', command);
+  const requireRemote = (command: unknown) => requireRendererSend(remote.webContents, closing, 'companion:command', command);
   installEditContextMenus([remote.webContents, controls.webContents], win, Menu);
   // Scheme privileges are global; the handler exists only in the local session.
   controls.webContents.session.protocol.handle(STICKER_SCHEME, request => stickerResponse({ readStickerBytes: async id => {
@@ -134,21 +177,24 @@ async function start() {
   controls.setVisible(false);
   const pickerDiagnostics = new PickerDiagnostics({
     directory: app.getPath('userData'), appVersion: app.getVersion(),
-    send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); },
+    send: command => { sendRemote(command); },
     reveal: path => shell.showItemInFolder(path),
     notify: message => { if (!win.isDestroyed()) void dialog.showMessageBox(win, { type: 'info', message, buttons: ['OK'] }).catch(() => {}); }
   });
   let pendingChrome = false;
-  const chromeSync = new ChromeSync(command => remote.webContents.send('companion:command', command));
+  const chromeSync = new ChromeSync(command => { sendRemote(command); });
   const syncChrome = () => {
-    if (remote.webContents.isDestroyed()) return;
+    if (closing || remote.webContents.isDestroyed() || controls.webContents.isDestroyed()) return;
     const bounds = shieldPanel ?? controls.getBounds(), zoom = remote.webContents.getZoomFactor();
     chromeSync.next({ type: 'chrome', panel, pending: pendingChrome,
       panelBounds: panel ? { left: bounds.x / zoom, right: (bounds.x + bounds.width) / zoom } : null });
   };
+  let initialBoundsLogged = false;
   const layout = () => {
-    if (win.isDestroyed() || remote.webContents.isDestroyed()) return;
+    if (closing || win.isDestroyed() || remote.webContents.isDestroyed() || controls.webContents.isDestroyed()) return;
     const { width, height } = win.contentView.getBounds();
+    if (!positiveBounds({ width, height })) { startupDiagnostics.record('bounds-rejected'); return; }
+    if (!initialBoundsLogged) { initialBoundsLogged = true; startupDiagnostics.record('bounds', { width, height }); }
     remote.setBounds({ x: 0, y: 0, width, height });
     const rail = Math.min(100, Math.max(0, chrome.rail));
     const panelWidth = Math.min(width - rail, Math.max(380, panel === 'chat' ? 430 : chrome.listWidth));
@@ -213,7 +259,7 @@ async function start() {
   let sequence = 0;
   // This publisher belongs only to the authorized controls webContents.
   const statusPublisher = new StatusPublisher(update => {
-    controls.webContents.send('companion:status', update);
+    safeRendererSend(controls.webContents, closing, 'companion:status', update);
     sequence = update.sequence;
   });
   // Presentation can hold composer readiness during maker teardown. Send
@@ -237,7 +283,7 @@ async function start() {
       if (send?.nonce !== makerInputOwner || send.detail === 'draft-appeared') finishMakerInput();
       else if (!['preparing', 'sending'].includes(send.state)) settleMakerInput();
     }
-    if (win.isDestroyed() || controls.webContents.isDestroyed()) return;
+    if (closing || win.isDestroyed() || controls.webContents.isDestroyed()) return;
     // Results/cancellation end ownership even if the remote never publishes
     // another snapshot. Expire presentation independently of remote changes.
     const snapshot = assistant.snapshot;
@@ -262,7 +308,7 @@ async function start() {
     pendingChrome = Boolean(assistant.pending); syncChrome();
     statusPublisher.next({ ...next, sequence: sequence + 1 });
   };
-  const assistant = new Assistant(store, vault, { send: command => { if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', command); }, focus: () => { if (!makerInputOwner) remote.webContents.focus(); } }, publish, fixture);
+  const assistant = new Assistant(store, vault, { send: command => { sendRemote(command); }, focus: () => { if (!closing && !makerInputOwner && !remote.webContents.isDestroyed()) remote.webContents.focus(); } }, publish, fixture);
   let accountSafety: AccountSafetyReason = null;
   const disableDirect = (reason: DirectStickerDisabledReason) => {
     directStickerSafety.stop(reason);
@@ -276,7 +322,7 @@ async function start() {
       return remote.webContents.executeJavaScript(script);
     }
   });
-  const stopStickerLookup = () => { settleMakerInput(); clearTimeout(stickerSendTimer); if (!remote.webContents.isDestroyed()) remote.webContents.send('companion:command', { type: 'cancelSticker' }); };
+  const stopStickerLookup = () => { settleMakerInput(); clearTimeout(stickerSendTimer); if (!remote.webContents.isDestroyed()) sendRemote({ type: 'cancelSticker' }); };
   const restoreShieldBounds = () => {
     clearTimeout(shieldRestoreTimer); shieldRestoreTimer = undefined; shieldRestoreNonce = undefined;
     shieldPanel = null; shieldExpanded = false; layout();
@@ -387,17 +433,18 @@ async function start() {
     return revoked;
   };
   const openPanel = (next: Panel, confirmed = false) => {
+    if (closing || win.isDestroyed() || controls.webContents.isDestroyed() || remote.webContents.isDestroyed()) return;
     // The local controls own unsaved editor drafts. Rail/menu navigation must
     // ask them before unmounting the library; only their panel action completes it.
     if (panel === 'stickers' && next !== 'stickers' && !confirmed) {
-      controls.webContents.send('companion:panel-navigation', next);
+      safeRendererSend(controls.webContents, closing, 'companion:panel-navigation', next);
       controls.webContents.focus();
       return;
     }
     cancelSticker(); clearStickerShield();
     if (next === 'chat' && (!assistant.snapshot.ready || !assistant.snapshot.settingsId)) {
       assistant.message = 'Chat settings need recognizable messages. Wait for this conversation to load.';
-      remote.webContents.send('companion:command', { type: 'notice', text: assistant.message }); publish(); return;
+      sendRemote({ type: 'notice', text: assistant.message }); publish(); return;
     }
     panel = next; panelChat = next === 'chat' ? assistant.snapshot.settingsId! : null;
     clearTimeout(locateRequest?.timer); locateRequest = undefined; stickerLocation = null;
@@ -426,8 +473,51 @@ async function start() {
     publish();
   }, message => { stickerIntakeError = message; publish(); }, image =>
     controls.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(${decodeStickerPixels.toString()})(${JSON.stringify(image)})` }]));
-  const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === controls.webContents && event.senderFrame === controls.webContents.mainFrame && event.senderFrame.url === uiURL;
-  const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => !closing && event.sender === remote.webContents && event.senderFrame === remote.webContents.mainFrame && (fixture ? event.senderFrame.url === remoteURL : new URL(event.senderFrame.url).origin === 'https://web.whatsapp.com');
+  const trustedFrame = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent, contents: Electron.WebContents, local = false, allowClosing = false) => {
+    try {
+      if ((closing && !allowClosing) || contents.isDestroyed() || event.sender !== contents || !event.senderFrame || event.senderFrame.isDestroyed() || event.senderFrame !== contents.mainFrame) return false;
+      return local ? event.senderFrame.url === uiURL : fixture ? event.senderFrame.url.split('#')[0] === remoteURL.split('#')[0] : new URL(event.senderFrame.url).origin === 'https://web.whatsapp.com';
+    } catch { return false; }
+  };
+  const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => trustedFrame(event, controls.webContents, true);
+  const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => trustedFrame(event, remote.webContents);
+  ipcMain.handle('companion:boot-session', event => isRemote(event) ? bootSession : null);
+  ipcMain.on('companion:connector-ready', (event, raw: unknown) => {
+    if (!isRemote(event) || connectorReady) return;
+    const parsed = bootSessionSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.nonce !== bootSession.nonce || parsed.data.generation !== bootSession.generation) return;
+    connectorReady = true;
+    // The preload deliberately drops commands during deferral. Re-establish
+    // chrome and the assistant's navigation barrier after activation, even if
+    // did-finish-load and every snapshot retry already happened on the splash.
+    chromeSync.reset(); syncChrome(); assistant.refresh(true);
+  });
+  ipcMain.on('companion:boot-error', event => { if (isRemote(event)) startupDiagnostics.record('preload-error'); });
+  ipcMain.on('companion:boot-deferral-expired', (event, raw: unknown) => {
+    if (!isRemote(event)) return;
+    const parsed = bootSessionSchema.safeParse(raw);
+    if (parsed.success && parsed.data.nonce === bootSession.nonce && parsed.data.generation === bootSession.generation)
+      startupDiagnostics.record('connector-deferral-expired', { generation: bootSession.generation });
+  });
+  ipcMain.on('companion:boot-heartbeat', (event, raw: unknown) => {
+    if (!isRemote(event) || win.isDestroyed()) return;
+    const result = startupWatchdog.accept(raw, performance.now(), { visible: win.isVisible() && !win.isMinimized(), closing,
+      busy: permissionDialogsOpen > 0 || keyPromptOpen || Boolean(assistant.pending) || Boolean(makerInputOwner) || Boolean(stickerTransfer.send && ['finding', 'preparing', 'sending'].includes(stickerTransfer.send.state)) });
+    if (!result) return;
+    const { observation, decision } = result;
+    if (!detectorSeen) { detectorSeen = true; startupDiagnostics.record('detector-ready', { generation: bootSession.generation }); }
+    if (lastBoot?.phase !== observation.phase) startupDiagnostics.record('phase', { phase: observation.phase, generation: bootSession.generation });
+    if (lastBoot?.progress !== observation.progress) startupDiagnostics.record('progress', { progress: observation.progress });
+    if (lastBoot?.visible !== observation.visible || lastBoot?.online !== observation.online) startupDiagnostics.record('visibility', { visible: observation.visible, online: observation.online });
+    lastBoot = observation;
+    if (decision !== lastDecision) { lastDecision = decision; startupDiagnostics.record('watchdog', { decision, reloads: startupWatchdog.reloads }); }
+    if (observation.phase === 'shell') { restoreThrottling(); if (!shellChromeSynced) { shellChromeSynced = true; chromeSync.reset(); syncChrome(); } }
+    if (decision === 'reload') {
+      startupDiagnostics.record('reload', { reloads: startupWatchdog.reloads, generation: bootSession.generation });
+      cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend();
+      try { if (!closing && !remote.webContents.isDestroyed()) remote.webContents.reload(); } catch { /* No more recovery action on a disposed frame. */ }
+    }
+  });
   ipcMain.handle('companion:authorize-auto', (event, raw: unknown) => {
     if (!isRemote(event)) return false;
     const nonce = z.string().uuid().safeParse(raw);
@@ -467,7 +557,9 @@ async function start() {
     const nonce = z.string().uuid().safeParse(raw);
     if (nonce.success && nonce.data === shieldRestoreNonce && !stickerShield) restoreShieldBounds();
   });
-  ipcMain.handle('companion:status', event => { if (!isLocal(event)) throw new Error('Denied'); return statusUpdate(status()); });
+  // A surviving controls frame may read the settled state during close.
+  // Actions, permissions and outgoing renderer IPC remain blocked immediately.
+  ipcMain.handle('companion:status', event => { if (!trustedFrame(event, controls.webContents, true, true)) throw new Error('Denied'); return statusUpdate(status()); });
   ipcMain.on('companion:subscribe', event => {
     if (!isLocal(event)) return;
     statusPublisher.reset(); publish();
@@ -558,7 +650,7 @@ async function start() {
           if (stickerTransfer.send?.nonce !== ticket.nonce || !['finding', 'preparing'].includes(stickerTransfer.send.state)) break;
           try { readSticker(ticket.id); } catch (error) { cancelSticker(); throw error; }
           if (route === 'maker') startMakerInput(ticket.nonce);
-          remote.webContents.send('companion:command', route === 'maker' ? { type: 'makeSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route, image: stored.image } : { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route }); break;
+          requireRemote(route === 'maker' ? { type: 'makeSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route, image: stored.image } : { type: 'prepareSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, route }); break;
         }
         case 'createStickerGroup':
         case 'renameStickerGroup':
@@ -582,7 +674,7 @@ async function start() {
           locateRequest = { nonce, destinationToken: action.destinationToken, timer: setTimeout(() => {
             locateRequest = undefined; stickerLocation = { id: action.id, state: 'unavailable' }; publish();
           }, 3000) };
-          remote.webContents.send('companion:command', { type: 'locateSticker', id: action.id, nonce }); break;
+          requireRemote({ type: 'locateSticker', id: action.id, nonce }); break;
         }
         case 'panel': openPanel(action.panel, true); break;
         case 'reload': cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); await remote.webContents.loadURL(remoteURL); break;
@@ -630,7 +722,7 @@ async function start() {
               clearTimeout(stickerSendTimer);
               // A lost picker result cannot prove whether activation happened.
               stickerSendTimer = setTimeout(() => { stickerTransfer.result(ticket.nonce, true, false, 'unconfirmed'); stopStickerLookup(); publish(); }, 6000);
-              remote.webContents.send('companion:command', { type: 'sendSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, expiresAt: Date.now() + 5000 });
+              requireRemote({ type: 'sendSticker', id: ticket.id, nonce: ticket.nonce, target: ticket.target, expiresAt: Date.now() + 5000 });
             } else if (stickerTransfer.send?.nonce === v.data.nonce && stickerTransfer.send.state !== 'sending') stopStickerLookup();
             publish();
           } break;
@@ -738,38 +830,88 @@ async function start() {
   }
   const remoteSession = remote.webContents.session;
   installRemotePermissions(remote.webContents, fixture ? remoteURL : undefined, async permission => {
-    const result = await dialog.showMessageBox(win, { message: `Allow WhatsApp to use ${permission === 'media' ? 'your microphone or camera' : 'desktop notifications'}?`, buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 });
-    return result.response === 1;
+    permissionDialogsOpen++; startupWatchdog.resetObservations();
+    try {
+      const result = await dialog.showMessageBox(win, { message: `Allow WhatsApp to use ${permission === 'media' ? 'your microphone or camera' : 'desktop notifications'}?`, buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 });
+      return !closing && result.response === 1;
+    } finally { permissionDialogsOpen--; startupWatchdog.resetObservations(); }
   });
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   controls.webContents.session.setPermissionCheckHandler(() => false);
   controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
-  remote.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); } });
+  remote.webContents.on('did-start-navigation', details => {
+    if (!details.isMainFrame || details.isSameDocument || closing) return;
+    bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
+    startupWatchdog.navigate(bootSession); detectorSeen = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
+    startupDiagnostics.record('remote-navigation', { generation: bootSession.generation });
+    chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend();
+  });
   remote.webContents.on('did-start-loading', () => chromeSync.reset());
   remote.webContents.on('destroyed', () => chromeSync.reset());
   controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); statusPublisher.reset(); });
-  remote.webContents.on('did-finish-load', () => { chromeSync.reset(); syncChrome(); assistant.refresh(true); });
-  remote.webContents.on('render-process-gone', () => { pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); chromeSync.reset(); });
+  remote.webContents.on('dom-ready', () => startupDiagnostics.record('dom-ready'));
+  remote.webContents.on('preload-error', () => startupDiagnostics.record('preload-error'));
+  remote.webContents.on('unresponsive', () => startupDiagnostics.record('unresponsive'));
+  remote.webContents.on('responsive', () => startupDiagnostics.record('responsive'));
+  remote.webContents.on('did-finish-load', () => { startupDiagnostics.record('finish-load'); chromeSync.reset(); syncChrome(); if (connectorReady) assistant.refresh(true); });
+  remote.webContents.on('render-process-gone', (_event, details) => {
+    startupDiagnostics.record('render-process-gone', { reason: ['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction'].includes(details.reason) ? details.reason : 'other' });
+    bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
+    startupWatchdog.navigate(bootSession); detectorSeen = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
+    pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); chromeSync.reset(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
+  const stopRuntime = cleanupOnce([
+    () => conversations.close(), () => cancelSticker(), () => stopMakerInput(), () => assistant.cancel(true),
+    () => clearStickerShield(true), () => pickerDiagnostics.cancel(), () => stickerTransfer.cancel(), () => recordStickerSend(),
+    () => { clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); clearTimeout(shieldCapTimer); clearTimeout(shieldRestoreTimer); },
+    () => providerCheck.invalidate(), () => modelCatalog.invalidate('openai'), () => modelCatalog.invalidate('anthropic'), () => requestCounts.close()
+  ], () => {});
+  const beginClosing = () => {
+    if (closing) return;
+    closing = true; startupDiagnostics.record('close-requested'); clearTimeout(gcTimer); startupWatchdog.resetObservations();
+    stopRuntime();
+  };
+  const destroyViews = cleanupOnce([
+    () => { if (!remote.webContents.isDestroyed()) remote.webContents.close(); },
+    () => { if (!controls.webContents.isDestroyed()) controls.webContents.close(); }
+  ], () => {
+    startupDiagnostics.record('views-destroyed'); quit();
+  });
+  let drainStarted = false;
   win.on('close', event => {
-    try { conversations.close(); } catch { /* Observations are noncritical; explicit settings saves remain durable. */ }
-    cancelSticker(); stopMakerInput(); assistant.cancel(true); publish(); clearStickerShield(true);
+    beginClosing();
     if (!indexDrained) {
       event.preventDefault();
-      if (!closing) {
-        closing = true;
-        void stickerInbox.close().finally(() => { indexDrained = true; win.close(); });
+      if (!drainStarted) {
+        drainStarted = true;
+        void Promise.resolve().then(() => stickerInbox.close()).catch(() => {}).finally(() => {
+          indexDrained = true; startupDiagnostics.record('intake-drained');
+          if (!win.isDestroyed()) win.close(); else destroyViews();
+        });
       }
     }
   });
-  app.on('before-quit', () => { try { conversations.close(); } catch { /* Noncritical observations. */ } assistant.cancel(true); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); requestCounts.close(); cancelSticker(); stopMakerInput(); publish(); clearStickerShield(true); });
-  win.on('closed', () => { pickerDiagnostics.cancel(); stickerTransfer.cancel(); recordStickerSend(); stopMakerInput(); clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic'); assistant.cancel(true); remote.webContents.close(); controls.webContents.close(); app.quit(); });
-  app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.focus(); });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL); } }, { role: 'quit' }] }, { role: 'editMenu' },
+  closeWindow = () => {
+    beginClosing();
+    if (!win.isDestroyed()) win.close(); else destroyViews();
+  };
+  win.on('closed', () => { beginClosing(); destroyViews(); });
+  app.on('second-instance', () => { if (closing || win.isDestroyed()) return; if (win.isMinimized()) win.restore(); win.focus(); });
+  const recordVisibility = () => {
+    const visible = !win.isDestroyed() && win.isVisible() && !win.isMinimized();
+    startupDiagnostics.record('visibility', { visible });
+    if (!visible) startupWatchdog.resetObservations();
+  };
+  win.on('show', recordVisibility); win.on('hide', recordVisibility); win.on('minimize', recordVisibility); win.on('restore', recordVisibility);
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { if (closing || remote.webContents.isDestroyed()) return; cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL).catch(() => {}); } }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
   await win.loadURL('about:blank');
   await controls.webContents.loadURL(uiURL);
+  startupDiagnostics.record('controls-loaded');
+  if (closing) return;
+  // Let navigation begin before best-effort GC; migration was already durable.
+  gcTimer = setTimeout(() => { if (!closing) store.collectGarbage((phase, durationMs) => startupDiagnostics.record(phase, { durationMs })); }, 5000);
   await remote.webContents.loadURL(remoteURL).catch(() => {});
   publish();
 }
