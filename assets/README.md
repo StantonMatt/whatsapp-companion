@@ -1,25 +1,22 @@
-# Application icon
+# Buddy application icon
 
-A familiar green chat bubble and handset, with a mint four-point sparkle completing the upper-right arc. The emerald-to-teal tile distinguishes Companion in launchers and taskbars. This is an independent application's icon, not an official WhatsApp asset.
+**Buddy** is a green chat bubble with a friendly face, its tail at the lower right and a white four-point glint in the upper-right corner. This is an independent application's icon, not an official WhatsApp asset.
 
-- `icon-source.png`: original generated RGBA master, 1254 × 1254 pixels, with transparent corners and margin.
-- `icons/`: Linux PNG exports from 16 to 512 pixels. The 512-pixel export is copied to `dist/icon.png` for the Electron window.
-- `icon.ico`: Windows multi-resolution icon.
-- `icon.icns`: macOS icon.
+The artwork is hand-made vector art: SVG written directly as code on a 1024-unit grid, authored with an AI design assistant (Claude) and chosen by the project owner, October 2026. No image-generation model, stock art, font, or WhatsApp artwork was used. `icon/buddy.svg` is the master. `icon/buddy-16.svg`, `icon/buddy-24.svg`, `icon/buddy-32.svg` and `icon/buddy-48.svg` are pixel-aligned versions with simplified details for small sizes. Every PNG is rendered from its SVG at its exact size with Playwright's Chromium (`scripts/render-icons.cjs`), and `icon.ico` packs those PNGs unchanged.
 
-Run `npm ci`, then `npm run icons:export` after replacing the master. The script uses the electron-builder icon converter pinned by the project lockfile; its first run may download the converter. Exports preserve transparency and are included as source assets so normal builds need no image tools. Package configuration selects the corresponding platform export.
+- `icon-source.png`: 1024 × 1024 RGBA master render with transparent corners.
+- `icons/`: Linux PNG exports at 16, 24, 32, 48, 64, 128, 256 and 512 pixels. The build copies `512x512.png` to `dist/icon.png` for the Electron window.
+- `icon.ico`: Windows icon containing the unchanged PNG frames at 16 through 256 pixels.
+- `icon.icns`: macOS icon converted from the 1024-pixel master render.
 
-Generated with the built-in image-generation tool (`logo-brand`, new image, transparent background), September 28, 2026. The tool returned 1254 pixels despite the requested 1024; platform exports provide standard sizes. No provider key was used from this project.
+The 16 and 24 px artwork fills the canvas intentionally. The 32 and 48 px artwork retains a 1 px margin. Do not downsample the master to replace these tuned exports.
 
-## Generation prompt
+After `npm ci`, install Playwright's browser with `npx playwright install chromium`, then run `npm run icons:export` from the repository root. This renders the master and all PNG sizes from the SVG sources, packs the ICO, and uses the lockfile-pinned electron-builder converter **only for ICNS**. Its first run may download the converter. Ordinary builds use the checked-in exports and need no image tools or browser download.
 
-```text
-Use case: logo-brand
-Asset type: finished desktop application icon for "WhatsApp Companion", a personal WhatsApp companion app.
-Primary request: a beautiful, recognizable twist on the original WhatsApp logo, unique but immediately identifiable as related to WhatsApp.
-Create ONE production-ready icon, not a presentation sheet or mockup. Square 1024 x 1024 canvas with true transparency outside the icon.
-Design: a bold rounded-square emerald green app tile, centered with a small equal transparent margin. A crisp white circular speech-bubble outline with the familiar lower-left tail encloses a white diagonal telephone handset. Preserve the instantly recognizable WhatsApp visual language. The distinctive Companion twist is one clean four-point mint-white sparkle integrated into a small opening in the upper-right arc of the speech bubble, as though it completes the ring. The sparkle is intentional, balanced, and legible at small sizes, not a notification badge. The handset remains the dominant inner symbol.
-Style: premium, minimal vector-like geometry, optically balanced, smooth curves, substantial strokes, restrained very subtle emerald-to-teal depth in the tile. Confident and uncluttered. Modern native desktop app icon.
-Palette: rich WhatsApp-inspired emerald green, subtly deeper teal at the lower edge, white main mark and pale mint sparkle.
-Constraints: no text, letters, watermark, extra icons, multiple bubbles, framing device or surrounding scenery. No phone/device mockup, no glossy plastic, no bevels, no busy details. No detached external badge. The entire tile fits within the canvas; corners and everything outside the rounded-square tile are genuinely transparent. This is the actual icon asset, front-on and straight, ready to use.
+To render PNGs and ICO into a separate directory without running the ICNS converter:
+
+```sh
+node scripts/render-icons.cjs assets/icon /path/to/output
 ```
+
+This writes `icon-1024.png`, the eight `NxN.png` files and `icon.ico`. To rebuild only ICNS, use `runIconsTool` from `app-builder-lib/out/toolsets/icons.js` with `inputFile: 'assets/icon-source.png'`, `outputFormat: 'icns'` and `outDir: 'assets'`. Do not use the converter's `set` or `ico` formats: they would replace the tuned SVG renders.

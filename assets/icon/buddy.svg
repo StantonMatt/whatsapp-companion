@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- WhatsApp Companion "Buddy" app icon, master artwork. Hand-made SVG; not an official WhatsApp asset. -->
+  <defs>
+    <linearGradient id="bubble" x1="0" y1="22" x2="0" y2="1002" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45DF8A"/>
+      <stop offset="1" stop-color="#14AB69"/>
+    </linearGradient>
+  </defs>
+  <!-- Bubble: squircle body, tail with tangent fillets at both joins and a round tip -->
+  <path fill="url(#bubble)" d="M512 22C875 22 998 116 998 439C998 576 975 672 921 737A49 49 0 0 0 912 783L965 964A31 31 0 0 1 917 996C830 928 761 887 692 857A92 92 0 0 0 647 849C606 853 561 855 512 855C149 855 26 761 26 439C26 116 149 22 512 22Z"/>
+  <!-- Face -->
+  <g fill="#063D2B">
+    <rect x="306" y="292" width="114" height="188" rx="57"/>
+    <rect x="604" y="292" width="114" height="188" rx="57"/>
+  </g>
+  <path fill="none" stroke="#063D2B" stroke-width="70" stroke-linecap="round" d="M386 581A175 175 0 0 0 638 581"/>
+  <!-- Glint -->
+  <path fill="#fff" d="M828 94Q846 180 932 198Q846 216 828 302Q810 216 724 198Q810 180 828 94Z"/>
+</svg>

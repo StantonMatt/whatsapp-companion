@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- Buddy icon hand-tuned for 48 px: body edges, eye sides and smile base aligned to whole pixels. -->
+  <defs>
+    <linearGradient id="bubble" x1="0" y1="1" x2="0" y2="47" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45DF8A"/>
+      <stop offset="1" stop-color="#14AB69"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#bubble)" d="M24 1C41.2 1 47 5.4 47 20.5C47 26.97 45.94 31.48 43.37 34.51A2.27 2.25 0 0 0 42.93 36.6L45.5 45.19A1.42 1.41 0 0 1 43.25 46.69C39.1 43.42 35.8 41.49 32.52 40.07A4.26 4.22 0 0 0 30.42 39.74C28.48 39.92 26.35 40 24 40C6.8 40 1 35.6 1 20.5C1 5.4 6.8 1 24 1Z"/>
+  <g fill="#063D2B">
+    <rect x="14" y="13.6" width="6" height="8.8" rx="3"/>
+    <rect x="28" y="13.6" width="6" height="8.8" rx="3"/>
+  </g>
+  <path fill="none" stroke="#063D2B" stroke-width="3" stroke-linecap="round" d="M18 27.2A8.95 8.95 0 0 0 30 27.2"/>
+  <path fill="#fff" d="M38.5 4.5Q39.35 8.65 43.5 9.5Q39.35 10.35 38.5 14.5Q37.65 10.35 33.5 9.5Q37.65 8.65 38.5 4.5Z"/>
+</svg>
