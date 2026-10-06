@@ -3,6 +3,7 @@ import { mkdtemp, readFile, stat, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StartupDiagnostics, STARTUP_LOG_LIMIT } from '../src/main/startup-diagnostics';
+import type { BootStructure } from '../src/shared/boot';
 
 test('ordered private diagnostics append across interrupted launches and reject private fields', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'startup-log-'));
@@ -37,6 +38,34 @@ test('rotation retains one previous timeline with private permissions and bounde
     await logger.flush();
     expect((await readFile(path, 'utf8')).trim().split('\n')).toHaveLength(513);
     expect((await stat(path)).size).toBeLessThan(STARTUP_LOG_LIMIT);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('structural diagnostics persist only the fixed content-free validated signature', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'startup-structure-'));
+  try {
+    const logger = new StartupDiagnostics(directory);
+    const structure: BootStructure = { visibleProgress: true, tagName: 'PROGRESS', ancestors: [
+      { tagName: 'DIV', id: 'app', idPresent: true, testId: 'other', testIdPresent: true }
+    ] };
+    logger.record('structure', { structure, generation: 2 });
+    for (const unsafe of [
+      { ...structure, text: 'PRIVATE MESSAGE' }, { ...structure, classes: 'PRIVATE' },
+      { ...structure, tagName: 'USER-ALICESMITH' },
+      { ...structure, ancestors: [{ ...structure.ancestors[0], tagName: 'TOKEN-ABCDEFGH1234' }] },
+      { ...structure, ancestors: [{ ...structure.ancestors[0], id: 'PRIVATE NAME' }] },
+      { ...structure, ancestors: [{ ...structure.ancestors[0], testId: 'QR/PRIVATE' }] },
+      ...['user_AliceSmith', 'token_abcdEFGH1234'].flatMap(value => [
+        { ...structure, ancestors: [{ ...structure.ancestors[0], id: value }] },
+        { ...structure, ancestors: [{ ...structure.ancestors[0], testId: value }] }
+      ]),
+      { ...structure, ancestors: [{ ...structure.ancestors[0], title: 'PRIVATE NAME' }] }
+    ]) logger.record('structure', { structure: unsafe } as never);
+    await logger.flush();
+    const raw = await readFile(join(directory, 'diagnostics/startup.log'), 'utf8');
+    const records = raw.trim().split('\n').map(line => JSON.parse(line));
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ event: 'structure', structure, generation: 2 });
+    expect(raw).not.toMatch(/PRIVATE|message|classes|title|QR|user_AliceSmith|token_abcdEFGH1234/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test('diagnostic IO failure never rejects flush or interrupts startup', async () => {

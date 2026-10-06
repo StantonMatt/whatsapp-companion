@@ -15,7 +15,8 @@ try {
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const local = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   const remote = await expect.poll(async () => (await app.windows()).find(p => fixturePage(p))).not.toBeUndefined().then(async () => (await app.windows()).find(p => fixturePage(p)));
-  await expect(remote.locator('#initial_startup')).toBeVisible();
+  await expect(remote.locator('progress')).toBeVisible();
+  await expect(remote.locator('#initial_startup, [data-testid="startup-screen"]')).toHaveCount(0);
   expect(await remote.locator('#companion-overlay').count()).toBe(0);
   expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(false);
   await expect(remote.locator('#pane-side')).toBeVisible({ timeout: 10000 });

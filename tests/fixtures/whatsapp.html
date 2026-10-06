@@ -218,7 +218,7 @@ window.require=name=>{if(window.fixtureDirectModulesMissing)throw new Error('fix
 if(location.hash==='#startup-splash'||location.hash==='#startup-stuck'){
  const shell=document.createDocumentFragment();
  for(const child of [...document.body.children])if(child.tagName!=='SCRIPT')shell.append(child);
- const splash=document.createElement('div');splash.id='initial_startup';
+ const splash=document.createElement('div');
  splash.innerHTML='<progress max="100" value="10"></progress>';document.body.append(splash);
  if(location.hash==='#startup-splash')setTimeout(()=>{splash.remove();document.body.append(shell);},5000);
 }

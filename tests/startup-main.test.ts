@@ -170,6 +170,41 @@ test('main sets startup throttling false and restores it only on an authenticate
   mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, generation: 0, phase: 'shell' }); expect(contents.throttling).toBe(false);
   mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, phase: 'shell' }); expect(contents.throttling).toBe(true);
 });
+test('structural diagnostics authenticate and validate heartbeats, logging once per document session', () => {
+  const contents = mocks.views[1].webContents;
+  const structure = { visibleProgress: true, tagName: 'PROGRESS', ancestors: [{ tagName: 'DIV', id: 'app', idPresent: true, testId: null, testIdPresent: false }] };
+  const heartbeat = { ...bootSession(), phase: 'splash', progress: 1, visible: true, online: true, structure };
+  for (const raw of [
+    { ...heartbeat, generation: 0 },
+    { ...heartbeat, structure: { ...structure, text: 'PRIVATE MESSAGE' } },
+    { ...heartbeat, structure: { ...structure, tagName: 'USER-ALICESMITH' } },
+    { ...heartbeat, structure: { ...structure, ancestors: [{ ...structure.ancestors[0], tagName: 'TOKEN-ABCDEFGH1234' }] } },
+    { ...heartbeat, structure: { ...structure, ancestors: [{ ...structure.ancestors[0], id: 'PRIVATE NAME' }] } },
+    ...['user_AliceSmith', 'token_abcdEFGH1234'].flatMap(value => [
+      { ...heartbeat, structure: { ...structure, ancestors: [{ ...structure.ancestors[0], id: value }] } },
+      { ...heartbeat, structure: { ...structure, ancestors: [{ ...structure.ancestors[0], testId: value, testIdPresent: true }] } }
+    ])
+  ]) mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), raw);
+  mocks.ipc.emit('companion:boot-heartbeat', { ...bootEvent(), sender: mocks.views[0].webContents }, heartbeat);
+  mocks.ipc.emit('companion:boot-heartbeat', { ...bootEvent(), senderFrame: { ...contents.frame } }, heartbeat);
+  expect(mocks.records.filter(record => record.event === 'structure')).toHaveLength(0);
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true });
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  expect(mocks.records.filter(record => record.event === 'structure')).toEqual([
+    { event: 'structure', details: { structure, generation: heartbeat.generation } }
+  ]);
+  contents.reload(); const current = bootSession();
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  expect(mocks.records.filter(record => record.event === 'structure')).toHaveLength(1);
+  const empty = { visibleProgress: false, tagName: null, ancestors: [] };
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, ...current, phase: 'unknown', progress: null, structure: empty });
+  expect(mocks.records.filter(record => record.event === 'structure')).toEqual([
+    { event: 'structure', details: { structure, generation: heartbeat.generation } },
+    { event: 'structure', details: { structure: empty, generation: current.generation } }
+  ]);
+});
 test('splash deferral expiry is logged only for the trusted current boot session', () => {
   const current = bootSession();
   for (const raw of [{ ...current, generation: 0 }, { ...current, nonce: '00000000-0000-4000-8000-000000000002' }, { ...current, text: 'PRIVATE' }])
