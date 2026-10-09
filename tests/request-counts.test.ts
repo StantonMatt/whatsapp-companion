@@ -24,7 +24,8 @@ describe('privacy-safe dispatch counts', () => {
     counts.flush();
     expect(read().find(r => r.reason === 'explicit suggest')).toMatchObject({ dispatched: 2, completed: 1, error: 1, aborted: 0, timeout: 0 });
     expect(read().find(r => r.reason === 'model list')).toMatchObject({ method: 'GET', model: '', dispatched: 1, completed: 1 });
-    expect(read().filter(r => r.method === 'POST')).toHaveLength(9);
+    expect(read().filter(r => r.method === 'POST')).toHaveLength(10);
+    expect(read().find(r => r.reason === 'sticker tagging')).toMatchObject({ method: 'POST', dispatched: 1, completed: 1 });
     const json = readFileSync(counts.path, 'utf8'); expect(json).not.toMatch(/PRIVATE|prompt|input|suggestionKey|chatId|key/i);
     expect(statSync(counts.path).mode & 0o777).toBe(0o600); expect(existsSync(join(dir, 'companion.json'))).toBe(false);
   });

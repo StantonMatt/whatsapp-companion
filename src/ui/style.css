@@ -255,3 +255,49 @@ button.primary { background: var(--green); color: var(--bg); }
 .actions.confirm .quiet { padding-inline: 6px; }
 .actions.confirm button[aria-disabled=true], .sticker-select-bar button[aria-disabled=true] { opacity: .45; cursor: default; }
 .actions.confirm > span { flex: 1; min-width: 0; font-size: 13px; }
+
+/* AI sticker tagging */
+.tag-dots { display: inline-flex; align-items: center; gap: 3px; }
+.tag-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.tag-dots i:nth-child(2) { animation: dot-two 1.2s steps(1, end) infinite var(--phase, 0ms); }
+.tag-dots i:nth-child(3) { animation: dot-three 1.2s steps(1, end) infinite var(--phase, 0ms); }
+@keyframes dot-two { 0% { opacity: 0; } 33.333% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes dot-three { 0% { opacity: 0; } 66.666% { opacity: 1; } 100% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .tag-dots i { animation: none !important; } }
+
+/* Tiles */
+.sticker-art[data-tag=working] img, .sticker-art[data-tag=done] img { opacity: .28; }
+.sticker-art[data-tag=working]::after, .sticker-art[data-tag=done]::after { display: none; }
+.sticker-overlay .tag-dots { color: var(--green); gap: 5px; }
+.sticker-overlay .tag-dots i { width: 7px; height: 7px; }
+
+/* Untagged chip */
+.chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+
+/* Bottom bar */
+.sticker-select-bar .tag-ai svg { width: 20px; height: 20px; color: var(--green); }
+.sticker-select-bar .tag-ai[aria-disabled=true] { opacity: .45; cursor: default; filter: none; }
+.sticker-select-bar .tag-untagged { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px 8px 12px; }
+.sticker-select-bar .tag-untagged svg { width: 18px; height: 18px; color: var(--green); }
+
+/* Header strip and progress line */
+.tag-strip { align-items: center; }
+.tag-strip > span { display: flex; align-items: center; gap: 8px; padding-top: 0; }
+.tag-strip .tag-dots { color: var(--green); }
+.tag-strip .ok { display: grid; color: var(--green); }
+.tag-strip .ok svg { width: 15px; height: 15px; }
+.tag-strip .icon-close { margin: 0 -6px 0 -2px; }
+.strip-link { background: none !important; color: var(--green) !important; padding: 2px 4px !important; min-height: 0 !important; border-radius: 4px !important; font-size: 12px; line-height: 1.5 !important; flex-shrink: 0; }
+.strip-link:hover { filter: none !important; text-decoration: underline; }
+.tag-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--line); }
+.tag-progress > i { display: block; height: 100%; background: var(--green); transition: width .35s ease; }
+
+/* Sticker editor */
+.detail-tools { display: flex; align-items: center; gap: 2px; }
+.sticker-detail .detail-ai { display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border-radius: 50%; background: transparent; color: var(--green); }
+.sticker-detail .detail-ai:hover { filter: none; background: var(--hover); }
+.sticker-detail .detail-ai[aria-disabled=true] { cursor: default; }
+.detail-ai svg { width: 18px; height: 18px; }
+.sticker-detail textarea[data-suggested] { border-color: var(--green); }
+.sticker-detail .sticker-detail-groups .chip[data-suggested] { box-shadow: none; outline: 1px dashed var(--green); outline-offset: -1px; }
+.sticker-detail .sticker-detail-groups .chip[data-suggested] svg { width: 11px; height: 11px; margin-left: -2px; }

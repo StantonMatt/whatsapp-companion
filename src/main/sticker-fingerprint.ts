@@ -55,7 +55,7 @@ export async function fingerprintSticker(sticker: DiscoveredSticker, decode: Sti
 
 // A small encoded file can still declare an enormous decoded image. Check the
 // canvas/frame dimensions before handing bytes to Chromium's decoder.
-function checkStickerDimensions(image: string) {
+export function checkStickerDimensions(image: string) {
   const bytes = Buffer.from(image.slice(image.indexOf(',') + 1), 'base64');
   let dimensions = false;
   const check = (width: number, height: number) => {

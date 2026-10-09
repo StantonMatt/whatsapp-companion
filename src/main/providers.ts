@@ -3,9 +3,11 @@ import { countedDispatch, type RequestReason } from './request-counts';
 import { styleFor } from '../core/style';
 import { modelEffort, reasoningBudget } from '../core/model-policy';
 
-export type GenerateInput = { provider: Provider; model: string; key: string; system: string; input: string; effort?: ReasoningEffort; signal?: AbortSignal; reason?: RequestReason };
+export type ProviderImage = { mime: 'image/webp' | 'image/png'; data: string };
+export type ProviderErrorKind = 'auth' | 'quota' | 'rate-limit' | 'no-vision' | 'offline' | 'failed';
+export type GenerateInput = { provider: Provider; model: string; key: string; system: string; input: string; effort?: ReasoningEffort; signal?: AbortSignal; reason?: RequestReason; images?: ProviderImage[] };
 export class ProviderError extends Error {
-  constructor(message: string, readonly retryable = false) { super(message); }
+  constructor(message: string, readonly retryable = false, readonly kind: ProviderErrorKind = 'failed') { super(message); }
 }
 export async function generate(request: GenerateInput, fetcher: typeof fetch = fetch): Promise<string> {
   const openai = request.provider === 'openai';
@@ -18,15 +20,22 @@ export async function generate(request: GenerateInput, fetcher: typeof fetch = f
         method: 'POST', redirect: 'error', signal,
         headers: { 'Content-Type': 'application/json', ...(openai ? { Authorization: `Bearer ${request.key}` } : { 'x-api-key': request.key, 'anthropic-version': '2023-06-01' }) },
         body: JSON.stringify(openai
-          ? { model: request.model, instructions: request.system, input: request.input, max_output_tokens: reasoningBudget(effort), store: false,
+          ? { model: request.model, instructions: request.system, input: request.images?.length ? [{ role: 'user', content: [{ type: 'input_text', text: request.input }, ...request.images.map(image => ({ type: 'input_image', image_url: `data:${image.mime};base64,${image.data}` }))] }] : request.input, max_output_tokens: reasoningBudget(effort), store: false,
             ...(effort ? { reasoning: { effort } } : {}) }
-          : { model: request.model, system: request.system, messages: [{ role: 'user', content: request.input }], max_tokens: reasoningBudget(effort),
+          : { model: request.model, system: request.system, messages: [{ role: 'user', content: request.images?.length ? [{ type: 'text', text: request.input }, ...request.images.map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mime, data: image.data } }))] : request.input }], max_tokens: reasoningBudget(effort),
             ...(effort ? { output_config: { effort } } : {}) })
       });
       if (!response.ok) {
+        let kind: ProviderErrorKind = response.status === 401 || response.status === 403 ? 'auth' : response.status === 429 ? 'rate-limit' : response.status >= 500 || response.status === 408 ? 'offline' : 'failed';
+        // Inspect only for classification; never expose provider text to controls/logs.
+        if (request.images?.length) {
+          const body = await response.text();
+          if ([400, 429].includes(response.status) && /insufficient_quota|quota|billing|credit balance|usage limit|spend limit|insufficient credits/i.test(body)) kind = 'quota';
+          if ([400, 404, 422].includes(response.status) && /(?:image|vision|multimodal).*(?:not supported|unsupported|unavailable|only supported)|(?:does not support|doesn't support|cannot read|can't read|unsupported).*(?:image|vision|multimodal)|model.*only supports text/i.test(body)) kind = 'no-vision';
+        }
         // Never echo response bodies: providers can include keys or prompt fragments in errors.
         const reason = response.status === 401 ? 'Key rejected. Add a valid API key.' : response.status === 403 ? 'This key does not have access to the selected model.' : response.status === 429 ? 'Rate limit or quota reached. Check provider usage and billing.' : response.status === 400 || response.status === 404 ? 'Model or request unavailable. Check the model ID and account access.' : 'Provider temporarily unavailable. Try again later.';
-        throw new ProviderError(`${request.provider} (${response.status}): ${reason}`, response.status >= 500 || response.status === 408);
+        throw new ProviderError(`${request.provider} (${response.status}): ${reason}`, response.status >= 500 || response.status === 408 || (kind === 'rate-limit' && !!request.images?.length), kind);
       }
       const data = await response.json() as { status?: string; output?: { type: string; content?: { type: string; text?: string }[] }[]; content?: { type: string; text?: string }[]; stop_reason?: string };
       if (data.status === 'incomplete' || data.stop_reason === 'max_tokens') throw new Error('The provider response was incomplete. Try a shorter request.');
@@ -36,9 +45,9 @@ export async function generate(request: GenerateInput, fetcher: typeof fetch = f
     });
   } catch (error) {
     if (request.signal?.aborted) throw new Error('Cancelled');
-    if (signal.aborted) throw new ProviderError(`Provider timed out after ${timeout / 1000} seconds. Try again or lower reasoning effort.`, true);
+    if (signal.aborted) throw new ProviderError(`Provider timed out after ${timeout / 1000} seconds. Try again or lower reasoning effort.`, true, 'offline');
     if (error instanceof ProviderError || error instanceof Error && /^The provider/.test(error.message)) throw error;
-    throw new ProviderError('Unable to connect to the provider. Check your network and try again.', true);
+    throw new ProviderError('Unable to connect to the provider. Check your network and try again.', true, 'offline');
   }
 }
 

@@ -13,6 +13,8 @@ function App() {
   const [status, setStatus] = useState<Status>();
   const panel = status?.panel ?? null;
   const [error, setError] = useState('');
+  const [settingsTab, setSettingsTab] = useState<'Providers' | null>(null);
+  useEffect(() => { if (panel !== 'settings') setSettingsTab(null); }, [panel]);
   useEffect(() => {
     const cache = new StatusCache();
     const receive = (update: StatusUpdate) => { const next = cache.accept(update); if (next) setStatus(next); };
@@ -60,7 +62,7 @@ function App() {
       {error && panel && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'AI settings'}>
         {status.pending && panel !== 'stickers' && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
-        {panel === 'stickers' ? <Stickers status={status} act={act} navigation={stickerNavigation}/> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close}/>}
+        {panel === 'stickers' ? <Stickers status={status} act={act} navigation={stickerNavigation} openProviders={() => { setSettingsTab('Providers'); void act({ type: 'panel', panel: 'settings' }); }}/> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close} initialTab={panel === 'settings' ? settingsTab : null}/>}
       </aside>}
     </div>
     {shield.layer}

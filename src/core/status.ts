@@ -13,10 +13,17 @@ function controlsState(state: State): ControlsState {
 const equal = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
 export function statusUpdate(status: Status, previous?: State, previousStatus?: Status): StatusUpdate {
-  const { state, sequence, stickerShield, ...transient } = status;
+  const { state, sequence, stickerShield, stickerTags, ...transient } = status;
   const update: StatusUpdate = { sequence };
   for (const key of Object.keys(transient) as (keyof typeof transient)[]) {
     if (!previousStatus || !equal(transient[key], previousStatus[key])) Object.assign(update, { [key]: transient[key] });
+  }
+  if (!previousStatus) update.stickerTags = stickerTags;
+  else {
+    const before = previousStatus.stickerTags ?? {}, after = stickerTags ?? {};
+    const upsert = Object.fromEntries(Object.entries(after).filter(([id, item]) => !equal(item, before[id])));
+    const removed = Object.keys(before).filter(id => !after[id]);
+    if (Object.keys(upsert).length || removed.length) update.stickerTagChanges = { upsert, removed };
   }
   const oldShield = previousStatus?.stickerShield;
   const sameShield = stickerShield === oldShield || (stickerShield && oldShield &&
@@ -82,7 +89,7 @@ export class StatusCache {
       const pending = this.pending; this.pending = [];
       pending.sort((a, b) => a.sequence - b.sequence).forEach(next => this.accept(next));
     } else if (this.current && update.sequence >= this.current.sequence) {
-      const { state, stickerChanges, stickerShield, ...transient } = update;
+      const { state, stickerChanges, stickerShield, stickerTagChanges, ...transient } = update;
       let next = state ? { ...this.current.state, ...state } : this.current.state;
       if (stickerChanges) {
         const stickers = new Map(next.stickers.map(s => [s.id, s]));
@@ -93,7 +100,11 @@ export class StatusCache {
       const shield = stickerShield === undefined ? this.current.stickerShield : stickerShield === null ? null :
         stickerShield.image !== undefined ? stickerShield as Status['stickerShield'] :
           this.current.stickerShield?.nonce === stickerShield.nonce ? { ...this.current.stickerShield, ...stickerShield } : null;
-      this.current = { ...this.current, ...transient, state: next, stickerShield: shield };
+      const tags = { ...(transient.stickerTags ?? this.current.stickerTags ?? {}) };
+      if (stickerTagChanges) {
+        stickerTagChanges.removed.forEach(id => delete tags[id]); Object.assign(tags, stickerTagChanges.upsert);
+      }
+      this.current = { ...this.current, ...transient, state: next, stickerShield: shield, ...(stickerTagChanges ? { stickerTags: tags } : {}) };
     }
     return this.current;
   }

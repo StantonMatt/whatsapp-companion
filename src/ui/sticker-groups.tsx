@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { State, Sticker, StickerGroup } from '../shared/model';
 import type { Act } from './index';
+import { SparkIcon } from './sticker-tagging';
 import { EditIcon, TrashIcon } from './icons';
 
 type GroupForm = { type: 'new'; name: string; stickerIds: string[] } | { type: 'rename' | 'delete'; id: string; name: string };
@@ -10,7 +11,10 @@ const updateChipFades = (row: HTMLElement) => {
   row.toggleAttribute('data-fade-end', row.scrollLeft + row.clientWidth < row.scrollWidth - 1);
 };
 
-export function useStickerGroups(state: State, act: Act, editMode: boolean, selectionChanged: () => void) {
+export function useStickerGroups(state: State, act: Act, editMode: boolean, selectionChanged: () => void, tagging?: {
+  untaggedActive: boolean; showUntagged: boolean; filterChanged(untagged?: boolean): void;
+  eligible(sticker: Sticker): boolean; start(ids: string[]): void; confirmation: React.ReactNode; running: boolean;
+}) {
   // Explicit selection/group-control interactions invalidate pending deletion cleanup.
   // Passive status pruning and temporary-selection removal do not.
   const selectionRevision = useRef(0);
@@ -69,8 +73,11 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
     return counts;
   }, [selectedStickers]);
   const activeFilter = groups.some(g => g.id === filter) ? filter : null;
+  const changeFilter = (id: string | null, untagged = false) => {
+    changed(); tagging?.filterChanged(untagged); setFilter(id);
+  };
   useEffect(() => {
-    if (filter && !groups.some(g => g.id === filter)) setFilter(null);
+    if (filter && !groups.some(g => g.id === filter)) changeFilter(null);
     if (form && form.type !== 'new' && !groups.some(g => g.id === form.id)) { session.current++; setForm(null); }
     setSelected(previous => {
       const next = new Set([...previous].filter(id => stickerIds.has(id)));
@@ -80,7 +87,7 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
   useEffect(() => { if (!selectedStickers.length) setPopover(false); }, [selectedStickers.length]);
   useEffect(() => {
     const group = created && groups.find(g => g.name === created);
-    if (group) { setFilter(group.id); setCreated(null); setForm(null); }
+    if (group) { changeFilter(group.id); setCreated(null); setForm(null); }
   }, [created, groups]);
   useEffect(() => {
     if (form) { input.current?.focus(); input.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); }
@@ -114,10 +121,9 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
     setForm({ type: 'new', name: '', stickerIds: assign ? selectedStickers.map(s => s.id) : [] });
   };
   const choose = (group: StickerGroup | null) => {
-    changed();
     cancelForm();
+    changeFilter(group?.id ?? null);
     if (group && activeFilter === group.id && editMode) setForm({ type: 'rename', id: group.id, name: group.name });
-    else setFilter(group?.id ?? null);
   };
   const submit = async () => {
     if (!form || submitting) return;
@@ -132,12 +138,13 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
     setSubmitting(false);
     if (!ok) return;
     if (submitted.type === 'new') setCreated(submitted.name.trim());
-    else { setForm(null); if (submitted.type === 'delete') setFilter(null); }
+    else { setForm(null); if (submitted.type === 'delete') changeFilter(null); }
   };
   const deleteCount = form?.type === 'delete' ? state.stickers.filter(s => s.groups.includes(form.id)).length : 0;
   const header = (groups.length > 0 || editMode) && <>
     <div ref={chipRow} className="sticker-group-chips" role="group" aria-label="Group">
-      <button className="chip" aria-pressed={!activeFilter} onClick={() => choose(null)}>All</button>
+      <button className="chip" aria-pressed={!activeFilter && !tagging?.untaggedActive} onClick={() => choose(null)}>All</button>
+      {editMode && tagging?.showUntagged && <button className="chip" aria-pressed={tagging.untaggedActive} onClick={() => { cancelForm(); changeFilter(null, true); }}><span className="dot" aria-hidden="true"/>Untagged</button>}
       {groups.map(group => <button key={group.id} className="chip" aria-pressed={activeFilter === group.id} aria-label={editMode && activeFilter === group.id ? `${group.name}, edit group` : group.name} onClick={() => choose(group)}>
         <span className="chip-name">{group.name}</span>{editMode && activeFilter === group.id && <EditIcon/>}
       </button>)}
@@ -155,15 +162,20 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
       </>}
     </div>}
   </>;
-  const bar = (visible: Sticker[], deletion: { confirming: boolean; discardingDraft?: boolean; busy: boolean; open: () => void; keep: () => void; remove: () => void }) => editMode && <div ref={barElement} className="sticker-select-bar" role={deletion.confirming ? 'group' : undefined} aria-label={deletion.confirming ? `Delete ${selectedStickers.length} sticker${selectedStickers.length === 1 ? '' : 's'}?` : undefined}>
+  const selectedTagIds = tagging ? selectedStickers.filter(tagging.eligible).map(s => s.id) : [];
+  const tagLabel = selectedTagIds.length ? `Tag ${selectedTagIds.length} untagged with AI` : 'No selected stickers available for AI tagging';
+  const bar = (visible: Sticker[], deletion: { confirming: boolean; discardingDraft?: boolean; busy: boolean; open: () => void; keep: () => void; remove: () => void }) => {
+    const visibleTagIds = tagging ? visible.filter(tagging.eligible).map(s => s.id) : [];
+    return editMode && (tagging?.confirmation || <div ref={barElement} className="sticker-select-bar" role={deletion.confirming ? 'group' : undefined} aria-label={deletion.confirming ? `Delete ${selectedStickers.length} sticker${selectedStickers.length === 1 ? '' : 's'}?` : undefined}>
     {deletion.confirming ? <>
       <span>Delete {selectedStickers.length} sticker{selectedStickers.length === 1 ? '' : 's'}?{deletion.discardingDraft && ' Unsaved changes will be discarded.'}</span>
       <button className="primary" aria-busy={deletion.busy || undefined} aria-disabled={deletion.busy || undefined} onClick={deletion.remove}>Delete</button><button className="quiet delete-keep" disabled={deletion.busy} onClick={deletion.keep}>Keep</button>
     </> : selectedStickers.length ? <>
       <button className="icon-close clear-selection" aria-label="Clear selection" title="Clear selection" onClick={() => { clear(); setBarFocus('select-all'); }}>×</button><span>{selectedStickers.length} selected</span>
+      {tagging && <button className="icon-btn tag-ai" aria-label={tagLabel} title={tagLabel} aria-disabled={!selectedTagIds.length || undefined} onClick={() => { if (selectedTagIds.length) tagging.start(selectedTagIds); }}><SparkIcon/></button>}
       <button ref={trigger} aria-expanded={popover} onClick={() => { changed(); setPopover(!popover); }}>Groups ▾</button>
       <button className="icon-btn delete-trigger" aria-label={`Delete ${selectedStickers.length} sticker${selectedStickers.length === 1 ? '' : 's'}`} title="Delete" onClick={deletion.open}><TrashIcon/></button>
-    </> : <button className="link select-all" disabled={!visible.length} onClick={() => { changed(); setSelected(new Set(visible.map(s => s.id))); setBarFocus('clear-selection'); }}>Select all</button>}
+    </> : <>{tagging && !tagging.running && visibleTagIds.length > 0 && <button className="tag-untagged" onClick={() => tagging.start(visibleTagIds)}><SparkIcon/>Tag {visibleTagIds.length} untagged</button>}<button className="link select-all" disabled={!visible.length} onClick={() => { changed(); setSelected(new Set(visible.map(s => s.id))); setBarFocus('clear-selection'); }}>Select all</button></>}
     {!deletion.confirming && popover && selectedStickers.length > 0 && <div ref={popup} className="sticker-groups-popover" role="group" aria-label={`Groups for ${selectedStickers.length} stickers`}>
       {groups.map(group => {
         const count = membership.get(group.id) ?? 0;
@@ -174,7 +186,8 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
       })}
       <button className="pop-row new" onClick={() => newGroup(true)}>New group…</button>
     </div>}
-  </div>;
+  </div>);
+  };
   return { filter: activeFilter, selected, selectionRevision,
     completeDeletion: (revision: number) => {
       if (selectionRevision.current !== revision) return;
@@ -186,8 +199,14 @@ export function useStickerGroups(state: State, act: Act, editMode: boolean, sele
   };
 }
 
-export function StickerGroupToggles({ groups, sticker, act }: { groups: StickerGroup[]; sticker: Sticker; act: Act }) {
+export function StickerGroupToggles({ groups, sticker, act, suggested = [], dropSuggested, membershipChanged }: { membershipChanged?: (id: string) => void; suggested?: string[]; dropSuggested?: (id: string) => void; groups: StickerGroup[]; sticker: Sticker; act: Act }) {
+  const description = useId();
   return groups.length > 0 && <div className="sticker-detail-groups" role="group" aria-label="Sticker groups"><span>Groups</span>
-    {groups.map(group => <button key={group.id} className="chip" aria-pressed={sticker.groups.includes(group.id)} onClick={() => void act({ type: 'stickerGroupMembership', id: sticker.id, groupId: group.id, member: !sticker.groups.includes(group.id) })}>{group.name}</button>)}
+    <span className="sr-only" id={description}>Suggested by AI · added on Save</span>
+    {groups.map(group => <button key={group.id} className="chip" data-suggested={suggested.includes(group.id) || undefined} aria-pressed={sticker.groups.includes(group.id) || suggested.includes(group.id)} title={suggested.includes(group.id) ? 'Suggested by AI · added on Save' : undefined} aria-describedby={suggested.includes(group.id) ? description : undefined} onClick={() => {
+      membershipChanged?.(group.id);
+      if (suggested.includes(group.id)) dropSuggested?.(group.id);
+      else void act({ type: 'stickerGroupMembership', id: sticker.id, groupId: group.id, member: !sticker.groups.includes(group.id) });
+    }}>{suggested.includes(group.id) && <SparkIcon/>}{group.name}</button>)}
   </div>;
 }

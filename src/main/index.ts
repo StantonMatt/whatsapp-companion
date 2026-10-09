@@ -1,3 +1,6 @@
+import { StickerTagQueue } from './sticker-tagging';
+import { checkStickerDimensions } from './sticker-fingerprint';
+import { decodeStickerTagFrames, tagImagesSchema } from './sticker-tag-images';
 import { applyStickerGroupAction } from '../core/sticker-groups';
 import { app, BrowserWindow, WebContentsView, ipcMain, session, protocol, dialog, shell, Menu } from 'electron';
 import { join, resolve } from 'node:path';
@@ -175,6 +178,30 @@ async function start() {
   win.contentView.addChildView(controls);
   controls.setBackgroundColor('#00000000');
   controls.setVisible(false);
+  const stickerTags = new StickerTagQueue({
+    state: () => store.state, update: mutate => store.update(mutate), key: provider => vault.has(provider) ? vault.get(provider) : undefined, publish: () => publish(), fixture,
+    fixtureFailure: (id, attempt) => process.argv.includes('--fixture-tag-partial') && attempt === 1 && store.state.stickers.findIndex(s => s.id === id) % 3 === 0,
+    images: async (id, provider, signal) => {
+      signal.throwIfAborted();
+      const stored = await store.readStickerBytes(id);
+      const image = `data:image/webp;base64,${stored.bytes.toString('base64')}`;
+      checkStickerDimensions(image);
+      if (!stored.animated && provider === 'openai') return [{ mime: 'image/webp', data: stored.bytes.toString('base64') }];
+      // Bounded local decode: hanging controls cannot occupy a queue slot forever.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancel: (() => void) | undefined;
+      try {
+        const frames = await new Promise<unknown>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('Sticker decode timed out.')), 10_000);
+          cancel = () => reject(new Error('Cancelled')); signal.addEventListener('abort', cancel, { once: true });
+          signal.throwIfAborted();
+          controls.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(${decodeStickerTagFrames.toString()})(${JSON.stringify(image)},${stored.animated})` }]).then(resolve, reject);
+        });
+        signal.throwIfAborted();
+        return tagImagesSchema.parse(frames);
+      } finally { clearTimeout(timer); if (cancel) signal.removeEventListener('abort', cancel); }
+    }
+  });
   const pickerDiagnostics = new PickerDiagnostics({
     directory: app.getPath('userData'), appVersion: app.getVersion(),
     send: command => { sendRemote(command); },
@@ -266,7 +293,7 @@ async function start() {
   // availability and route selection use the raw conversation/composer state.
   const stickerSendBlockedReason = () => stickerTransfer.blockedReason(assistant.snapshot, makerInputCleaning);
   const libraryMessage = () => (store.durabilityWarning ? 'Sticker changes saved; disk sync pending.' : undefined) ?? stickerBlobErrors.values().next().value ?? stickerIntakeError ?? store.recoveryHint ?? (store.state.stickers.length >= MAX_LIBRARY_STICKERS || store.state.stickers.reduce((total, s) => total + s.size, 0) >= MAX_LIBRARY_BYTES ? 'Sticker library is full' : undefined);
-  const status = (): Status => ({ sequence, panel, stickerLibraryError: libraryMessage(), stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing && !m.directionFallback).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
+  const status = (): Status => ({ sequence, panel, stickerTagging: stickerTags.progress, stickerTags: stickerTags.items, stickerTagPause: stickerTags.pause, stickerLibraryError: libraryMessage(), stickerLocation, stickerShield, stickerSend: stickerTransfer.send, theme: chrome.theme, runtimePaused: assistant.isRuntimePaused(), state: directStickerSafety.state(), chat: { destinationToken: stickerTransfer.destinationToken(assistant.snapshot), chatId: assistant.snapshot.chatId, settingsId: assistant.snapshot.settingsId, name: assistant.snapshot.name, kind: assistant.snapshot.kind, ready: (presentedSnapshot ?? assistant.snapshot).ready, canSendSticker: !stickerSendBlockedReason(), stickerSendBlockedReason: stickerSendBlockedReason(), loadedSentSamples: styleSamples(assistant.snapshot.messages.filter(m => m.outgoing && !m.directionFallback).map(m => m.text)).length }, keys: { openai: vault.has('openai'), anthropic: vault.has('anthropic') }, secureStorage: vault.secure(), fixture, message: assistant.message, pending: assistant.pending });
   let lastMakerDiagnostic: Status['stickerSend'];
   const recordStickerSend = () => {
     const send = stickerTransfer.send;
@@ -456,6 +483,7 @@ async function start() {
     if (scope !== 'global' && scope !== 'general' && (scope !== assistant.snapshot.settingsId || !assistant.snapshot.ready)) throw new Error('This conversation changed. Reopen its settings.');
   };
   const providerChanged = (keyProvider?: 'openai' | 'anthropic') => {
+    if (!keyProvider || keyProvider === store.state.provider) stickerTags.configurationChanged();
     providerCheck.invalidate(); assistant.reconfigure({ keyProvider });
     assistant.message = 'Provider configuration changed. Use Test connection to check account access.';
   };
@@ -466,6 +494,7 @@ async function start() {
   controls.webContents.on('did-finish-load', () => { statusPublisher.reset(); publish(); });
   controls.webContents.on('destroyed', () => statusPublisher.reset());
   const stickerInbox = new StickerInbox(store, () => {
+    stickerTags.observe();
     for (const id of stickerBlobErrors.keys()) {
       if (!store.state.stickers.some(s => s.id === id)) stickerBlobErrors.delete(id);
       else try { readSticker(id); } catch { /* Still needs recovery. */ }
@@ -593,9 +622,11 @@ async function start() {
       if ('scope' in action) requireScope(action.scope);
       switch (action.type) {
         case 'preferences': directStickerSafety.preferences(action.scope, action.patch);
+          stickerTags.observe();
           if (accountSafety) disableDirect(accountSafety);
           assistant.reconfigure(); break;
         case 'resetPreferences': directStickerSafety.reset(action.scope);
+          stickerTags.observe();
           assistant.reconfigure(); break;
         case 'resetStylePreferences': store.update(s => resetStylePreferences(s, action.scope)); assistant.reconfigure(); break;
         case 'provider': store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); break;
@@ -661,10 +692,19 @@ async function start() {
         case 'deleteStickerGroup':
         case 'stickerGroupMembership':
         case 'bulkStickerGroupMembership': store.update(s => applyStickerGroupAction(s, action, randomUUID)); break;
-        case 'sticker': store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms; }); break;
+        case 'tagStickers': stickerTags.enqueue(action.ids); break;
+        case 'suggestStickerTags': stickerTags.suggest(action.id, action.nonce, action.searchTerms); break;
+        case 'removeStickerTag': stickerTags.remove(action.id); break;
+        case 'stopStickerTags': stickerTags.stop(); break;
+        case 'retryStickerTags': stickerTags.retry(action.excludedIds); break;
+        case 'dismissStickerTags': stickerTags.dismiss(); break;
+        case 'sticker': stickerTags.remove(action.id); store.update(s => { const sticker = s.stickers.find(x => x.id === action.id); if (!sticker) throw new Error('Sticker no longer indexed.'); sticker.searchTerms = action.searchTerms;
+          if (action.addGroups) sticker.groups = [...new Set([...sticker.groups, ...action.addGroups.filter(id => s.stickerGroups.some(g => g.id === id))])].slice(0, 50);
+        }); break;
         case 'forgetSticker':
         case 'forgetStickers': {
           const ids = action.type === 'forgetSticker' ? [action.id] : action.ids;
+          for (const id of ids) stickerTags.remove(id);
           const removed = store.forgetStickers(ids);
           for (const id of removed) cleanupForgottenSticker(id);
           break;
@@ -869,7 +909,7 @@ async function start() {
     () => conversations.close(), () => cancelSticker(), () => stopMakerInput(), () => assistant.cancel(true),
     () => clearStickerShield(true), () => pickerDiagnostics.cancel(), () => stickerTransfer.cancel(), () => recordStickerSend(),
     () => { clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); clearTimeout(shieldCapTimer); clearTimeout(shieldRestoreTimer); },
-    () => providerCheck.invalidate(), () => modelCatalog.invalidate('openai'), () => modelCatalog.invalidate('anthropic'), () => requestCounts.close()
+    () => stickerTags.close(), () => providerCheck.invalidate(), () => modelCatalog.invalidate('openai'), () => modelCatalog.invalidate('anthropic'), () => requestCounts.close()
   ], () => {});
   const beginClosing = () => {
     if (closing) return;
