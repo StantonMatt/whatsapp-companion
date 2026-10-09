@@ -4,10 +4,11 @@ import { resolveSettings } from '../core/settings';
 import { minimumStyleSamples, styleSamples } from '../core/style';
 import { reasoningLevels, savedEffort } from '../core/model-policy';
 import type { Act } from './index';
+import { providerName, tagErrorMessage } from './sticker-tagging';
 import { BackIcon, ChevronIcon } from './icons';
 
-export function Settings({ status, act, close }: { status: Status; act: Act; close: () => void }) {
-  const [tab, setTab] = useState<string | null>(null);
+export function Settings({ status, act, close, initialTab = null }: { status: Status; act: Act; close: () => void; initialTab?: 'Providers' | null }) {
+  const [tab, setTab] = useState<string | null>(initialTab);
   const scope: Scope = status.panel === 'chat' && status.chat.settingsId ? status.chat.settingsId : 'global';
   const chat = scope !== 'global';
   const sections = chat ? ['Replies', 'Style', 'Auto replies'] : ['Replies', 'Providers', 'Style'];
@@ -19,10 +20,48 @@ export function Settings({ status, act, close }: { status: Status; act: Act; clo
         <p className="scope-line"><strong title={chat ? status.chat.name : undefined}>{chat ? status.chat.name : 'All conversations'}</strong>{chat && <span>{Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings' : 'Uses global settings'}</span>}</p>
         <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><ChevronIcon/></button>)}</nav>
         {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} reason={status.state.global.directStickerDisabledReason} sequence={status.sequence} act={act}/>}
+        {!chat && <AutomaticStickerSetting status={status} act={act}/>}
         {chat && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
       </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}
       {!tab && !chat && <div className="footer-actions"><button className="quiet" onClick={() => void act({ type: 'reload' })}>Reload WhatsApp</button></div>}
     </div>
+  </>;
+}
+function AutomaticStickerSetting({ status, act }: { status: Status; act: Act }) {
+  const checked = status.state.global.automaticStickerTags;
+  const [pending, setPending] = useState<{ value: boolean; revision: number; accepted: boolean } | null>(null);
+  const changes = useRef({ value: checked, revision: 0, running: false });
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (pending?.accepted && pending.value === checked) setPending(null);
+  }, [checked, pending]);
+  const change = async (value: boolean) => {
+    const input = changes.current;
+    input.value = value; input.revision++;
+    setPending({ value, revision: input.revision, accepted: false });
+    if (input.running) return;
+    input.running = true;
+    try {
+      for (;;) {
+        const { value, revision } = input;
+        const accepted = await act({ type: 'preferences', scope: 'global', patch: { automaticStickerTags: value } });
+        if (revision !== input.revision) {
+          if (!accepted || input.value !== value) continue;
+          // Coalesce a return to the in-flight value without sending it twice.
+          if (mounted.current) setPending({ value, revision: input.revision, accepted: true });
+          break;
+        }
+        if (mounted.current) setPending(accepted ? { value, revision, accepted: true } : null);
+        break;
+      }
+    } finally { input.running = false; }
+  };
+  const value = pending?.value ?? checked;
+  return <><Toggle label="Tag new stickers automatically" checked={value}
+    note={value && status.stickerTagPause ? `Paused: ${tagErrorMessage(status.stickerTagPause, status.state.provider).replace(/\.$/, '')}` : undefined}
+    onChange={value => void change(value)}/>
+    <p className="hint">Sends new sticker images to {providerName(status.state.provider)}.</p>
   </>;
 }
 function DirectStickerSetting({ checked, reason, sequence, act }: { checked: boolean; reason?: DirectStickerDisabledReason; sequence: number; act: Act }) {

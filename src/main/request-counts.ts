@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { modelIdSchema, providerSchema, type Provider } from '../shared/model';
 import { atomicWrite } from './store';
 
-export const requestReasons = ['open/revisit', 'incoming message', 'draft continuation', 'explicit suggest', 'refine', 'translate', 'retry', 'auto reply', 'connection test', 'model list'] as const;
+export const requestReasons = ['open/revisit', 'incoming message', 'draft continuation', 'explicit suggest', 'refine', 'translate', 'retry', 'auto reply', 'connection test', 'model list', 'sticker tagging'] as const;
 export type RequestReason = typeof requestReasons[number];
 export type RequestOutcome = 'completed' | 'error' | 'timeout' | 'aborted';
 export type RequestMetadata = { provider: Provider; model: string; reason: RequestReason; method: 'POST' | 'GET' };

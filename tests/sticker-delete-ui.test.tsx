@@ -43,7 +43,7 @@ afterEach(() => { act(() => root.unmount()); host.remove(); vi.restoreAllMocks()
 test('bulk trash confirms, focuses Keep, deletes in one action and focuses the replacement tile', async () => {
   await click('Edit stickers'); await click('Select dog'); await click('Select bird');
   const ids = [status.state.stickers[0].id, status.state.stickers[2].id];
-  expect([...bar().children].map(e => e.textContent)).toEqual(['×', '2 selected', 'Groups ▾', '']);
+  expect([...bar().children].map(e => e.textContent)).toEqual(['×', '2 selected', '', 'Groups ▾', '']);
   await click('Delete 2 stickers'); expect(actions).not.toHaveBeenCalled(); expect(document.activeElement).toBe(button('Keep', bar()));
   expect(bar().getAttribute('aria-label')).toBe('Delete 2 stickers?');
   await click('Delete', bar()); expect(actions).toHaveBeenCalledExactlyOnceWith({ type: 'forgetStickers', ids });
@@ -138,6 +138,7 @@ test('deleting the last visible position focuses the last remaining tile, and de
 
 test('editor trash confirms without moving textarea/groups; Keep and Esc restore trash before closing editor', async () => {
   await click('Edit stickers'); await click('dog'); fill('textarea', 'unsaved terms');
+  expect(actions).toHaveBeenCalledExactlyOnceWith({ type: 'removeStickerTag', id: status.state.stickers[0].id }); actions.mockClear();
   const text = host.querySelector('textarea'), groups = host.querySelector('.sticker-detail-groups');
   await click('Delete sticker'); expect(document.activeElement).toBe(button('Keep')); expect(host.querySelector('textarea')).toBe(text); expect(host.querySelector('.sticker-detail-groups')).toBe(groups);
   await click('Keep'); expect(document.activeElement).toBe(button('Delete sticker')); expect((text as HTMLTextAreaElement).value).toBe('unsaved terms');
@@ -147,6 +148,7 @@ test('editor trash confirms without moving textarea/groups; Keep and Esc restore
 
 test('confirmed editor deletion drops drafts, resets selection and focuses the replacement', async () => {
   await click('Edit stickers'); await click('Select bird'); await click('dog'); fill('textarea', 'unsaved'); const id = status.state.stickers[0].id;
+  expect(actions).toHaveBeenCalledExactlyOnceWith({ type: 'removeStickerTag', id }); actions.mockClear();
   await click('Delete sticker'); await click('Delete', host.querySelector('.sticker-detail')!);
   expect(actions).toHaveBeenCalledExactlyOnceWith({ type: 'forgetSticker', id }); expect(host.querySelector('.sticker-detail')).toBeNull();
   expect(document.activeElement).toBe(tiles()[0]); expect(tiles()[0].getAttribute('aria-label')).toBe('cat'); expect(button('Select all')).toBeDefined(); expect(announce()).toBe('1 sticker deleted');

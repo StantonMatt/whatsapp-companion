@@ -2,14 +2,14 @@ import { defaults, type State, type Scope, type Preferences, type ChatKind, type
 
 export function resolveSettings(state: State, _kind: ChatKind, chatId?: string | null) {
   // Legacy kind defaults remain on disk but all chats now inherit directly from global.
-  const values = { ...state.global, ...(chatId ? state.chats[chatId] : {}), directStickerSend: state.global.directStickerSend };
+  const values = { ...state.global, ...(chatId ? state.chats[chatId] : {}), directStickerSend: state.global.directStickerSend, automaticStickerTags: state.global.automaticStickerTags };
   const sources = Object.fromEntries(Object.keys(defaults).map(key => [key,
     chatId && Object.hasOwn(state.chats[chatId] ?? {}, key) ? 'conversation' : 'global'
   ])) as Record<keyof Preferences, string>;
   return { values, sources };
 }
 export function setPreferences(state: State, scope: Scope, patch: Partial<Preferences>) {
-  if (scope !== 'global' && patch.directStickerSend !== undefined) throw new Error('Direct sticker sending is a global setting.');
+  if (scope !== 'global' && (patch.directStickerSend !== undefined || patch.automaticStickerTags !== undefined)) throw new Error('Direct sticker sending is a global setting.');
   if (scope === 'global') {
     Object.assign(state[scope], patch);
     if (patch.directStickerSend === true) {

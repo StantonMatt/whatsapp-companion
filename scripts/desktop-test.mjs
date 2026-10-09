@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
+import { runStickerTaggingDesktop } from './sticker-tagging-desktop.mjs';
+
+if (process.argv.includes('--tagging-only')) {
+  await runStickerTaggingDesktop();
+} else {
 const fixturePage = page => page.url().split('#')[0].endsWith('fixture.html');
 const dir = await mkdtemp(join(tmpdir(), 'companion-desktop-'));
 // Main-only state (forgotten ids, fingerprints) is not sent to the controls view; read it from the saved manifest.
@@ -2640,9 +2645,13 @@ try {
   expect((await startupRecords()).some(record => record.event === 'quit')).toBe(true);
   console.log('PASS stuck splash uses exactly two ordinary reloads, then stops; disposed frames still quit');
 
+  await runStickerTaggingDesktop();
+
 } catch (error) {
   if (app) { const pages = await app.windows(); for (const page of pages) console.log(page.url(), (await page.locator('body').innerText()).slice(0, 2500)); }
   throw error;
 } finally {
   await app?.close(); await rm(dir, { recursive: true, force: true });
+}
+
 }

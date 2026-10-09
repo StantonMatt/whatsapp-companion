@@ -399,6 +399,7 @@ test('edit mode switches editors only after the dirty prompt and Done keeps Sear
 
 test('Escape keeps editing a prompt, requests close, leaves edit mode, cancels, dismisses, then permits panel close', () => {
   const next = libraryStatus(1), action = vi.fn(async () => true); drawLibrary(next, action); clickText('Edit stickers'); act(() => tile().click()); inputText('textarea', 'dirty');
+  expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'removeStickerTag', id: next.state.stickers[0].id }); action.mockClear();
   expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).not.toBeNull();
   expect(pressEscape()).toBe(true); expect(host.querySelector('.discard')).toBeNull();
   expect(host.querySelector('textarea')?.value).toBe('dirty');
@@ -412,6 +413,7 @@ test('Escape keeps editing a prompt, requests close, leaves edit mode, cancels, 
 
 test('Done and Back prompt for a filtered dirty editor without changing the search', () => {
   const next = libraryStatus(1), action = vi.fn(async (_action: unknown) => true); drawLibrary(next, action); clickText('Edit stickers'); act(() => tile().click()); inputText('textarea', 'dirty'); inputText('.search', 'no match');
+  expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'removeStickerTag', id: next.state.stickers[0].id }); action.mockClear();
   expect(host.querySelector('.sticker-detail')).toBeNull(); clickText('Done');
   expect(host.querySelector('.discard')).not.toBeNull(); expect(host.querySelector<HTMLInputElement>('.search')?.value).toBe('no match');
   clickText('Keep editing'); inputText('.search', ''); expect(host.querySelector('textarea')?.value).toBe('dirty');

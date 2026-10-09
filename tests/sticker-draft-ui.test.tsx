@@ -87,6 +87,34 @@ afterEach(() => {
   document.body.replaceChildren(); vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 
+test.each(['no-key', 'auth', 'no-vision'] as const)('tagging %s links open Providers from strip and editor, then regular navigation opens the settings list', async error => {
+  status = { ...status, fixture: false, stickerTagging: { state: 'blocked', total: 2, completed: 0, tagged: 0, failed: 0, provider: 'openai', error } };
+  await act(async () => publish());
+  await click('AI settings', document.querySelector('.tag-strip')!);
+  expect(status.panel).toBe('settings'); expect(document.querySelector('h1')?.textContent).toBe('Providers');
+  expect(button('Session-only key')).toBeDefined();
+  await click('Back to settings'); expect(document.querySelector('h1')?.textContent).toBe('AI settings');
+  await act(async () => navigate('stickers'));
+  await click('Edit stickers'); await click('dog');
+  status = { ...status, stickerTags: { [status.state.stickers[0].id]: { state: 'failed', error } } };
+  await act(async () => publish());
+  await click('AI settings', document.querySelector('.sticker-detail')!);
+  expect(document.querySelector('h1')?.textContent).toBe('Providers');
+  await click('Close panel'); await act(async () => navigate('settings'));
+  expect(document.querySelector('h1')?.textContent).toBe('AI settings');
+});
+
+test('Providers navigation keeps the unsaved-draft guard and opens its destination only after Discard', async () => {
+  await prepare('visible');
+  status = { ...status, fixture: false, stickerTagging: { state: 'blocked', total: 2, completed: 0, tagged: 0, failed: 0, provider: 'openai', error: 'no-key' } };
+  await act(async () => publish());
+  await click('AI settings', document.querySelector('.tag-strip')!);
+  expect(prompt()).not.toBeNull(); expect(panelActions()).toHaveLength(0);
+  await click('Keep editing'); expect(textarea().value).toBe('unsaved dog');
+  await click('AI settings', document.querySelector('.tag-strip')!); await click('Discard');
+  expect(status.panel).toBe('settings'); expect(document.querySelector('h1')?.textContent).toBe('Providers');
+});
+
 test.each(visibility.flatMap(view => paths.map(path => ({ view, path }))))('$path guards a $view dirty draft; Keep reveals it and Discard completes the exit', async ({ view, path }) => {
   await prepare(view); await exit(path, view);
   expect(prompt()).not.toBeNull(); expect(textarea().value).toBe('unsaved dog'); expect(panelActions()).toHaveLength(0);
@@ -139,6 +167,7 @@ test.each(visibility.flatMap(view => changes.map(change => ({ view, change }))))
 
 test.each(visibility.flatMap(view => ['bar', 'keyboard', 'editor'].map(route => ({ view, route }))))('$route deletion explicitly discards only the deleted $view draft after confirmation', async ({ view, route }) => {
   await click('Edit stickers'); await click('Select dog'); await click('dog'); fill('textarea', 'unsaved dog'); await hide(view);
+  expect(actions).toHaveBeenCalledWith({ type: 'removeStickerTag', id: status.state.stickers[0].id }); actions.mockClear();
   if (route === 'editor') {
     if (view !== 'visible') { await click('Done'); await click('Keep editing'); }
     await click('Delete sticker');

@@ -11,6 +11,7 @@ export const reasoningEffortSchema = z.enum(['none', 'low', 'medium', 'high', 'x
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 export const preferencesSchema = z.object({
   directStickerSend: z.boolean().default(false),
+  automaticStickerTags: z.boolean().default(false),
   suggestions: z.boolean(),
   tone: z.enum(['natural', 'friendly', 'professional', 'direct']),
   length: z.enum(['brief', 'balanced', 'detailed']),
@@ -31,7 +32,7 @@ const globalPreferencesSchema = preferencesSchema.extend({
 });
 // Defaults migrate complete global preferences; sparse patches/overrides must
 // leave omitted fields alone (Zod's partial() preserves field defaults).
-const preferencesPatchSchema = preferencesSchema.extend({ directStickerSend: z.boolean() }).partial();
+const preferencesPatchSchema = preferencesSchema.extend({ directStickerSend: z.boolean(), automaticStickerTags: z.boolean() }).partial();
 export type ChatKind = 'direct' | 'group' | 'unknown';
 export const chatIdSchema = z.string().regex(/^[\d-]+@(c\.us|s\.whatsapp\.net|g\.us|lid)$/);
 export const settingsIdSchema = z.union([chatIdSchema, z.string().regex(/^local:[0-9a-f-]{36}$/)]);
@@ -54,7 +55,7 @@ export const autoPermissionSchema = z.enum(['enable', 'disable', 'pause', 'resum
 export type AutoPermission = z.infer<typeof autoPermissionSchema>;
 export const defaultAuto: AutoRules = { enabled: false, startHour: 9, endHour: 18, dailyLimit: 5, cooldownMinutes: 10, delaySeconds: 30, paused: false };
 export const defaults: Preferences = {
-  directStickerSend: false, suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
+  directStickerSend: false, automaticStickerTags: false, suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
   emoji: 'match', instructions: '', style: 'off', learnFromSent: false, shareContext: false
 };
 const attachmentSchema = z.enum(['image', 'sticker', 'audio', 'video', 'document']);
@@ -148,6 +149,10 @@ export function initialState(): State {
 export type ViewBounds = { x: number; y: number; width: number; height: number };
 export type StickerShield = { nonce: string; image: string; bounds: ViewBounds; panel: ViewBounds };
 
+export type StickerTagError = 'no-key' | 'auth' | 'quota' | 'offline' | 'no-vision' | 'rate-limit' | 'failed';
+export type StickerTagSuggestion = { searchTerms: string; groups: string[] };
+export type StickerTagItem = { state: 'queued' | 'working' | 'done' | 'failed' | 'suggested'; provider?: Provider; nonce?: string; suggestion?: StickerTagSuggestion; error?: StickerTagError };
+export type StickerTagProgress = { state: 'running' | 'done' | 'partial' | 'stopped' | 'blocked'; total: number; completed: number; tagged: number; failed: number; error?: StickerTagError; provider: Provider };
 export type Status = {
   sequence: number;
   runtimePaused: boolean;
@@ -155,6 +160,9 @@ export type Status = {
   state: State & { hasForgotten?: boolean }; chat: Pick<Snapshot, 'chatId' | 'settingsId' | 'name' | 'kind' | 'ready'> & { canSendSticker: boolean; stickerSendBlockedReason?: StickerSendBlockedReason; loadedSentSamples?: number; destinationToken?: string };
   panel?: Panel; theme?: 'dark' | 'light';
   stickerLibraryError?: string;
+  stickerTagging?: StickerTagProgress | null;
+  stickerTags?: Record<string, StickerTagItem>;
+  stickerTagPause?: StickerTagError | null;
   stickerLocation?: { id: string; state: 'looking' | 'found' | 'missing' | 'unavailable' } | null;
   stickerSend?: StickerSend | null;
   stickerShield?: StickerShield | null;
@@ -163,10 +171,10 @@ export type Status = {
 };
 // Controls receive only changed UI fields; main-only durable records never cross IPC.
 export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenStickers' | 'stickers'> & { stickers: Omit<Sticker, 'fingerprint'>[]; hasForgotten: boolean };
-export type StatusUpdate = Partial<Omit<Status, 'state' | 'sequence' | 'stickerShield'>> & { sequence: number; state?: Partial<ControlsState>; stickerShield?: Omit<StickerShield, 'image'> & { image?: string } | null; stickerChanges?: { upsert: Omit<Sticker, 'fingerprint'>[]; removed: string[] } };
+export type StatusUpdate = Partial<Omit<Status, 'state' | 'sequence' | 'stickerShield'>> & { sequence: number; state?: Partial<ControlsState>; stickerShield?: Omit<StickerShield, 'image'> & { image?: string } | null; stickerTagChanges?: { upsert: Record<string, StickerTagItem>; removed: string[] }; stickerChanges?: { upsert: Omit<Sticker, 'fingerprint'>[]; removed: string[] } };
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()
-    .refine(action => action.scope === 'global' || action.patch.directStickerSend === undefined),
+    .refine(action => action.scope === 'global' || (action.patch.directStickerSend === undefined && action.patch.automaticStickerTags === undefined)),
   z.object({ type: z.literal('resetPreferences'), scope: scopeSchema }).strict(),
   z.object({ type: z.literal('resetStylePreferences'), scope: settingsIdSchema }).strict(),
   z.object({ type: z.literal('provider'), provider: providerSchema, model: modelIdSchema }).strict(),
@@ -179,7 +187,13 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('profile'), scope: z.union([z.literal('general'), settingsIdSchema]), description: z.string().max(2000) }).strict(),
   z.object({ type: z.literal('learn'), scope: z.union([z.literal('general'), settingsIdSchema]), examples: z.string().max(20000), sourceChatId: settingsIdSchema.optional() }).strict(),
   z.object({ type: z.literal('resetProfile'), scope: z.union([z.literal('general'), settingsIdSchema]) }).strict(),
-  z.object({ type: z.literal('sticker'), id: z.string().regex(/^[a-f0-9]{64}$/), searchTerms: searchTermsSchema }).strict(),
+  z.object({ type: z.literal('tagStickers'), ids: z.array(stickerBaseSchema.shape.id).min(1).max(MAX_LIBRARY_STICKERS) }).strict(),
+  z.object({ type: z.literal('suggestStickerTags'), id: stickerBaseSchema.shape.id, nonce: z.string().uuid(), searchTerms: searchTermsSchema }).strict(),
+  z.object({ type: z.literal('removeStickerTag'), id: stickerBaseSchema.shape.id }).strict(),
+  z.object({ type: z.literal('stopStickerTags') }).strict(),
+  z.object({ type: z.literal('retryStickerTags'), excludedIds: z.array(stickerBaseSchema.shape.id).max(MAX_LIBRARY_STICKERS) }).strict(),
+  z.object({ type: z.literal('dismissStickerTags') }).strict(),
+  z.object({ type: z.literal('sticker'), id: z.string().regex(/^[a-f0-9]{64}$/), searchTerms: searchTermsSchema, addGroups: z.array(stickerGroupIdSchema).max(3).optional() }).strict(),
   z.object({ type: z.literal('createStickerGroup'), name: stickerGroupNameSchema, stickerIds: z.array(stickerBaseSchema.shape.id).max(MAX_LIBRARY_STICKERS).optional() }).strict(),
   z.object({ type: z.literal('renameStickerGroup'), id: stickerGroupIdSchema, name: stickerGroupNameSchema }).strict(),
   z.object({ type: z.literal('deleteStickerGroup'), id: stickerGroupIdSchema }).strict(),
