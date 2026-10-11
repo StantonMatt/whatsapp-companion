@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events');
   const permissions = () => Object.assign(new EventEmitter(), {
-    protocol: { handle: vi.fn() }, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn()
+    protocol: { handle: vi.fn() }, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn(), setUserAgent: vi.fn()
   });
   class WebContents extends EventEmitter {
     mainFrame = { url: '', isDestroyed: () => false };
@@ -47,7 +47,11 @@ vi.mock('electron', async () => {
   class WebContentsView {
     webContents = new WebContents();
     bounds = { x: 64, y: 0, width: 430, height: 860 };
-    constructor() { mocks.views.push(this); }
+    // Main passes the remote partition session explicitly; mirror Electron by using it.
+    constructor(options?: { webPreferences?: { session?: ReturnType<typeof permissions> } }) {
+      if (options?.webPreferences?.session) this.webContents.session = options.webPreferences.session;
+      mocks.views.push(this);
+    }
     getBounds = () => this.bounds;
     setBounds = (bounds: typeof this.bounds) => { this.bounds = bounds; };
     setVisible = vi.fn();
@@ -78,7 +82,7 @@ vi.mock('electron', async () => {
   return {
     app, BrowserWindow, WebContentsView, protocol: { registerSchemesAsPrivileged: vi.fn() },
     ipcMain: Object.assign(ipcMain, { handle: (name: string, handler: (...args: any[]) => any) => mocks.handlers.set(name, handler) }),
-    session: { defaultSession: permissions() },
+    session: { defaultSession: permissions(), fromPartition: vi.fn(() => permissions()) },
     dialog: { showErrorBox: (...args: unknown[]) => mocks.errors.push(args) },
     shell: {}, Menu: { buildFromTemplate: vi.fn(template => { mocks.menu = template; return template; }), setApplicationMenu: vi.fn() }
   };
