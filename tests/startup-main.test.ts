@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events');
   const makeSession = () => Object.assign(new EventEmitter(), {
-    protocol: { handle: vi.fn() }, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn()
+    protocol: { handle: vi.fn() }, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn(), setUserAgent: vi.fn()
   });
   class Contents extends EventEmitter {
     session = makeSession(); destroyed = false; url = ''; throttling = true;
@@ -29,13 +29,18 @@ vi.mock('electron', async () => {
       this.url = this.frame.url = url; this.emit('dom-ready'); this.emit('did-finish-load');
     }
     setBackgroundThrottling(value: boolean) { this.throttling = value; }
-    setUserAgent() {} setWindowOpenHandler() {} setZoomMode() {}
+    setUserAgent = vi.fn(); setWindowOpenHandler() {} setZoomMode() {}
     async setVisualZoomLevelLimits() {} getZoomFactor() { return 1; }
     focus() {} isFocused() { return false; }
   }
   class View {
     webContents = new Contents(); bounds = { x: 0, y: 0, width: 1280, height: 860 };
-    constructor(public options: any) { this.webContents.throttling = options.webPreferences.backgroundThrottling ?? true; mocks.views.push(this); }
+    initialUserAgent: string | undefined;
+    constructor(public options: any) {
+      this.initialUserAgent = options.webPreferences.session?.setUserAgent.mock.lastCall?.[0];
+      this.webContents.session = options.webPreferences.session ?? this.webContents.session;
+      this.webContents.throttling = options.webPreferences.backgroundThrottling ?? true; mocks.views.push(this);
+    }
     setBounds(bounds: any) { this.bounds = bounds; } getBounds() { return this.bounds; }
     setVisible() {} setBackgroundColor() {}
   }
@@ -57,7 +62,7 @@ vi.mock('electron', async () => {
     getVersion: () => '0.1.0', requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), quit: vi.fn()
   });
   return { ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
-    session: { defaultSession: makeSession() }, protocol: { registerSchemesAsPrivileged() {} },
+    session: { defaultSession: makeSession(), fromPartition: vi.fn(() => makeSession()) }, protocol: { registerSchemesAsPrivileged() {} },
     dialog: { showErrorBox: mocks.errors, showMessageBox: mocks.messageBox }, shell: {},
     Menu: { buildFromTemplate: (value: unknown) => value, setApplicationMenu() {} } };
 });
@@ -99,6 +104,13 @@ function expectManualNotice() {
     type: 'notice', text: expect.stringContaining('Enable conversation context in AI settings')
   }]);
 }
+test('remote session has the page UA before view construction', () => {
+  const remote = mocks.views[1];
+  expect(remote.initialUserAgent).toContain('Chrome/');
+  expect(remote.initialUserAgent).not.toContain('Electron');
+  expect(remote.webContents.setUserAgent.mock.calls).toEqual([[remote.initialUserAgent]]);
+  expect(remote.webContents.session.setUserAgent.mock.calls).toEqual([[remote.initialUserAgent]]);
+});
 test('load before splash-delayed activation does not spend snapshot retries; ready recovers assistance and initializes chrome', () => {
   const contents = mocks.views[1].webContents;
   vi.useFakeTimers();

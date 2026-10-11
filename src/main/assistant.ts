@@ -3,7 +3,7 @@ import { emptySnapshot, defaultAuto, type Snapshot, type Status, type AutoPatch,
 import type { Connector, displayAckSchema } from '../shared/connector';
 import type { z } from 'zod';
 import { resolveSettings } from '../core/settings';
-import { SuggestionGate, snapshotKey, suggestionKey } from '../core/suggestions';
+import { SuggestionGate, snapshotKey, suggestionKey, isLinkOnlyDraft } from '../core/suggestions';
 import { autoDecision, autoSendExpiry } from '../core/auto-reply';
 import { learnStyle, styleFor } from '../core/style';
 import { savedEffort } from '../core/model-policy';
@@ -532,7 +532,8 @@ export class Assistant {
       this.schedule(() => { void this.request(undefined, true); }, this.inlineSignature()); this.automatic = true;
     } else if (!this.live && preferences.suggestions) {
       if (normalized) {
-        if (next.focused && next.caretAtEnd && this.requested.get(this.recordIdentity()) !== normalized) {
+        if (isLinkOnlyDraft(next.draft)) decision = 'link_only';
+        else if (next.focused && next.caretAtEnd && this.requested.get(this.recordIdentity()) !== normalized) {
           decision = 'debouncing_unsettled';
           this.schedule(() => { void this.request(undefined, false, undefined, 0, 'draft continuation'); }, this.inlineSignature());
         }

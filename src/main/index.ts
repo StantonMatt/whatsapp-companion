@@ -151,7 +151,14 @@ async function start() {
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   startupDiagnostics.record('window-created');
   const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
-  const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), partition: fixture ? 'persist:fixture' : 'persist:whatsapp', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true, backgroundThrottling: false } });
+  // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
+  const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
+  const userAgent = `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+  const remoteSession = session.fromPartition(fixture ? 'persist:fixture' : 'persist:whatsapp');
+  // Set the partition default before creating the view, including worker/network use.
+  // Electron 44 exposes no UA metadata parameter; its Chromium client hints remain unchanged.
+  remoteSession.setUserAgent(userAgent);
+  const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), session: remoteSession, contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true, backgroundThrottling: false } });
   startupDiagnostics.record('views-created');
   const restoreThrottling = startupThrottling(remote.webContents);
   const sendRemote = (command: unknown) => safeRendererSend(remote.webContents, closing, 'companion:command', command);
@@ -171,9 +178,7 @@ async function start() {
       throw error;
     }
   } }, request));
-  // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
-  const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
-  remote.webContents.setUserAgent(`Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`);
+  remote.webContents.setUserAgent(userAgent);
   win.contentView.addChildView(remote);
   win.contentView.addChildView(controls);
   controls.setBackgroundColor('#00000000');
@@ -872,7 +877,6 @@ async function start() {
       if (contents !== remote.webContents ? url !== uiURL : fixture ? url !== remoteURL : new URL(url).origin !== 'https://web.whatsapp.com') event.preventDefault();
     });
   }
-  const remoteSession = remote.webContents.session;
   installRemotePermissions(remote.webContents, fixture ? remoteURL : undefined, async permission => {
     permissionDialogsOpen++; startupWatchdog.resetObservations();
     try {

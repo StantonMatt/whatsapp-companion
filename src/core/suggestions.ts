@@ -1,5 +1,10 @@
 import type { Snapshot } from '../shared/model';
 
+export function isLinkOnlyDraft(draft: string): boolean {
+  const trimmed = draft.trim();
+  return Boolean(trimmed) && trimmed.split(/\s+/u).every(token => /^(?:https?:\/\/|www\.)\S+$/iu.test(token));
+}
+
 // IPC validation may reorder object properties. Compare semantic fields in a fixed order.
 function messagesForKey(s: Snapshot, authorization = false) {
   return s.messages.map(m => [m.id, m.text, m.outgoing, m.sender ?? null, m.attachment ?? null, m.attachmentName ?? null,
