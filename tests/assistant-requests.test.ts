@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { emptySnapshot, initialState, defaultAuto, type Snapshot, type State } from '../src/shared/model';
 import { Conversations } from '../src/main/conversations';
 import { Assistant } from '../src/main/assistant';
-import { suggestionKey } from '../src/core/suggestions';
+import { suggestionKey, isLinkOnlyDraft } from '../src/core/suggestions';
 import { resetStylePreferences, setPreferences } from '../src/core/settings';
 import { learnStyle } from '../src/core/style';
 import { ProviderError, type generate } from '../src/main/providers';
@@ -101,6 +101,42 @@ describe('automatic suggestion requests', () => {
 });
 
 describe('draft continuations', () => {
+  test.each([
+    ['https://example.com/a?b=c#d', true], ['http://example.com', true], ['www.example.com/a', true],
+    ['https://example.com\nwww.example.org\thttp://example.net', true], [' HTTPS://example.com  \n', true],
+    ['https://example.com read this', false], ['See https://example.com please', false],
+    ['', false], ['  \n', false], ['https://', false], ['www.', false], ['ftp://example.com', false]
+  ])('detects link-only draft %j as %s', (draft, expected) => {
+    expect(isLinkOnlyDraft(draft)).toBe(expected);
+  });
+  test.each(['https://example.com', 'www.example.com', ' https://example.com\nhttp://example.org  '])('link-only draft %j schedules no automatic work and counts only its reason', async draft => {
+    const { assistant, generator, commands } = setup();
+    const decision = vi.fn(); useRequestCounts({ decision } as unknown as RequestCounts);
+    assistant.receive(snap({ draft }));
+    expect(assistant['live']).toBeUndefined();
+    assistant.receive(snap({ draft, activity: 1 })); await vi.advanceTimersByTimeAsync(2000);
+    expect(generator).not.toHaveBeenCalled();
+    expect(commands.some(command => command.type === 'thinking')).toBe(false);
+    expect(decision.mock.calls).toEqual([['link_only']]); assistant.cancel();
+  });
+  test.each(['https://example.com read this', 'See https://example.com please'])('draft with prose %j still schedules a continuation', async draft => {
+    const { assistant, generator } = setup();
+    assistant.receive(snap({ draft })); await vi.advanceTimersByTimeAsync(1000);
+    expect(generator).toHaveBeenCalledOnce(); expect(generator.mock.calls[0][0].reason).toBe('draft continuation'); assistant.cancel();
+  });
+  test('changing a debounced prose draft to links cancels automatic continuation', async () => {
+    const { assistant, generator } = setup();
+    assistant.receive(snap({ draft: 'Read this https://example.com' })); await vi.advanceTimersByTimeAsync(500);
+    assistant.receive(snap({ draft: 'https://example.com', editRevision: 1 })); await vi.advanceTimersByTimeAsync(2000);
+    expect(generator).not.toHaveBeenCalled(); assistant.cancel();
+  });
+  test.each(['explicit suggest', 'refine', 'translate'] as const)('%s still works on a link-only draft', async reason => {
+    const { assistant, generator, offer } = setup();
+    assistant.receive(snap({ draft: 'https://example.com' }));
+    await assistant.request(reason === 'explicit suggest' ? undefined : 'Explain this link', false, reason === 'translate' ? { operation: 'translate' } : undefined);
+    expect(generator).toHaveBeenCalledOnce(); expect(generator.mock.calls[0][0].reason).toBe(reason);
+    expect(offer()).toMatchObject({ text: 'Reply', replace: reason !== 'explicit suggest' }); assistant.cancel();
+  });
   test('short pauses coalesce and whitespace-only changes do not repeat a continuation', async () => {
     const { assistant, generator } = setup();
     for (const draft of ['Hi', 'Hi there', 'Hi there friend']) {

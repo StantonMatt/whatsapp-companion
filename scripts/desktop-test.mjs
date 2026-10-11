@@ -2,9 +2,61 @@ import { _electron as electron, expect } from '@playwright/test';
 import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 
 import { runStickerTaggingDesktop } from './sticker-tagging-desktop.mjs';
+
+async function checkRemoteUserAgent(app, remote) {
+  // A disposable loopback endpoint observes real request headers without
+  // intercepting or changing the remote session's requests.
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+    response.end(JSON.stringify({ userAgent: request.headers['user-agent'] }));
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const url = `http://127.0.0.1:${server.address().port}/user-agent`;
+    const identities = await remote.evaluate(async url => {
+      const workerURL = URL.createObjectURL(new Blob([`
+        self.onmessage = async ({ data: url }) => {
+          try {
+            const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+            self.postMessage({ userAgent: navigator.userAgent, request: await response.json() });
+          } catch (error) { self.postMessage({ error: String(error) }); }
+        };
+      `], { type: 'text/javascript' }));
+      let worker;
+      let timer;
+      try {
+        worker = new Worker(workerURL);
+        const workerIdentity = await new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('Worker UA check timed out')), 7000);
+          worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data);
+          worker.onerror = event => reject(new Error(event.message));
+          worker.postMessage(url);
+        });
+        const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        return { page: navigator.userAgent, worker: workerIdentity, request: await response.json() };
+      } finally { clearTimeout(timer); worker?.terminate(); URL.revokeObjectURL(workerURL); }
+    }, url);
+    const configured = await app.evaluate(({ BrowserWindow }) => {
+      const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
+      return { page: contents.getUserAgent(), session: contents.session.getUserAgent(), chrome: process.versions.chrome };
+    });
+    expect(identities.page).toBe(configured.page);
+    expect(identities.page).toBe(configured.session);
+    expect(identities.page).toContain(`Chrome/${configured.chrome}`);
+    expect(identities.page).not.toMatch(/Electron|WhatsApp/i);
+    expect(identities.worker.userAgent).toBe(identities.page);
+    expect(identities.worker.request.userAgent).toBe(identities.page);
+    expect(identities.request.userAgent).toBe(identities.page);
+    console.log('PASS page, dedicated worker, session and page/worker fetch headers use the same Chrome UA');
+  } finally {
+    server.closeAllConnections();
+    if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
 
 if (process.argv.includes('--tagging-only')) {
   await runStickerTaggingDesktop();
@@ -28,6 +80,7 @@ try {
   await expect(remote.locator('#companion-overlay')).toHaveCount(1);
   await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(true);
   console.log('PASS splash defers connector activation and throttling restores on shell');
+  await checkRemoteUserAgent(app, remote);
   // Exercise the page's native copy APIs with trusted user input. The fixture
   // has the same scoped permission policy, with no renderer clipboard bridge.
   try {
