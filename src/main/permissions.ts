@@ -27,7 +27,10 @@ export function installRemotePermissions(remote: WebContents, fixtureURL: string
     if (!allowedFrame(contents, details) || !allowedOrigin(origin)) return false;
     // Covers ClipboardItem images and writeText. Chromium retains its gesture
     // checks; no clipboard reads or unsanitized writes are granted here.
-    return permission === 'clipboard-sanitized-write' || (promptedPermission(permission) && granted.has(permission));
+    // A false media check reads as "denied" to permissions.query, and WhatsApp
+    // then never calls getUserMedia. Each capture still goes through the
+    // request handler, so the Allow prompt remains the gate.
+    return permission === 'clipboard-sanitized-write' || permission === 'media' || (promptedPermission(permission) && granted.has(permission));
   });
   remote.session.setPermissionRequestHandler((contents, permission, callback, details) => {
     if (!allowedFrame(contents, details)) { callback(false); return; }

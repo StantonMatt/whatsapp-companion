@@ -73,14 +73,24 @@ describe('remote permissions', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  test('media checks pass so WhatsApp requests capture, which still prompts', () => {
+    const { remote, check, request, prompt } = setup();
+    expect(check(remote, 'media', origin, mainFrame)).toBe(true);
+    const callback = vi.fn();
+    request(remote, 'media', callback, mainFrame);
+    expect(prompt).toHaveBeenCalledExactlyOnceWith('media');
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   test.each(['notifications', 'media'] as const)('%s prompts and remembers only an explicit Allow', async permission => {
     const { remote, check, request, prompt } = setup();
-    expect(check(remote, permission, origin, mainFrame)).toBe(false);
+    const checked = permission === 'media';
+    expect(check(remote, permission, origin, mainFrame)).toBe(checked);
     prompt.mockResolvedValueOnce(false);
     const denied = vi.fn();
     request(remote, permission, denied, mainFrame);
     await vi.waitFor(() => expect(denied).toHaveBeenCalledExactlyOnceWith(false));
-    expect(check(remote, permission, origin, mainFrame)).toBe(false);
+    expect(check(remote, permission, origin, mainFrame)).toBe(checked);
     const allowed = vi.fn();
     request(remote, permission, allowed, mainFrame);
     await vi.waitFor(() => expect(allowed).toHaveBeenCalledExactlyOnceWith(true));
@@ -98,9 +108,9 @@ describe('remote permissions', () => {
     const { remote, check, request, prompt } = setup();
     prompt.mockRejectedValueOnce(new Error('dialog closed'));
     const callback = vi.fn();
-    request(remote, 'media', callback, mainFrame);
+    request(remote, 'notifications', callback, mainFrame);
     await vi.waitFor(() => expect(callback).toHaveBeenCalledExactlyOnceWith(false));
-    expect(check(remote, 'media', origin, mainFrame)).toBe(false);
+    expect(check(remote, 'notifications', origin, mainFrame)).toBe(false);
   });
 
   test('fixture permission applies only to the exact fixture main frame', () => {
