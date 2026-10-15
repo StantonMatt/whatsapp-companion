@@ -4,7 +4,8 @@ import { installRemotePermissions, NotificationConsent } from '../src/main/permi
 
 type Check = NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>;
 type Request = NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>;
-const origin = 'https://web.whatsapp.com';
+// Electron passes check origins in this serialized URL form.
+const origin = 'https://web.whatsapp.com/';
 const mainFrame = { isMainFrame: true, requestingUrl: `${origin}/` };
 
 function setup(fixtureURL?: string, initial?: 'allowed' | 'denied') {
@@ -39,10 +40,21 @@ describe('remote permissions', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  test.each(['https://web.whatsapp.com', 'https://web.whatsapp.com/'])('checks accept the WhatsApp origin serialized as %s', requestingOrigin => {
+    const { remote, check } = setup();
+    expect(check(remote, 'media', requestingOrigin, mainFrame)).toBe(true);
+    expect(check(remote, 'clipboard-sanitized-write', requestingOrigin, mainFrame)).toBe(true);
+  });
+
+  test.each(['https://example.com/', 'https://web.whatsapp.com.example.com/', 'invalid', 'null'])('checks deny origin %s from the WhatsApp frame', requestingOrigin => {
+    const { remote, check } = setup();
+    for (const permission of ['clipboard-sanitized-write', 'notifications', 'media'] as const) expect(check(remote, permission, requestingOrigin, mainFrame)).toBe(false);
+  });
+
   test.each([
-    ['other origin', { ...mainFrame, requestingUrl: 'https://example.com/' }, 'https://example.com'],
-    ['HTTP', { ...mainFrame, requestingUrl: 'http://web.whatsapp.com/' }, 'http://web.whatsapp.com'],
-    ['lookalike host', { ...mainFrame, requestingUrl: 'https://web.whatsapp.com.example.com/' }, 'https://web.whatsapp.com.example.com'],
+    ['other origin', { ...mainFrame, requestingUrl: 'https://example.com/' }, 'https://example.com/'],
+    ['HTTP', { ...mainFrame, requestingUrl: 'http://web.whatsapp.com/' }, 'http://web.whatsapp.com/'],
+    ['lookalike host', { ...mainFrame, requestingUrl: 'https://web.whatsapp.com.example.com/' }, 'https://web.whatsapp.com.example.com/'],
     ['subframe', { ...mainFrame, isMainFrame: false }, origin],
     ['malformed URL', { ...mainFrame, requestingUrl: 'invalid' }, origin],
     ['empty URL', { ...mainFrame, requestingUrl: '' }, origin]
