@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
-import { StartAtLogin } from '../src/main/autostart';
+import { StartAtLogin, loginExecutable } from '../src/main/autostart';
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -75,4 +75,12 @@ test('apply failure during initialization or toggle never saves', () => {
   const save = vi.fn();
   expect(() => c.login.initialize(undefined, true, save)).toThrow('OS refused');
   expect(() => c.login.change(true, false, save)).toThrow('OS refused'); expect(save).not.toHaveBeenCalled();
+});
+test('APPIMAGE is used only when this executable runs from the AppImage mount', () => {
+  const env = { APPIMAGE: '/opt/Companion.AppImage', APPDIR: '/tmp/.mount_Compan' };
+  expect(loginExecutable(env, '/tmp/.mount_Compan/whatsapp-companion')).toBe('/opt/Companion.AppImage');
+  expect(loginExecutable(env, '/home/u/.local/opt/whatsapp-companion/whatsapp-companion')).toBe('/home/u/.local/opt/whatsapp-companion/whatsapp-companion');
+  expect(loginExecutable({ ...env, APPDIR: '/tmp/.mount_Comp' }, '/tmp/.mount_Compan/whatsapp-companion')).toBe('/tmp/.mount_Compan/whatsapp-companion');
+  expect(loginExecutable({ APPIMAGE: env.APPIMAGE }, '/tmp/.mount_Compan/whatsapp-companion')).toBe('/tmp/.mount_Compan/whatsapp-companion');
+  expect(loginExecutable({}, '/usr/bin/companion')).toBe('/usr/bin/companion');
 });

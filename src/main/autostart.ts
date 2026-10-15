@@ -1,6 +1,16 @@
 import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
+
+// The AppImage runtime exports APPIMAGE and APPDIR to every child process, so
+// a Companion started from another AppImage (a terminal, an IDE) inherits that
+// app's path. Trust APPIMAGE only when this executable runs from its mount.
+export function loginExecutable(env: NodeJS.ProcessEnv, execPath: string) {
+  const { APPIMAGE, APPDIR } = env;
+  if (!APPIMAGE || !APPDIR || !isAbsolute(APPDIR)) return execPath;
+  const inside = relative(APPDIR, execPath);
+  return inside && !inside.startsWith('..') && !isAbsolute(inside) ? APPIMAGE : execPath;
+}
 
 type Options = { packaged: boolean; fixture: boolean; platform: NodeJS.Platform; configDirectory: string; executable: string;
   setLoginItemSettings: (settings: { openAtLogin: boolean; args: string[] }) => void };
