@@ -14,7 +14,11 @@ export function installRemotePermissions(remote: WebContents, fixtureURL: string
   const allowedFrame = (contents: WebContents | null, details: { isMainFrame: boolean; requestingUrl?: string }) =>
     contents === remote && details.isMainFrame && allowedURL(details.requestingUrl);
   const allowedOrigin = (origin: string) => {
-    if (!fixtureURL) return origin === whatsappOrigin;
+    // Electron serializes check origins as URLs with a trailing slash.
+    if (!fixtureURL) {
+      try { return new URL(origin).origin === whatsappOrigin; }
+      catch { return false; }
+    }
     // File origins can be serialized as file://, file:/// or null. The exact
     // fixture document URL is still required by allowedFrame.
     if (origin === 'null') return true;
