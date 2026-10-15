@@ -36,7 +36,7 @@ import { DirectStickerSender } from './direct-sticker-sender';
 import { DirectStickerSafety } from './direct-sticker-safety';
 import { installEditContextMenus } from './context-menu';
 import { installRemotePermissions, NotificationConsent } from './permissions';
-import { StartAtLogin } from './autostart';
+import { StartAtLogin, loginExecutable } from './autostart';
 import { createCompanionTray } from './tray';
 import { StartupDiagnostics } from './startup-diagnostics';
 import { StartupWatchdog } from './startup-watchdog';
@@ -160,7 +160,7 @@ async function start() {
   let suppressStartupActivation = hiddenStart;
   const login = new StartAtLogin({ packaged: app.isPackaged, fixture, platform: process.platform,
     configDirectory: process.env.XDG_CONFIG_HOME && isAbsolute(process.env.XDG_CONFIG_HOME) ? process.env.XDG_CONFIG_HOME : join(homedir(), '.config'),
-    executable: process.env.APPIMAGE || process.execPath, setLoginItemSettings: settings => app.setLoginItemSettings(settings) });
+    executable: loginExecutable(process.env, process.execPath), setLoginItemSettings: settings => app.setLoginItemSettings(settings) });
   const saveFailure = (message: string) => { dialog.showErrorBox('WhatsApp Companion', message); };
   const notifications = new NotificationConsent({
     answer: () => store.state.desktop.notifications,

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { DomConnector } from '../src/connector/dom';
 import type { RemoteCommand } from '../src/shared/connector';
@@ -576,19 +576,24 @@ test('a persisted answer suppresses the ask after restart and silently answers W
 });
 
 test('packaged startup enables XDG login once, uses APPIMAGE, repairs moves, and tray toggles persist', async () => {
-  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion App.AppImage');
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion App.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true, hidden: true });
   const path = join(directory, 'xdg/autostart/whatsapp-companion.desktop');
   expect(desktopState().startAtLogin).toBe(true); expect(trayMenu()[3].checked).toBe(true);
   expect(readFileSync(path, 'utf8')).toContain('Exec="/opt/Companion App.AppImage" --hidden');
   expect(mocks.windows[0].visible).toBe(false);
-  vi.stubEnv('APPIMAGE', '/opt/Moved Companion.AppImage'); await restart({ packaged: true });
+  vi.stubEnv('APPIMAGE', '/opt/Moved Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath)); await restart({ packaged: true });
   expect(readFileSync(path, 'utf8')).toContain('Exec="/opt/Moved Companion.AppImage" --hidden');
   trayMenu()[3].click(); expect(desktopState().startAtLogin).toBe(false); expect(existsSync(path)).toBe(false);
   trayMenu()[3].click(); expect(desktopState().startAtLogin).toBe(true); expect(existsSync(path)).toBe(true);
 });
+test('an APPIMAGE inherited from another AppImage is not used for login', async () => {
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Other.AppImage'); vi.stubEnv('APPDIR', '/tmp/.mount_Other');
+  await restart({ packaged: true });
+  expect(readFileSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'), 'utf8')).toContain(`Exec="${process.execPath}" --hidden`);
+});
 test('packaged no-tray startup does not enable autostart and cannot stay hidden', async () => {
-  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true, hidden: true, noTray: true });
   expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(false);
   expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(mocks.windows[0].visible).toBe(true);
@@ -657,7 +662,7 @@ test('activation after the initial hidden launch activation shows the window whi
   await vi.waitFor(() => expect(mocks.views[1].webContents.loaded).toBe(true));
 });
 test.each([true, false])('autostart toggle to %s rolls back OS state after a failed save and keeps its checkbox', async enabled => {
-  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true, desktop: { startAtLogin: !enabled } });
   const { Store } = await import('../src/main/store'); vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); });
   trayMenu()[3].click();
@@ -666,7 +671,7 @@ test.each([true, false])('autostart toggle to %s rolls back OS state after a fai
   expect(mocks.errors).toHaveBeenCalledExactlyOnceWith('WhatsApp Companion', expect.stringContaining('Start at login could not be updated'));
 });
 test('failed first-run autostart save rolls back the OS entry and shows an unchecked checkbox', async () => {
-  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true, failSave: true });
   expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(false);
   expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(trayMenu()[3].checked).toBe(false);
@@ -674,7 +679,7 @@ test('failed first-run autostart save rolls back the OS entry and shows an unche
 });
 test('failed first-run OS apply never saves autostart or checks its checkbox', async () => {
   const config = join(directory, 'xdg'); writeFileSync(config, 'not a directory');
-  vi.stubEnv('XDG_CONFIG_HOME', config); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  vi.stubEnv('XDG_CONFIG_HOME', config); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true });
   expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(trayMenu()[3].checked).toBe(false);
   expect(mocks.errors).toHaveBeenCalledOnce();
