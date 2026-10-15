@@ -2,6 +2,7 @@ import { bootStructuralIdentifierSchema, bootStructuralTagSchema, type BootObser
 
 // Fixed structural selectors only. Never read page text, QR data, URLs or account attributes.
 const shell = '#pane-side, [data-testid="chat-list"], [data-testid="side-panel"], [data-testid="main-navigation"], nav [data-navbar-item]';
+const chatList = '#pane-side, [data-testid="chat-list"]';
 const login = '[data-testid="qrcode"], [data-testid="qr-code"], [data-testid="login-qr-code"], [data-testid="link-device"], [data-testid="logged-out"], .landing-wrapper, [data-testid="link-device-phone-number-code-screen"], [data-ref] canvas';
 const blocked = '[data-testid="alert-phone"], [data-testid="alert-computer"], [data-testid="account-banned"], [data-testid="account-warning"], [data-testid="account-restriction"], [data-testid="startup-error"]';
 function present(doc: Document, selector: string, root: ParentNode = doc) {
@@ -42,7 +43,12 @@ export function classifyBoot(doc: Document, includeStructure = true, includeUnkn
   const base = { visible: doc.visibilityState === 'visible', online: doc.defaultView?.navigator.onLine !== false, progress: null };
   if (present(doc, blocked)) return { ...base, phase: 'blocked' };
   if (present(doc, login)) return { ...base, phase: 'login' };
-  if (present(doc, shell)) return { ...base, phase: 'shell' };
+  if (present(doc, shell)) {
+    const list = present(doc, chatList);
+    const chatListReady = Boolean(list && !list.closest('[aria-busy="true"]') && !present(doc, '[aria-busy="true"], progress, [role="progressbar"], [data-testid="loading-spinner"]', list) &&
+      !present(doc, '#initial_startup, [data-testid="startup-screen"]'));
+    return { ...base, phase: 'shell', chatListReady };
+  }
   const splash = present(doc, '#initial_startup, [data-testid="startup-screen"]');
   const progress = present(doc, 'progress, [role="progressbar"]', splash ?? doc);
   const diagnostic = includeStructure && (splash || progress || includeUnknownStructure) ? { structure: structure(progress) } : {};

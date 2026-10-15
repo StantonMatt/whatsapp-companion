@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- Buddy tray icon hand-tuned for 22 px (KDE system tray slot): 1 px margin like neighboring app icons, pixel face, tapered pixel glint. -->
+  <defs>
+    <linearGradient id="bubble" x1="0" y1="1" x2="0" y2="21" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45DF8A"/>
+      <stop offset="1" stop-color="#14AB69"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#bubble)" transform="translate(1 1) scale(.833333)" d="M12 0C20.97 0 24 2.25 24 10C24 13.32 23.44 15.63 22.1 17.19A1.19 1.15 0 0 0 21.88 18.25L23.22 22.66A0.74 0.72 0 0 1 22.05 23.43C19.88 21.76 18.16 20.76 16.45 20.04A2.22 2.16 0 0 0 15.35 19.87C14.34 19.96 13.22 20 12 20C3.03 20 0 17.75 0 10C0 2.25 3.03 0 12 0Z"/>
+  <path fill="#063D2B" d="M7 6h2v4H7zM13 6h2v4h-2zM8 11h1v1H8zM13 11h1v1h-1zM8 12h6v1H8zM9 13h4v1H9z"/>
+  <path fill="#fff" d="M17 3h1v3h-1zM16 4h1v1h-1zM18 4h1v1h-1z"/>
+  <path fill="#fff" fill-opacity=".45" d="M17 2h1v1h-1zM17 6h1v1h-1zM15 4h1v1h-1zM19 4h1v1h-1z"/>
+</svg>

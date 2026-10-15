@@ -1,5 +1,5 @@
 import { test, expect, vi } from 'vitest';
-import { cleanupOnce, safeRendererSend, requireRendererSend, positiveBounds, startupThrottling, quitAfterFlush } from '../src/main/lifecycle';
+import { cleanupOnce, safeRendererSend, requireRendererSend, positiveBounds, quitAfterFlush } from '../src/main/lifecycle';
 
 test('frame availability, destroyed state, closing and thrown sends all fail closed', () => {
   const send = vi.fn();
@@ -38,14 +38,6 @@ test('cleanup continues through thrown cancellation and close, closes both views
   ], quit);
   cleanup(); cleanup();
   expect(order).toEqual(['cancel', 'remote', 'controls', 'quit']); expect(quit).toHaveBeenCalledOnce();
-});
-test('throttling restores once after first shell; disposed webContents are ignored', () => {
-  const setBackgroundThrottling = vi.fn();
-  const restore = startupThrottling({ isDestroyed: () => false, setBackgroundThrottling });
-  expect(setBackgroundThrottling).not.toHaveBeenCalled(); restore(); restore();
-  expect(setBackgroundThrottling).toHaveBeenCalledExactlyOnceWith(true);
-  startupThrottling({ isDestroyed: () => true, setBackgroundThrottling })();
-  expect(setBackgroundThrottling).toHaveBeenCalledTimes(1);
 });
 test('zero/nonfinite bounds are rejected until positive size arrives', () => {
   for (const bounds of [{ width: 0, height: 800 }, { width: 1200, height: 0 }, { width: NaN, height: 10 }, { width: -1, height: 20 }]) expect(positiveBounds(bounds)).toBe(false);

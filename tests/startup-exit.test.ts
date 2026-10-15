@@ -12,7 +12,7 @@ vi.mock('electron', async () => {
     setPath(_name: string, value: string) { this.directory = value; }, getPath() { return this.directory; },
     getVersion: () => '0.1.0', requestSingleInstanceLock: vi.fn(), whenReady: vi.fn(), quit: vi.fn()
   });
-  return { app: mocks.app, BrowserWindow: vi.fn(), WebContentsView: vi.fn(), ipcMain: {}, session: {},
+  return { Tray: vi.fn(), nativeImage: {}, powerMonitor: {}, app: mocks.app, BrowserWindow: vi.fn(), WebContentsView: vi.fn(), ipcMain: {}, session: {},
     protocol: { registerSchemesAsPrivileged() {} }, dialog: { showErrorBox: mocks.errors }, shell: {}, Menu: {}, safeStorage: {} };
 });
 

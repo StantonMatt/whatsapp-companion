@@ -34,7 +34,7 @@ export const bootStructureSchema = z.object({
 export type BootStructure = z.infer<typeof bootStructureSchema>;
 export const bootObservationSchema = z.object({
   phase: bootPhaseSchema, progress: z.number().int().min(0).max(10).nullable(),
-  visible: z.boolean(), online: z.boolean(), structure: bootStructureSchema.optional()
+  visible: z.boolean(), online: z.boolean(), chatListReady: z.boolean().optional(), structure: bootStructureSchema.optional()
 }).strict();
 export type BootObservation = z.infer<typeof bootObservationSchema>;
 export const bootSessionSchema = z.object({ nonce: z.string().uuid().length(36), generation: z.number().int().nonnegative() }).strict();

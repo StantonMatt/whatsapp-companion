@@ -2,8 +2,9 @@ import { StickerTagQueue } from './sticker-tagging';
 import { checkStickerDimensions } from './sticker-fingerprint';
 import { decodeStickerTagFrames, tagImagesSchema } from './sticker-tag-images';
 import { applyStickerGroupAction } from '../core/sticker-groups';
-import { app, BrowserWindow, WebContentsView, ipcMain, session, protocol, dialog, shell, Menu } from 'electron';
-import { join, resolve } from 'node:path';
+import { app, BrowserWindow, WebContentsView, ipcMain, session, protocol, dialog, shell, Menu, powerMonitor } from 'electron';
+import { join, resolve, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -34,11 +35,13 @@ import { PickerDiagnostics } from './picker-diagnostics';
 import { DirectStickerSender } from './direct-sticker-sender';
 import { DirectStickerSafety } from './direct-sticker-safety';
 import { installEditContextMenus } from './context-menu';
-import { installRemotePermissions } from './permissions';
+import { installRemotePermissions, NotificationConsent } from './permissions';
+import { StartAtLogin } from './autostart';
+import { createCompanionTray } from './tray';
 import { StartupDiagnostics } from './startup-diagnostics';
 import { StartupWatchdog } from './startup-watchdog';
 import { bootSessionSchema } from '../shared/boot';
-import { safeRendererSend, requireRendererSend, positiveBounds, startupThrottling, cleanupOnce, quitAfterFlush } from './lifecycle';
+import { safeRendererSend, requireRendererSend, positiveBounds, cleanupOnce, quitAfterFlush } from './lifecycle';
 
 // Some AppImage launchers add --no-sandbox automatically. Never allow that
 // compatibility fallback to remove protection from the embedded remote page.
@@ -128,7 +131,7 @@ async function start() {
   let bootSession = { nonce: randomUUID(), generation: 0 };
   startupWatchdog.navigate(bootSession);
   let detectorSeen = false, structureLogged = false, shellChromeSynced = false, connectorReady = false;
-  let lastBoot: { phase: string; progress: number | null; visible: boolean; online: boolean } | undefined;
+  let lastBoot: { phase: string; progress: number | null; visible: boolean; online: boolean; chatListReady?: boolean } | undefined;
   let lastDecision: string | undefined;
   let stickerIntakeError: string | undefined;
   const stickerBlobErrors = new Map<string, string>();
@@ -147,9 +150,45 @@ async function start() {
   let locateRequest: { nonce: string; destinationToken: string; timer: ReturnType<typeof setTimeout> } | undefined;
   let chrome = { rail: 64, listWidth: 430, theme: 'dark' as 'dark' | 'light' };
   const win = new BrowserWindow({ width: 1280, height: 860, minWidth: 880, minHeight: 620, backgroundColor: '#161717', title: 'WhatsApp Companion',
-    icon: join(root, 'icon.png'),
+    icon: join(root, 'icon.png'), show: false,
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   startupDiagnostics.record('window-created');
+  let tray: ReturnType<typeof createCompanionTray> | undefined;
+  let startAtLogin = false;
+  // Login-item arguments are Windows-only; macOS reports login launches itself.
+  const hiddenStart = process.argv.includes('--hidden') || (app.isPackaged && process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin);
+  let suppressStartupActivation = hiddenStart;
+  const login = new StartAtLogin({ packaged: app.isPackaged, fixture, platform: process.platform,
+    configDirectory: process.env.XDG_CONFIG_HOME && isAbsolute(process.env.XDG_CONFIG_HOME) ? process.env.XDG_CONFIG_HOME : join(homedir(), '.config'),
+    executable: process.env.APPIMAGE || process.execPath, setLoginItemSettings: settings => app.setLoginItemSettings(settings) });
+  const saveFailure = (message: string) => { dialog.showErrorBox('WhatsApp Companion', message); };
+  const notifications = new NotificationConsent({
+    answer: () => store.state.desktop.notifications,
+    save: answer => { store.update(state => { state.desktop.notifications = answer; }); tray?.refresh(); },
+    saveFailed: () => { tray?.refresh(); saveFailure('The notification setting could not be saved. Check disk space and the data directory.'); },
+    visible: () => !closing && connectorReady && lastBoot?.phase === 'shell' && lastBoot.chatListReady === true && !win.isDestroyed() && win.isVisible() && !win.isMinimized(),
+    prompt: async signal => {
+      permissionDialogsOpen++; startupWatchdog.resetObservations();
+      try {
+        const result = await dialog.showMessageBox(win, { title: 'WhatsApp Companion', message: 'Allow notifications for new messages?',
+          ...(tray ? { detail: 'Closing the window keeps WhatsApp Companion running in the tray.' } : {}),
+          buttons: ['Deny', 'Allow'], defaultId: 1, cancelId: 0, signal });
+        return result.response === 1;
+      } finally { permissionDialogsOpen--; startupWatchdog.resetObservations(); }
+    }
+  });
+  const maybeAskNotifications = () => {
+    if (closing) return;
+    if (connectorReady && lastBoot?.phase === 'shell' && lastBoot.chatListReady === true && notifications.answer() === undefined) void notifications.request();
+    notifications.maybeAsk();
+  };
+  // Clicking a notification while the window is in the tray doesn't open it; use the tray icon.
+  const showWindow = () => {
+    if (closing || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.setSkipTaskbar(false); if (!win.isVisible()) win.show();
+    win.moveTop(); win.focus(); maybeAskNotifications();
+  };
   const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
   const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
@@ -160,7 +199,6 @@ async function start() {
   remoteSession.setUserAgent(userAgent);
   const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), session: remoteSession, contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true, backgroundThrottling: false } });
   startupDiagnostics.record('views-created');
-  const restoreThrottling = startupThrottling(remote.webContents);
   const sendRemote = (command: unknown) => safeRendererSend(remote.webContents, closing, 'companion:command', command);
   const requireRemote = (command: unknown) => requireRendererSend(remote.webContents, closing, 'companion:command', command);
   installEditContextMenus([remote.webContents, controls.webContents], win, Menu);
@@ -520,7 +558,7 @@ async function start() {
     if (!isRemote(event) || connectorReady) return;
     const parsed = bootSessionSchema.safeParse(raw);
     if (!parsed.success || parsed.data.nonce !== bootSession.nonce || parsed.data.generation !== bootSession.generation) return;
-    connectorReady = true;
+    connectorReady = true; maybeAskNotifications();
     // The preload deliberately drops commands during deferral. Re-establish
     // chrome and the assistant's navigation barrier after activation, even if
     // did-finish-load and every snapshot retry already happened on the splash.
@@ -549,7 +587,8 @@ async function start() {
     if (lastBoot?.visible !== observation.visible || lastBoot?.online !== observation.online) startupDiagnostics.record('visibility', { visible: observation.visible, online: observation.online });
     lastBoot = observation;
     if (decision !== lastDecision) { lastDecision = decision; startupDiagnostics.record('watchdog', { decision, reloads: startupWatchdog.reloads }); }
-    if (observation.phase === 'shell') { restoreThrottling(); if (!shellChromeSynced) { shellChromeSynced = true; chromeSync.reset(); syncChrome(); } }
+    maybeAskNotifications();
+    if (observation.phase === 'shell' && !shellChromeSynced) { shellChromeSynced = true; chromeSync.reset(); syncChrome(); }
     if (decision === 'reload') {
       startupDiagnostics.record('reload', { reloads: startupWatchdog.reloads, generation: bootSession.generation });
       cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend();
@@ -877,13 +916,13 @@ async function start() {
       if (contents !== remote.webContents ? url !== uiURL : fixture ? url !== remoteURL : new URL(url).origin !== 'https://web.whatsapp.com') event.preventDefault();
     });
   }
-  installRemotePermissions(remote.webContents, fixture ? remoteURL : undefined, async permission => {
+  installRemotePermissions(remote.webContents, fixture ? remoteURL : undefined, async () => {
     permissionDialogsOpen++; startupWatchdog.resetObservations();
     try {
-      const result = await dialog.showMessageBox(win, { message: `Allow WhatsApp to use ${permission === 'media' ? 'your microphone or camera' : 'desktop notifications'}?`, buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 });
+      const result = await dialog.showMessageBox(win, { message: 'Allow WhatsApp to use your microphone or camera?', buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0 });
       return !closing && result.response === 1;
     } finally { permissionDialogsOpen--; startupWatchdog.resetObservations(); }
-  });
+  }, notifications);
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   controls.webContents.session.setPermissionCheckHandler(() => false);
   controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
@@ -917,10 +956,11 @@ async function start() {
   ], () => {});
   const beginClosing = () => {
     if (closing) return;
-    closing = true; startupDiagnostics.record('close-requested'); clearTimeout(gcTimer); startupWatchdog.resetObservations();
+    closing = true; notifications.close(); startupDiagnostics.record('close-requested'); clearTimeout(gcTimer); startupWatchdog.resetObservations();
     stopRuntime();
   };
   const destroyViews = cleanupOnce([
+    () => { tray?.tray.destroy(); tray = undefined; },
     () => { if (!remote.webContents.isDestroyed()) remote.webContents.close(); },
     () => { if (!controls.webContents.isDestroyed()) controls.webContents.close(); }
   ], () => {
@@ -928,6 +968,7 @@ async function start() {
   });
   let drainStarted = false;
   win.on('close', event => {
+    if (tray && !closing) { event.preventDefault(); win.hide(); win.setSkipTaskbar(true); return; }
     beginClosing();
     if (!indexDrained) {
       event.preventDefault();
@@ -945,14 +986,46 @@ async function start() {
     if (!win.isDestroyed()) win.close(); else destroyViews();
   };
   win.on('closed', () => { beginClosing(); destroyViews(); });
-  app.on('second-instance', () => { if (closing || win.isDestroyed()) return; if (win.isMinimized()) win.restore(); win.focus(); });
+  app.on('second-instance', showWindow);
+  app.on('activate', () => {
+    // macOS activates once at launch. Later Dock clicks must work even while
+    // the remote navigation is still pending.
+    if (suppressStartupActivation) { suppressStartupActivation = false; return; }
+    showWindow();
+  });
+  // query-session-end can still be canceled, so only a confirmed end quits.
+  win.on('session-end', () => closeWindow?.());
+  // Electron emits a cancelable event here; its typings omit that argument.
+  powerMonitor.on('shutdown', (event?: Electron.Event) => { event?.preventDefault(); closeWindow?.(); });
   const recordVisibility = () => {
     const visible = !win.isDestroyed() && win.isVisible() && !win.isMinimized();
     startupDiagnostics.record('visibility', { visible });
     if (!visible) startupWatchdog.resetObservations();
+    else maybeAskNotifications();
   };
   win.on('show', recordVisibility); win.on('hide', recordVisibility); win.on('minimize', recordVisibility); win.on('restore', recordVisibility);
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { if (closing || remote.webContents.isDestroyed()) return; cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL).catch(() => {}); } }, { role: 'quit' }] }, { role: 'editMenu' },
+  try {
+    tray = createCompanionTray(root, { open: showWindow, notifications: () => notifications.answer() === 'allowed',
+      startAtLogin: () => startAtLogin,
+      toggleNotifications: () => {
+        notifications.change(notifications.answer() !== 'allowed'); tray?.refresh();
+      },
+      toggleStartAtLogin: () => {
+        const enabled = !startAtLogin;
+        try { login.change(enabled, startAtLogin, value => store.update(state => { state.desktop.startAtLogin = value; })); startAtLogin = enabled; }
+        catch { saveFailure('Start at login could not be updated. Check the autostart directory and local data permissions.'); }
+        tray?.refresh();
+      }, quit: () => closeWindow?.() });
+    startupDiagnostics.record('tray-created');
+  } catch { startupDiagnostics.record('tray-unavailable'); }
+  try {
+    startAtLogin = login.initialize(store.state.desktop.startAtLogin, Boolean(tray), value => store.update(state => { state.desktop.startAtLogin = value; })) === true;
+  } catch { saveFailure('Start at login could not be updated. Check the autostart directory and local data permissions.'); }
+  tray?.refresh();
+  if (!hiddenStart || !tray) win.show();
+  else win.setSkipTaskbar(true);
+  recordVisibility();
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { if (closing || remote.webContents.isDestroyed()) return; cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL).catch(() => {}); } }, { role: 'quit', accelerator: 'CmdOrCtrl+Q' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
   await win.loadURL('about:blank');
   await controls.webContents.loadURL(uiURL);
@@ -961,5 +1034,6 @@ async function start() {
   // Let navigation begin before best-effort GC; migration was already durable.
   gcTimer = setTimeout(() => { if (!closing) store.collectGarbage((phase, durationMs) => startupDiagnostics.record(phase, { durationMs })); }, 5000);
   await remote.webContents.loadURL(remoteURL).catch(() => {});
+  suppressStartupActivation = false;
   publish();
 }

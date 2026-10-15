@@ -12,7 +12,7 @@ test('initial and sticker delta omit main-only data and reconstruct a compatible
   const initial = status(); initial.state.stickers = [sticker]; initial.state.conversations.private = ['b'.repeat(64)];
   initial.state.ledger.private = [{ at: 1, messageId: 'private' }]; initial.state.forgottenStickers = ['c'.repeat(64)];
   const wire = statusUpdate(initial), cache = new StatusCache();
-  for (const field of ['conversations', 'ledger', 'forgottenStickers']) expect(wire.state).not.toHaveProperty(field);
+  for (const field of ['conversations', 'ledger', 'forgottenStickers', 'desktop']) expect(wire.state).not.toHaveProperty(field);
   expect(wire.state?.stickers?.[0]).not.toHaveProperty('fingerprint');
   expect(cache.accept(wire)?.state).toMatchObject({ conversations: {}, ledger: {}, forgottenStickers: [], stickers: [{ searchTerms: 'cat' }] });
   const edited = { ...initial, sequence: 2, state: { ...initial.state, stickers: [{ ...sticker, searchTerms: 'dog' }] } };
@@ -25,7 +25,7 @@ test('only changed settings/transient fields publish; main-only and fingerprint 
   const publisher = new StatusPublisher(() => {}), initial = status(); initial.state.stickers = [sticker];
   expect(publisher.next(initial)).toBeDefined();
   expect(publisher.next({ ...initial, sequence: 2, chat: { ...initial.chat } })).toBeUndefined();
-  const privateChange = { ...initial, sequence: 2, state: { ...initial.state, conversations: { hidden: ['a'.repeat(64)] },
+  const privateChange = { ...initial, sequence: 2, state: { ...initial.state, desktop: { notifications: 'allowed' as const, startAtLogin: true }, conversations: { hidden: ['a'.repeat(64)] },
     stickers: [{ ...sticker, fingerprint: { ...sticker.fingerprint!, hash: 'b'.repeat(16) } }] } };
   expect(publisher.next(privateChange)).toBeUndefined();
   const settingsChange = { ...privateChange, state: { ...privateChange.state, global: { ...initial.state.global, tone: 'friendly' as const } } };

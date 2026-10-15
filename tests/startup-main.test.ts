@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { DomConnector } from '../src/connector/dom';
 import type { RemoteCommand } from '../src/shared/connector';
-import { emptySnapshot } from '../src/shared/model';
+import { emptySnapshot, initialState } from '../src/shared/model';
 
 const mocks = vi.hoisted(() => ({
   app: undefined as any, ipc: undefined as any, windows: [] as any[], views: [] as any[],
+  trays: [] as any[], trayFailure: false, activateOnLoad: false, pendingRemoteLoad: undefined as Promise<void> | undefined,
+  menus: [] as any[], images: [] as any[], power: undefined as any,
   records: [] as { event: string; details: any }[], handlers: new Map<string, (...args: any[]) => any>(), errors: vi.fn(), messageBox: vi.fn(), renderer: { on: vi.fn(), invoke: vi.fn(), send: vi.fn() }
 }));
 vi.mock('electron', async () => {
@@ -17,7 +19,7 @@ vi.mock('electron', async () => {
     protocol: { handle: vi.fn() }, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn(), setUserAgent: vi.fn()
   });
   class Contents extends EventEmitter {
-    session = makeSession(); destroyed = false; url = ''; throttling = true;
+    session = makeSession(); destroyed = false; url = ''; throttling = true; loaded = false;
     frame = { url: '', isDestroyed: () => false };
     get mainFrame() { return this.frame; }
     send = vi.fn(); close = vi.fn(() => { this.destroyed = true; this.emit('destroyed'); });
@@ -26,12 +28,15 @@ vi.mock('electron', async () => {
     getURL() { return this.url; }
     async loadURL(url: string) {
       this.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
-      this.url = this.frame.url = url; this.emit('dom-ready'); this.emit('did-finish-load');
+      this.url = this.frame.url = url;
+      if (mocks.activateOnLoad) { mocks.activateOnLoad = false; mocks.app.emit('activate'); }
+      if (url.includes('fixture.html')) await mocks.pendingRemoteLoad;
+      this.loaded = true; this.emit('dom-ready'); this.emit('did-finish-load');
     }
     setBackgroundThrottling(value: boolean) { this.throttling = value; }
     setUserAgent = vi.fn(); setWindowOpenHandler() {} setZoomMode() {}
     async setVisualZoomLevelLimits() {} getZoomFactor() { return 1; }
-    focus() {} isFocused() { return false; }
+    focus() { this.emit('focus'); } isFocused() { return false; }
   }
   class View {
     webContents = new Contents(); bounds = { x: 0, y: 0, width: 1280, height: 860 };
@@ -46,10 +51,14 @@ vi.mock('electron', async () => {
   }
   class Window extends EventEmitter {
     webContents = new Contents(); destroyed = false; minimized = false; visible = true;
-    focus = vi.fn(); restore = vi.fn(() => { this.minimized = false; });
+    focus = vi.fn(); moveTop = vi.fn(); setSkipTaskbar = vi.fn();
+    show = vi.fn(() => { this.visible = true; this.emit('show'); });
+    hide = vi.fn(() => { this.visible = false; this.emit('hide'); });
+    restore = vi.fn(() => { this.minimized = false; this.emit('restore'); });
     contentView = Object.assign(new EventEmitter(), { children: [] as View[],
       addChildView: (view: View) => this.contentView.children.push(view), getBounds: () => ({ width: 1280, height: 860 }) });
-    constructor() { super(); mocks.windows.push(this); }
+    constructor(options: any) { super(); this.visible = options.show !== false; mocks.windows.push(this); }
+    isFocused() { return this.visible && !this.minimized; }
     isDestroyed() { return this.destroyed; } isMinimized() { return this.minimized; } isVisible() { return this.visible; }
     async loadURL(url: string) { await this.webContents.loadURL(url); }
     close() { let prevented = false; this.emit('close', { preventDefault: () => { prevented = true; } }); if (!prevented) { this.destroyed = true; this.emit('closed'); } }
@@ -61,10 +70,19 @@ vi.mock('electron', async () => {
     setPath(_name: string, value: string) { this.directory = value; }, getPath() { return this.directory; },
     getVersion: () => '0.1.0', requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), quit: vi.fn()
   });
-  return { ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
+  mocks.power = new EventEmitter();
+  class Tray extends EventEmitter {
+    menu: any; setToolTip = vi.fn(); destroy = vi.fn();
+    setContextMenu(menu: any) { this.menu = menu; }
+    constructor(public image: any) { super(); if (mocks.trayFailure) throw new Error('no tray'); mocks.trays.push(this); }
+  }
+  return { Tray, powerMonitor: mocks.power, nativeImage: {
+    createEmpty: () => { const image = { addRepresentation: vi.fn() }; mocks.images.push(image); return image; },
+    createFromPath: (path: string) => ({ isEmpty: () => false, toPNG: () => Buffer.from(path) })
+  }, ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
     session: { defaultSession: makeSession(), fromPartition: vi.fn(() => makeSession()) }, protocol: { registerSchemesAsPrivileged() {} },
     dialog: { showErrorBox: mocks.errors, showMessageBox: mocks.messageBox }, shell: {},
-    Menu: { buildFromTemplate: (value: unknown) => value, setApplicationMenu() {} } };
+    Menu: { buildFromTemplate: (value: unknown) => { mocks.menus.push(value); return value; }, setApplicationMenu() {} } };
 });
 vi.mock('../src/main/vault', () => ({
   configuredBackend: () => undefined, promptKey: vi.fn(), Vault: class { has() { return false; } secure() { return true; } }
@@ -75,17 +93,17 @@ vi.mock('../src/main/startup-diagnostics', () => ({ StartupDiagnostics: class {
 } }));
 let directory: string, args: string[];
 beforeEach(async () => {
-  vi.resetModules(); mocks.app?.removeAllListeners(); mocks.ipc?.removeAllListeners(); mocks.app?.quit.mockReset();
-  mocks.windows.length = mocks.views.length = mocks.records.length = 0; mocks.handlers.clear(); mocks.errors.mockClear(); mocks.messageBox.mockReset().mockResolvedValue({ response: 0 });
+  vi.resetModules(); mocks.app?.removeAllListeners(); mocks.ipc?.removeAllListeners(); mocks.power?.removeAllListeners(); mocks.app?.quit.mockReset(); if (mocks.app) mocks.app.isPackaged = false;
+  mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = mocks.menus.length = mocks.images.length = 0; mocks.trayFailure = false; mocks.activateOnLoad = false; mocks.pendingRemoteLoad = undefined; mocks.handlers.clear(); mocks.errors.mockClear(); mocks.messageBox.mockReset().mockResolvedValue({ response: 0 });
   directory = mkdtempSync(join(tmpdir(), 'startup-main-')); args = process.argv;
   process.argv = [...args, '--fixture', `--data-dir=${directory}`]; vi.stubGlobal('__dirname', '/fixture-build');
   await import('../src/main/index');
   await vi.waitFor(() => { expect(mocks.errors).not.toHaveBeenCalled(); expect(mocks.views[1]?.webContents.url).toContain('fixture.html'); });
 });
 afterEach(async () => {
-  mocks.windows[0]?.close();
+  mocks.app.emit('before-quit', { preventDefault() {} });
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalled());
-  vi.restoreAllMocks(); vi.unstubAllGlobals(); process.argv = args; rmSync(directory, { recursive: true, force: true });
+  vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); process.argv = args; rmSync(directory, { recursive: true, force: true });
 });
 function bootEvent() { const contents = mocks.views[1].webContents; return { sender: contents, senderFrame: contents.mainFrame }; }
 function bootSession() { return mocks.handlers.get('companion:boot-session')!(bootEvent()); }
@@ -175,12 +193,12 @@ test('real main wiring authenticates boot sender/frame/origin and changes nonce 
   contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
   expect(bootSession()).toMatchObject({ generation: 2 }); expect(bootSession().nonce).not.toBe(valid.nonce);
 });
-test('main sets startup throttling false and restores it only on an authenticated shell heartbeat', () => {
+test('remote stays unthrottled after shell readiness for hidden delivery', () => {
   const contents = mocks.views[1].webContents, heartbeat = { ...bootSession(), phase: 'splash', progress: null, visible: true, online: true };
   expect(contents.throttling).toBe(false);
   mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, phase: 'login' }); expect(contents.throttling).toBe(false);
   mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, generation: 0, phase: 'shell' }); expect(contents.throttling).toBe(false);
-  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, phase: 'shell' }); expect(contents.throttling).toBe(true);
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, phase: 'shell' }); expect(contents.throttling).toBe(false);
 });
 test('structural diagnostics authenticate and validate heartbeats, logging once per document session', () => {
   const contents = mocks.views[1].webContents;
@@ -230,9 +248,9 @@ test('splash deferral expiry is logged only for the trusted current boot session
 });
 test('initialization failure after shutdown handlers are installed closes the window before quitting', async () => {
   const Window = mocks.windows[0].constructor;
-  mocks.windows[0].close();
+  mocks.app.emit('before-quit', { preventDefault() {} });
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
-  mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.app.quit.mockClear();
+  mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.power.removeAllListeners(); mocks.app.quit.mockClear();
   mocks.windows.length = mocks.views.length = mocks.records.length = 0; mocks.handlers.clear();
   vi.spyOn(Window.prototype, 'loadURL').mockRejectedValue(new Error('native window load failed'));
   // Electron's quit may be cancelled by a window's asynchronous close handler.
@@ -260,7 +278,7 @@ test('close blocks second instance and renderer IPC immediately; disposed frame 
   remote.send.mockImplementation(() => { throw new Error('send'); });
   controls.send.mockImplementation(() => { throw new Error('send'); });
   remote.close.mockImplementation(() => { throw new Error('close'); });
-  win.close(); mocks.app.emit('second-instance');
+  mocks.app.emit('before-quit', { preventDefault() {} }); mocks.app.emit('second-instance'); remote.emit('focus');
   expect(win.focus).not.toHaveBeenCalled(); expect(win.restore).not.toHaveBeenCalled();
   expect(remote.send).not.toHaveBeenCalled(); expect(controls.send).not.toHaveBeenCalled();
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalled());
@@ -320,6 +338,7 @@ test.each([['media', false], ['notifications', false], ['media', true], ['notifi
     clock.mockReturnValue(now);
     mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...session, phase: 'splash', progress: 1, visible: true, online: true });
   };
+  connectorReady(); shellHeartbeat();
   for (let now = 0; now <= 40_000; now += 2000) observe(now);
   request(contents, 'media', callbacks.media, frame);
   request(contents, 'notifications', callbacks.notifications, frame);
@@ -443,7 +462,220 @@ test.each(['refinement', 'automatic suggestion', 'continuation'] as const)('%s s
     document.execCommand = previousInsert;
     delete (document as any).visibilityState; delete (navigator as any).onLine;
     document.getSelection()?.removeAllRanges(); document.body.replaceChildren();
-    mocks.windows[0].close(); await vi.advanceTimersByTimeAsync(1000);
+    mocks.app.emit('before-quit', { preventDefault() {} }); await vi.advanceTimersByTimeAsync(1000);
     vi.useRealTimers();
   }
+});
+
+
+const trayMenu = () => mocks.trays.at(-1).menu;
+const desktopState = () => JSON.parse(readFileSync(join(directory, 'companion.json'), 'utf8')).desktop;
+const shellHeartbeat = (phase = 'shell', chatListReady = phase === 'shell') => mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...bootSession(), phase, chatListReady, progress: null, visible: true, online: true });
+test('tray icon has both image scales, tooltip, ordered menu and immediate main-only toggles', () => {
+  const tray = mocks.trays[0];
+  expect(tray.setToolTip).toHaveBeenCalledExactlyOnceWith('WhatsApp Companion');
+  expect(mocks.images[0].addRepresentation.mock.calls.map(([value]: any[]) => value.scaleFactor)).toEqual([1, 2]);
+  expect(trayMenu().map((item: any) => item.label ?? item.type)).toEqual([
+    'Open WhatsApp Companion', 'separator', 'Notifications', 'Start at login', 'separator', 'Quit'
+  ]);
+  expect(mocks.menus.at(-1)[0].submenu.at(-1)).toMatchObject({ role: 'quit', accelerator: 'CmdOrCtrl+Q' });
+  expect(trayMenu()[2]).toMatchObject({ type: 'checkbox', checked: false });
+  expect(trayMenu()[3]).toMatchObject({ type: 'checkbox', checked: false });
+  trayMenu()[2].click(); expect(desktopState().notifications).toBe('allowed'); expect(trayMenu()[2].checked).toBe(true);
+  trayMenu()[2].click(); expect(desktopState().notifications).toBe('denied'); expect(trayMenu()[2].checked).toBe(false);
+  trayMenu()[3].click(); expect(desktopState().startAtLogin).toBe(true); expect(trayMenu()[3].checked).toBe(true);
+  expect(mocks.messageBox).not.toHaveBeenCalled();
+});
+test('X hides and removes the taskbar entry without stopping runtime or destroying views', () => {
+  const win = mocks.windows[0]; win.close();
+  expect(win.hide).toHaveBeenCalledOnce(); expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(true);
+  expect(win.isVisible()).toBe(false); expect(win.isDestroyed()).toBe(false);
+  expect(mocks.records.some(record => record.event === 'close-requested')).toBe(false);
+  expect(mocks.views.every(view => !view.webContents.destroyed)).toBe(true); expect(mocks.app.quit).not.toHaveBeenCalled();
+  expect(mocks.handlers.get('companion:boot-session')!(bootEvent())).not.toBeNull();
+});
+test.each(['click', 'menu', 'second-instance'])('%s shows, restores, raises and focuses; repeated click never hides', source => {
+  const win = mocks.windows[0]; win.close(); win.minimized = true;
+  if (source === 'click') mocks.trays[0].emit('click');
+  if (source === 'menu') trayMenu()[0].click();
+  if (source === 'second-instance') mocks.app.emit('second-instance', {}, ['--hidden']);
+  expect(win.isVisible()).toBe(true); expect(win.restore).toHaveBeenCalledOnce();
+  expect(win.moveTop).toHaveBeenCalled(); expect(win.focus).toHaveBeenCalled();
+  expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
+  mocks.trays[0].emit('click'); expect(win.isVisible()).toBe(true); expect(win.hide).toHaveBeenCalledOnce();
+});
+test('a cancelable session-end query leaves the app running', () => {
+  mocks.windows[0].emit('query-session-end', { preventDefault: () => { throw new Error('must not block session end'); } });
+  expect(mocks.app.quit).not.toHaveBeenCalled(); expect(mocks.trays[0].destroy).not.toHaveBeenCalled();
+});
+test.each(['tray', 'session-end', 'shutdown'])('%s quits completely and destroys the tray', async source => {
+  const tray = mocks.trays[0];
+  if (source === 'tray') trayMenu()[5].click();
+  else if (source === 'shutdown') { const event = { preventDefault: vi.fn() }; mocks.power.emit('shutdown', event); expect(event.preventDefault).toHaveBeenCalledOnce(); expect(mocks.records.some(record => record.event === 'close-requested')).toBe(true); }
+  else mocks.windows[0].emit(source, { preventDefault: () => { throw new Error('must not block session end'); } });
+  await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce()); expect(tray.destroy).toHaveBeenCalledOnce();
+});
+test.each([0, 1])('notification ask waits for signed-in shell, saves response %s once and updates permission live', async response => {
+  mocks.messageBox.mockResolvedValue({ response });
+  shellHeartbeat('login'); connectorReady(); expect(mocks.messageBox).not.toHaveBeenCalled();
+  shellHeartbeat();
+  await vi.waitFor(() => expect(desktopState().notifications).toBe(response === 1 ? 'allowed' : 'denied'));
+  expect(mocks.messageBox).toHaveBeenCalledExactlyOnceWith(mocks.windows[0], expect.objectContaining({
+    title: 'WhatsApp Companion', message: 'Allow notifications for new messages?',
+    detail: 'Closing the window keeps WhatsApp Companion running in the tray.', buttons: ['Deny', 'Allow'], defaultId: 1, cancelId: 0
+  }));
+  shellHeartbeat(); expect(mocks.messageBox).toHaveBeenCalledOnce();
+  const contents = mocks.views[1].webContents;
+  const check = contents.session.setPermissionCheckHandler.mock.lastCall[0];
+  const details = { isMainFrame: true, requestingUrl: contents.url };
+  expect(check(contents, 'notifications', 'file://', details)).toBe(response === 1);
+  trayMenu()[2].click(); expect(check(contents, 'notifications', 'file://', details)).toBe(response !== 1);
+  expect(contents.reload).not.toHaveBeenCalled();
+});
+test('ready while hidden waits for show; quitting an open prompt discards its answer', async () => {
+  let release!: (value: any) => void;
+  mocks.messageBox.mockReturnValue(new Promise(resolve => { release = resolve; }));
+  mocks.windows[0].close(); connectorReady(); shellHeartbeat(); expect(mocks.messageBox).not.toHaveBeenCalled();
+  mocks.trays[0].emit('click'); expect(mocks.messageBox).toHaveBeenCalledOnce();
+  trayMenu()[5].click(); release({ response: 1 });
+  await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
+  expect(existsSync(join(directory, 'companion.json'))).toBe(false);
+});
+async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
+  mocks.app.emit('before-quit', { preventDefault() {} }); await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalled());
+  mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.power.removeAllListeners(); mocks.app.quit.mockClear(); mocks.messageBox.mockClear();
+  mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = 0; mocks.handlers.clear();
+  mocks.trayFailure = options.noTray ?? false; mocks.app.isPackaged = options.packaged ?? false;
+  if (options.desktop) writeFileSync(join(directory, 'companion.json'), JSON.stringify({ ...initialState(), desktop: options.desktop }));
+  process.argv = [...args, '--fixture', `--data-dir=${directory}`, ...(options.hidden ? ['--hidden'] : [])];
+  vi.resetModules();
+  if (options.failSave) { const { Store } = await import('../src/main/store'); vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); }); }
+  await import('../src/main/index');
+  await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged ? 'https://web.whatsapp.com/' : 'fixture.html'));
+}
+test('hidden launch loads the remote, keeps watchdog gated, and relinking does not show the window', async () => {
+  await restart({ hidden: true }); const win = mocks.windows[0], contents = mocks.views[1].webContents;
+  expect(win.show).not.toHaveBeenCalled(); expect(win.visible).toBe(false);
+  connectorReady(); shellHeartbeat(); shellHeartbeat('login'); contents.emit('focus');
+  expect(mocks.messageBox).not.toHaveBeenCalled(); expect(win.visible).toBe(false);
+  expect(contents.reload).not.toHaveBeenCalled();
+  expect(mocks.records.filter(record => record.event === 'watchdog').every(record => record.details.decision === 'gated')).toBe(true);
+});
+test('tray construction failure shows a hidden launch; X quits and notification prompt omits tray detail', async () => {
+  await restart({ hidden: true, noTray: true });
+  expect(mocks.windows[0].visible).toBe(true); expect(existsSync(join(directory, 'companion.json'))).toBe(false);
+  connectorReady(); shellHeartbeat(); await vi.waitFor(() => expect(mocks.messageBox).toHaveBeenCalledOnce());
+  expect(mocks.messageBox.mock.lastCall![1]).not.toHaveProperty('detail');
+  mocks.windows[0].close(); await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
+});
+test('a persisted answer suppresses the ask after restart and silently answers WhatsApp requests', async () => {
+  await restart({ desktop: { notifications: 'denied' } }); connectorReady(); shellHeartbeat();
+  const contents = mocks.views[1].webContents, callback = vi.fn();
+  contents.session.setPermissionRequestHandler.mock.lastCall[0](contents, 'notifications', callback, { isMainFrame: true, requestingUrl: contents.url });
+  expect(callback).toHaveBeenCalledExactlyOnceWith(false); expect(mocks.messageBox).not.toHaveBeenCalled();
+});
+
+test('packaged startup enables XDG login once, uses APPIMAGE, repairs moves, and tray toggles persist', async () => {
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion App.AppImage');
+  await restart({ packaged: true, hidden: true });
+  const path = join(directory, 'xdg/autostart/whatsapp-companion.desktop');
+  expect(desktopState().startAtLogin).toBe(true); expect(trayMenu()[3].checked).toBe(true);
+  expect(readFileSync(path, 'utf8')).toContain('Exec="/opt/Companion App.AppImage" --hidden');
+  expect(mocks.windows[0].visible).toBe(false);
+  vi.stubEnv('APPIMAGE', '/opt/Moved Companion.AppImage'); await restart({ packaged: true });
+  expect(readFileSync(path, 'utf8')).toContain('Exec="/opt/Moved Companion.AppImage" --hidden');
+  trayMenu()[3].click(); expect(desktopState().startAtLogin).toBe(false); expect(existsSync(path)).toBe(false);
+  trayMenu()[3].click(); expect(desktopState().startAtLogin).toBe(true); expect(existsSync(path)).toBe(true);
+});
+test('packaged no-tray startup does not enable autostart and cannot stay hidden', async () => {
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  await restart({ packaged: true, hidden: true, noTray: true });
+  expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(false);
+  expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(mocks.windows[0].visible).toBe(true);
+});
+test('an unanswered hidden request stays deferred through relinking until the signed-in shell returns', async () => {
+  const win = mocks.windows[0], contents = mocks.views[1].webContents, callback = vi.fn();
+  win.close(); connectorReady(); shellHeartbeat();
+  contents.session.setPermissionRequestHandler.mock.lastCall[0](contents, 'notifications', callback, { isMainFrame: true, requestingUrl: contents.url });
+  shellHeartbeat('login'); mocks.trays[0].emit('click'); expect(mocks.messageBox).not.toHaveBeenCalled();
+  shellHeartbeat(); await vi.waitFor(() => expect(callback).toHaveBeenCalledExactlyOnceWith(false));
+  expect(mocks.messageBox).toHaveBeenCalledOnce(); expect(desktopState().notifications).toBe('denied');
+});
+
+function observeChat(chatId: string) {
+  const nonce = snapshotRequests().at(-1)?.[1].nonce;
+  mocks.ipc.emit('companion:event', bootEvent(), { type: 'snapshot', nonce, snapshot: { ...emptySnapshot,
+    chatId, ready: true, conversationOpen: true, name: 'Fixture', revision: chatId,
+    messages: [{ id: `false_${chatId}_a`, text: 'Hello', outgoing: false }] } });
+}
+test('conversation changes while hidden never show or focus the window', () => {
+  connectorReady(); observeChat('123@c.us'); const win = mocks.windows[0]; win.close(); win.show.mockClear(); win.focus.mockClear();
+  observeChat('456@c.us');
+  expect(win.show).not.toHaveBeenCalled(); expect(win.focus).not.toHaveBeenCalled(); expect(win.visible).toBe(false);
+});
+test('main-process webContents focus while hidden never restores the window', () => {
+  connectorReady(); observeChat('123@c.us'); const win = mocks.windows[0]; win.close(); win.show.mockClear(); win.focus.mockClear();
+  mocks.views[1].webContents.focus();
+  expect(win.show).not.toHaveBeenCalled(); expect(win.focus).not.toHaveBeenCalled(); expect(win.visible).toBe(false);
+});
+test('navigation before the visible loaded list does not ask, including WhatsApp requests', async () => {
+  connectorReady(); shellHeartbeat('shell', false);
+  const contents = mocks.views[1].webContents, callback = vi.fn();
+  contents.session.setPermissionRequestHandler.mock.lastCall[0](contents, 'notifications', callback, { isMainFrame: true, requestingUrl: contents.url });
+  expect(mocks.messageBox).not.toHaveBeenCalled(); expect(callback).not.toHaveBeenCalled();
+  shellHeartbeat('shell', true);
+  await vi.waitFor(() => expect(callback).toHaveBeenCalledExactlyOnceWith(false));
+  expect(mocks.messageBox).toHaveBeenCalledOnce();
+});
+test('notification save failure reports once and keeps the answer and tray checkbox for this session', async () => {
+  const { Store } = await import('../src/main/store');
+  vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); });
+  mocks.messageBox.mockResolvedValue({ response: 1 }); connectorReady(); shellHeartbeat();
+  await vi.waitFor(() => expect(mocks.errors).toHaveBeenCalledExactlyOnceWith('WhatsApp Companion', expect.stringContaining('notification setting could not be saved')));
+  expect(trayMenu()[2].checked).toBe(true);
+  shellHeartbeat(); shellHeartbeat(); expect(mocks.messageBox).toHaveBeenCalledOnce();
+  const contents = mocks.views[1].webContents, callback = vi.fn();
+  contents.session.setPermissionRequestHandler.mock.lastCall[0](contents, 'notifications', callback, { isMainFrame: true, requestingUrl: contents.url });
+  expect(callback).toHaveBeenCalledExactlyOnceWith(true); expect(existsSync(join(directory, 'companion.json'))).toBe(false);
+});
+test('activate ignores initial hidden startup and shows the window on subsequent activation', async () => {
+  mocks.activateOnLoad = true; await restart({ hidden: true }); const win = mocks.windows[0];
+  expect(win.visible).toBe(false); expect(win.show).not.toHaveBeenCalled();
+  mocks.app.emit('activate'); expect(win.visible).toBe(true); expect(win.focus).toHaveBeenCalled();
+});
+test('activation after the initial hidden launch activation shows the window while remote loading is pending', async () => {
+  let release!: () => void;
+  mocks.pendingRemoteLoad = new Promise<void>(resolve => { release = resolve; });
+  mocks.activateOnLoad = true;
+  try {
+    await restart({ hidden: true });
+    const win = mocks.windows[0], contents = mocks.views[1].webContents;
+    expect(contents.loaded).toBe(false); expect(win.visible).toBe(false); expect(win.show).not.toHaveBeenCalled();
+    mocks.app.emit('activate'); expect(win.visible).toBe(true); expect(win.focus).toHaveBeenCalled();
+    expect(contents.loaded).toBe(false);
+  } finally { release(); }
+  await vi.waitFor(() => expect(mocks.views[1].webContents.loaded).toBe(true));
+});
+test.each([true, false])('autostart toggle to %s rolls back OS state after a failed save and keeps its checkbox', async enabled => {
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  await restart({ packaged: true, desktop: { startAtLogin: !enabled } });
+  const { Store } = await import('../src/main/store'); vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); });
+  trayMenu()[3].click();
+  expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(!enabled);
+  expect(desktopState().startAtLogin).toBe(!enabled); expect(trayMenu()[3].checked).toBe(!enabled);
+  expect(mocks.errors).toHaveBeenCalledExactlyOnceWith('WhatsApp Companion', expect.stringContaining('Start at login could not be updated'));
+});
+test('failed first-run autostart save rolls back the OS entry and shows an unchecked checkbox', async () => {
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  await restart({ packaged: true, failSave: true });
+  expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(false);
+  expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(trayMenu()[3].checked).toBe(false);
+  expect(mocks.errors).toHaveBeenCalledOnce();
+});
+test('failed first-run OS apply never saves autostart or checks its checkbox', async () => {
+  const config = join(directory, 'xdg'); writeFileSync(config, 'not a directory');
+  vi.stubEnv('XDG_CONFIG_HOME', config); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage');
+  await restart({ packaged: true });
+  expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(trayMenu()[3].checked).toBe(false);
+  expect(mocks.errors).toHaveBeenCalledOnce();
 });

@@ -117,6 +117,7 @@ export const discoveredStickerSchema = stickerBaseSchema.extend({ searchTerms: s
 export type DiscoveredSticker = z.infer<typeof discoveredStickerSchema>;
 export type Sticker = z.infer<typeof stickerSchema>;
 const stateBaseSchema = z.object({
+  desktop: z.object({ notifications: z.enum(['allowed', 'denied']).optional(), startAtLogin: z.boolean().optional() }).strict().default({}),
   version: z.literal(1), global: globalPreferencesSchema,
   direct: preferencesPatchSchema, group: preferencesPatchSchema,
   chats: z.record(z.string(), preferencesPatchSchema),
@@ -142,7 +143,7 @@ export const stateSchema = stateBaseSchema.extend({ version: z.literal(2), stick
   });
 export type State = z.infer<typeof stateSchema>;
 export function initialState(): State {
-  return { version: 2, global: { ...defaults }, direct: {}, group: {}, chats: {},
+  return { version: 2, desktop: {}, global: { ...defaults }, direct: {}, group: {}, chats: {},
     provider: 'openai', models: { openai: 'gpt-6-luna', anthropic: 'claude-sonnet-5-5' }, reasoning: { openai: {}, anthropic: {} },
     conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [], stickerGroups: [], forgottenStickers: [] };
 }
@@ -170,7 +171,7 @@ export type Status = {
   message: string; pending: { text: string; due: number } | null;
 };
 // Controls receive only changed UI fields; main-only durable records never cross IPC.
-export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenStickers' | 'stickers'> & { stickers: Omit<Sticker, 'fingerprint'>[]; hasForgotten: boolean };
+export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenStickers' | 'stickers' | 'desktop'> & { stickers: Omit<Sticker, 'fingerprint'>[]; hasForgotten: boolean };
 export type StatusUpdate = Partial<Omit<Status, 'state' | 'sequence' | 'stickerShield'>> & { sequence: number; state?: Partial<ControlsState>; stickerShield?: Omit<StickerShield, 'image'> & { image?: string } | null; stickerTagChanges?: { upsert: Record<string, StickerTagItem>; removed: string[] }; stickerChanges?: { upsert: Omit<Sticker, 'fingerprint'>[]; removed: string[] } };
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()

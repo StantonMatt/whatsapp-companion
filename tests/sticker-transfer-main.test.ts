@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   win: undefined as (EventEmitter & { contentView: EventEmitter; close: () => void }) | undefined,
   handlers: new Map<string, (...args: any[]) => any>(),
   ipc: undefined as EventEmitter | undefined,
-  app: undefined as EventEmitter | undefined,
+  app: undefined as EventEmitter | undefined, power: undefined as EventEmitter | undefined,
   animated: false,
   readFailure: false,
   reads: [] as string[],
@@ -65,6 +65,7 @@ vi.mock('electron', async () => {
     constructor() { super(); mocks.win = this; }
     isDestroyed = () => false;
     loadURL = this.webContents.loadURL;
+    isVisible = () => true; isMinimized = () => false; show = vi.fn();
     close() {
       const event = { preventDefault: vi.fn() };
       this.emit('close', event);
@@ -80,6 +81,7 @@ vi.mock('electron', async () => {
   mocks.app = app;
   const ipcMain = new EventEmitter(); mocks.ipc = ipcMain;
   return {
+    Tray: vi.fn(() => { throw new Error('no fixture tray'); }), nativeImage: { createEmpty: () => { throw new Error('no fixture tray'); } }, powerMonitor: mocks.power = new EventEmitter(),
     app, BrowserWindow, WebContentsView, protocol: { registerSchemesAsPrivileged: vi.fn() },
     ipcMain: Object.assign(ipcMain, { handle: (name: string, handler: (...args: any[]) => any) => mocks.handlers.set(name, handler) }),
     session: { defaultSession: permissions(), fromPartition: vi.fn(() => permissions()) },
@@ -148,7 +150,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
   vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
-  mocks.ipc?.removeAllListeners();
+  mocks.ipc?.removeAllListeners(); mocks.app?.removeAllListeners(); mocks.power?.removeAllListeners();
 });
 
 const inputBlocked = (input = { type: 'keyDown', key: 'x' }) => {
