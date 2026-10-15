@@ -7,5 +7,6 @@ await Promise.all([
   build({ entryPoints: ['src/ui/index.tsx'], outfile: 'dist/ui/app.js', bundle: true, platform: 'browser', format: 'esm', target: 'chrome140', minify: true }),
   copyFile('src/ui/index.html', 'dist/ui/index.html'),
   copyFile('assets/icons/512x512.png', 'dist/icon.png'),
+  ...[22, 44].map(size => copyFile(`assets/tray/tray-${size}.png`, `dist/tray-${size}.png`)),
   copyFile('tests/fixtures/whatsapp.html', 'dist/fixture.html')
 ]);

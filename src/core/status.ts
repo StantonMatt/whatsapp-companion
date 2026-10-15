@@ -4,7 +4,7 @@ const projections = new WeakMap<State, ControlsState>();
 function controlsState(state: State): ControlsState {
   let projected = projections.get(state);
   if (!projected) {
-    const { conversations: _anchors, ledger: _ledger, forgottenStickers: _forgotten, stickers, ...settings } = state;
+    const { desktop: _desktop, conversations: _anchors, ledger: _ledger, forgottenStickers: _forgotten, stickers, ...settings } = state;
     projected = { ...settings, hasForgotten: _forgotten.length > 0, stickers: stickers.map(({ fingerprint: _fingerprint, ...sticker }) => sticker) };
     projections.set(state, projected);
   }
@@ -83,7 +83,7 @@ export class StatusCache {
       if (!this.current || update.sequence >= this.current.sequence) {
         // Unprojected complete statuses are accepted for local callers as well.
         const state = update.state as State;
-        const reconstructed = 'ledger' in state ? state : { ...update.state, conversations: {}, ledger: {}, forgottenStickers: [] } as State;
+        const reconstructed = 'ledger' in state ? state : { ...update.state, desktop: {}, conversations: {}, ledger: {}, forgottenStickers: [] } as State;
         this.current = { ...update, state: reconstructed } as Status;
       }
       const pending = this.pending; this.pending = [];

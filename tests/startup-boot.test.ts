@@ -503,6 +503,28 @@ test('stylesheet-hidden first shell candidate yields to visible navigation and a
   detector.start();
   try {
     expect(activate).toHaveBeenCalledExactlyOnceWith('phase');
-    expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'shell' }));
+    expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'shell', chatListReady: false }));
+    document.querySelector('style')!.remove(); document.querySelector('#initial_startup')!.remove();
+    vi.advanceTimersByTime(2000);
+    expect(heartbeat).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'shell', chatListReady: true }));
   } finally { detector.stop(); }
+});
+
+test.each([
+  ['<div id="pane-side"></div>', true],
+  ['<div data-testid="chat-list"></div>', true],
+  ['<div data-testid="side-panel"></div>', false],
+  ['<div id="pane-side" aria-busy="true"></div>', false],
+  ['<div id="pane-side"><progress></progress></div>', false],
+  ['<div id="pane-side"><div data-testid="loading-spinner"></div></div>', false],
+  ['<div id="pane-side"><progress hidden></progress></div>', true],
+  ['<div id="pane-side"></div><div id="initial_startup"></div>', false],
+  ['<nav data-testid="main-navigation"></nav><div id="pane-side" hidden></div>', false]
+])('chat-list readiness requires a loaded visible list: %s', (html, chatListReady) => {
+  document.body.innerHTML = html as string;
+  const observation = classifyBoot(document);
+  expect(observation).toMatchObject({ phase: 'shell', chatListReady });
+  const session = { nonce: '00000000-0000-4000-8000-000000000001', generation: 1 };
+  const watchdog = new StartupWatchdog(); watchdog.navigate(session);
+  expect(watchdog.accept({ ...session, ...observation }, 0, { visible: true, closing: false })?.observation.chatListReady).toBe(chatListReady);
 });

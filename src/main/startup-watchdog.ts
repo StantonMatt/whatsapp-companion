@@ -19,8 +19,8 @@ export class StartupWatchdog {
   accept(raw: unknown, now: number, gates: { visible: boolean; closing: boolean; busy?: boolean }): { observation: BootObservation; decision: WatchdogDecision } | undefined {
     const parsed = bootHeartbeatSchema.safeParse(raw);
     if (!parsed.success || !this.session || parsed.data.nonce !== this.session.nonce || parsed.data.generation !== this.session.generation) return;
-    const { phase, progress, visible, online, structure } = parsed.data;
-    const observation = { phase, progress, visible, online, ...(structure ? { structure } : {}) };
+    const { phase, progress, visible, online, structure, chatListReady } = parsed.data;
+    const observation = { phase, progress, visible, online, ...(chatListReady !== undefined ? { chatListReady } : {}), ...(structure ? { structure } : {}) };
     if (this.lastHeartbeat !== undefined && now - this.lastHeartbeat > this.thresholds.heartbeatGapMs) this.resetObservations();
     this.lastHeartbeat = now;
     if (!gates.visible || gates.closing || gates.busy || !visible || !online) {

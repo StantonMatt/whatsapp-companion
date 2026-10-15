@@ -20,3 +20,5 @@ node scripts/render-icons.cjs assets/icon /path/to/output
 ```
 
 This writes `icon-1024.png`, the eight `NxN.png` files and `icon.ico`. To rebuild only ICNS, use `runIconsTool` from `app-builder-lib/out/toolsets/icons.js` with `inputFile: 'assets/icon-source.png'`, `outputFormat: 'icns'` and `outDir: 'assets'`. Do not use the converter's `set` or `ico` formats: they would replace the tuned SVG renders.
+
+The tray uses the designer-approved `tray/tray-22.svg`, with `tray-22.png` at 1× and `tray-44.png` at 2×. Both PNGs are copied to `dist/` and loaded as native image representations; there are no unread or monochrome variants.

@@ -8,15 +8,15 @@ export async function runStickerTaggingDesktop() {
   await mkdir(scratch, { recursive: true });
   const dir = await mkdtemp(join(scratch, 'tagging-desktop-'));
   let app;
-  const launch = async (partial = false) => {
-    app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', ...partial ? ['--fixture-tag-partial'] : [], `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } });
+  const launch = async (partial = false, seed = false) => {
+    app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', ...(seed ? ['--fixture-startup-watchdog'] : []), ...partial ? ['--fixture-tag-partial'] : [], `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } });
     await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
     return (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   };
   try {
-    let local = await launch();
+    let local = await launch(false, true);
     const state = (await local.evaluate(() => window.companion.status())).state;
-    delete state.hasForgotten;
+    delete state.hasForgotten; state.desktop = { notifications: 'denied' };
     await app.close(); app = undefined;
     const sample = JSON.parse(await readFile('tests/fixtures/sticker-dedupe/images.json', 'utf8')).original.image;
     const base = Buffer.from(sample.split(',')[1], 'base64');

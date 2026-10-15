@@ -1,21 +1,23 @@
 import type { Session, WebContents } from 'electron';
 import { describe, expect, test, vi } from 'vitest';
-import { installRemotePermissions } from '../src/main/permissions';
+import { installRemotePermissions, NotificationConsent } from '../src/main/permissions';
 
 type Check = NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>;
 type Request = NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>;
 const origin = 'https://web.whatsapp.com';
 const mainFrame = { isMainFrame: true, requestingUrl: `${origin}/` };
 
-function setup(fixtureURL?: string) {
+function setup(fixtureURL?: string, initial?: 'allowed' | 'denied') {
   let check!: Check, request!: Request;
   const remote = { session: {
     setPermissionCheckHandler: (handler: Check) => { check = handler; },
     setPermissionRequestHandler: (handler: Request) => { request = handler; }
   } } as unknown as WebContents;
   const prompt = vi.fn(async (_permission: 'notifications' | 'media') => true);
-  installRemotePermissions(remote, fixtureURL, prompt);
-  return { remote, check, request, prompt };
+  let answer = initial;
+  const consent = new NotificationConsent({ answer: () => answer, save: value => { answer = value; }, visible: () => true, prompt: () => prompt('notifications') });
+  installRemotePermissions(remote, fixtureURL, prompt, consent);
+  return { remote, check, request, prompt, consent };
 }
 
 describe('remote permissions', () => {
@@ -82,7 +84,8 @@ describe('remote permissions', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
-  test.each(['notifications', 'media'] as const)('%s prompts and remembers only an explicit Allow', async permission => {
+  test('media prompts and remembers only an explicit Allow', async () => {
+    const permission = 'media';
     const { remote, check, request, prompt } = setup();
     const checked = permission === 'media';
     expect(check(remote, permission, origin, mainFrame)).toBe(checked);
@@ -133,4 +136,85 @@ describe('remote permissions', () => {
     expect(check(remote, 'clipboard-read', 'file://', fixtureFrame)).toBe(false);
     expect(prompt).not.toHaveBeenCalled();
   });
+});
+
+
+test.each(['allowed', 'denied'] as const)('saved %s notifications are checked live and requests never prompt', answer => {
+  const { remote, check, request, prompt } = setup(undefined, answer);
+  expect(check(remote, 'notifications', origin, mainFrame)).toBe(answer === 'allowed');
+  const callback = vi.fn(); request(remote, 'notifications', callback, mainFrame);
+  expect(callback).toHaveBeenCalledExactlyOnceWith(answer === 'allowed');
+  expect(prompt).not.toHaveBeenCalled();
+});
+test.each([true, false])('the first WhatsApp notification request saves %s, including Deny', async allowed => {
+  const { remote, check, request, prompt } = setup(); prompt.mockResolvedValue(allowed);
+  expect(check(remote, 'notifications', origin, mainFrame)).toBe(false);
+  const first = vi.fn(); request(remote, 'notifications', first, mainFrame);
+  await vi.waitFor(() => expect(first).toHaveBeenCalledExactlyOnceWith(allowed));
+  const second = vi.fn(); request(remote, 'notifications', second, mainFrame);
+  expect(second).toHaveBeenCalledExactlyOnceWith(allowed); expect(prompt).toHaveBeenCalledOnce();
+  expect(check(remote, 'notifications', origin, mainFrame)).toBe(allowed);
+});
+function consentSetup() {
+  let answer: 'allowed' | 'denied' | undefined, visible = false;
+  const save = vi.fn((value: 'allowed' | 'denied') => { answer = value; });
+  let release!: (value: boolean) => void;
+  const prompt = vi.fn((_signal: AbortSignal) => new Promise<boolean>(resolve => { release = resolve; }));
+  const consent = new NotificationConsent({ answer: () => answer, save, visible: () => visible, prompt });
+  return { consent, prompt, save, show: () => { visible = true; consent.maybeAsk(); }, release: (value: boolean) => release(value) };
+}
+test('hidden requests wait for show, coalesce into one prompt and save one answer', async () => {
+  const c = consentSetup(); const first = c.consent.request(), second = c.consent.request();
+  expect(c.prompt).not.toHaveBeenCalled(); c.show(); expect(c.prompt).toHaveBeenCalledOnce();
+  c.release(false); expect(await first).toBe(false); expect(await second).toBe(false);
+  expect(c.save).toHaveBeenCalledExactlyOnceWith('denied');
+  expect(await c.consent.request()).toBe(false); expect(c.prompt).toHaveBeenCalledOnce();
+});
+test('quit aborts an open notification dialog without saving its late answer', async () => {
+  const c = consentSetup(); c.show(); const pending = c.consent.request();
+  c.consent.close(); expect(await pending).toBe(false);
+  expect(c.prompt.mock.calls[0][0].aborted).toBe(true);
+  c.release(true); await Promise.resolve(); expect(c.save).not.toHaveBeenCalled();
+});
+test('a tray toggle saves immediately and supersedes a pending dialog', async () => {
+  const c = consentSetup(); c.show(); const pending = c.consent.request();
+  c.consent.change(true); expect(c.save).toHaveBeenCalledExactlyOnceWith('allowed');
+  expect(await pending).toBe(true); expect(c.prompt.mock.calls[0][0].aborted).toBe(true);
+  c.release(false); await Promise.resolve(); expect(c.save).toHaveBeenCalledOnce();
+});
+
+test.each([true, false])('a failed consent save retains the actual %s answer for this session and reports once', async allowed => {
+  const prompt = vi.fn(async () => allowed), save = vi.fn(() => { throw new Error('disk full'); }), saveFailed = vi.fn();
+  const consent = new NotificationConsent({ answer: () => undefined, save, saveFailed, visible: () => true, prompt });
+  expect(await consent.request()).toBe(allowed);
+  expect(consent.answer()).toBe(allowed ? 'allowed' : 'denied');
+  for (let i = 0; i < 5; i++) { expect(await consent.request()).toBe(allowed); consent.maybeAsk(); }
+  expect(prompt).toHaveBeenCalledOnce(); expect(save).toHaveBeenCalledOnce(); expect(saveFailed).toHaveBeenCalledOnce();
+});
+test('a failed tray save settles an outstanding prompt with the chosen answer', async () => {
+  const c = consentSetup(); c.show(); const pending = c.consent.request();
+  c.save.mockImplementation(() => { throw new Error('disk full'); });
+  c.consent.change(true); expect(await pending).toBe(true); expect(c.consent.answer()).toBe('allowed');
+  c.release(false); await Promise.resolve(); expect(c.save).toHaveBeenCalledOnce();
+});
+test('closing revokes a saved Allow in permission checks and requests', () => {
+  const { remote, check, request, prompt, consent } = setup(undefined, 'allowed');
+  consent.close();
+  expect(check(remote, 'notifications', origin, mainFrame)).toBe(false);
+  const callback = vi.fn(); request(remote, 'notifications', callback, mainFrame);
+  expect(callback).toHaveBeenCalledExactlyOnceWith(false); expect(prompt).not.toHaveBeenCalled();
+});
+test('closing also denies cached media, clipboard, and an Allow queued just before shutdown', async () => {
+  const { remote, check, request, prompt, consent } = setup();
+  const media = vi.fn(); request(remote, 'media', media, mainFrame);
+  await vi.waitFor(() => expect(media).toHaveBeenCalledExactlyOnceWith(true));
+  const notification = vi.fn(); request(remote, 'notifications', notification, mainFrame);
+  consent.change(true); consent.close();
+  await vi.waitFor(() => expect(notification).toHaveBeenCalledExactlyOnceWith(false));
+  for (const permission of ['media', 'clipboard-sanitized-write'] as const) {
+    expect(check(remote, permission, origin, mainFrame)).toBe(false);
+    const callback = vi.fn(); request(remote, permission, callback, mainFrame);
+    expect(callback).toHaveBeenCalledExactlyOnceWith(false);
+  }
+  expect(prompt).toHaveBeenCalledTimes(2);
 });

@@ -1,10 +1,11 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 
+import { runTrayDesktop } from './tray-desktop.mjs';
 import { runStickerTaggingDesktop } from './sticker-tagging-desktop.mjs';
 
 async function checkRemoteUserAgent(app, remote) {
@@ -62,12 +63,16 @@ if (process.argv.includes('--tagging-only')) {
   await runStickerTaggingDesktop();
 } else {
 const fixturePage = page => page.url().split('#')[0].endsWith('fixture.html');
-const dir = await mkdtemp(join(tmpdir(), 'companion-desktop-'));
+const scratch = process.env.COMPANION_TEST_SCRATCH ?? join(homedir(), '.cache/agent-scratch/whatsapp-companion');
+await mkdir(scratch, { recursive: true });
+const dir = await mkdtemp(join(scratch, 'companion-desktop-'));
 // Main-only state (forgotten ids, fingerprints) is not sent to the controls view; read it from the saved manifest.
 const savedState = async (dataDir = dir) => JSON.parse(await readFile(join(dataDir, 'companion.json'), 'utf8'));
 await mkdir('.local/screenshots', { recursive: true });
 let app;
 try {
+  const fixtureSeed = await runTrayDesktop();
+  await writeFile(join(dir, 'companion.json'), JSON.stringify(fixtureSeed), { mode: 0o600 });
   app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-splash', `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } });
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const local = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
@@ -78,8 +83,8 @@ try {
   expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(false);
   await expect(remote.locator('#pane-side')).toBeVisible({ timeout: 10000 });
   await expect(remote.locator('#companion-overlay')).toHaveCount(1);
-  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(true);
-  console.log('PASS splash defers connector activation and throttling restores on shell');
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents.getBackgroundThrottling())).toBe(false);
+  console.log('PASS splash defers connector activation and remote stays unthrottled on shell');
   await checkRemoteUserAgent(app, remote);
   // Exercise the page's native copy APIs with trusted user input. The fixture
   // has the same scoped permission policy, with no renderer clipboard bridge.

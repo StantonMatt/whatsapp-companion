@@ -17,13 +17,6 @@ export function safeRendererSend(contents: RendererContents, closing: boolean, c
 export function positiveBounds(bounds: { width: number; height: number }) {
   return Number.isFinite(bounds.width) && Number.isFinite(bounds.height) && bounds.width > 0 && bounds.height > 0;
 }
-export function startupThrottling(contents: { isDestroyed(): boolean; setBackgroundThrottling(value: boolean): void }) {
-  let restored = false;
-  return () => {
-    if (restored || contents.isDestroyed()) return;
-    try { contents.setBackgroundThrottling(true); restored = true; } catch { /* Disposed renderer. */ }
-  };
-}
 export function cleanupOnce(steps: (() => void)[], quit: () => void) {
   let cleaned = false;
   return () => {
