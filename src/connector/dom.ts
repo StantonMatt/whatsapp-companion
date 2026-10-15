@@ -8,6 +8,7 @@ import { StickerTransferConnector } from './sticker-transfer';
 import { stickerImageState } from './sticker-image-state';
 import { composerStyle } from './composer-style';
 import { StickerPickerLayout } from './sticker-picker-layout';
+import { RecorderLayout } from './recorder-layout';
 import { captureStickerPicker } from './sticker-picker-capture';
 import { Navigation } from './navigation';
 import { MAX_STICKER_BYTES } from '../shared/sticker-limits';
@@ -137,6 +138,7 @@ const refinements: Record<string, string> = {
 export class DomConnector {
   private stickerTransfer?: StickerTransferConnector;
   private stickerPickerLayout?: StickerPickerLayout;
+  private recorderLayout?: RecorderLayout;
   private navigation?: Navigation;
   private composingEditor: HTMLElement | null = null;
   private get composing() { return Boolean(this.composingEditor && this.composingEditor === this.editor()); }
@@ -296,6 +298,7 @@ export class DomConnector {
   start() {
     this.stopped = false; this.intakeController = new AbortController();
     this.stickerPickerLayout = new StickerPickerLayout(this.doc);
+    this.recorderLayout = new RecorderLayout(this.doc);
     this.stickerTransfer = new StickerTransferConnector(this.doc, () => this.read(), this.stickerSources, this.emit, nonce => this.authorizeSticker(nonce), request => this.authorizeSticker(request));
     this.navigation = new Navigation(this.doc, this.navigationEvent);
     this.host = this.doc.createElement('div'); this.host.id = 'companion-overlay';
@@ -350,6 +353,7 @@ export class DomConnector {
     clearTimeout(this.refreshTimeout); this.refreshTimeout = undefined;
     this.doc.removeEventListener('load', this.imageLoaded, true);
     this.stickerPickerLayout?.stop();
+    this.recorderLayout?.stop();
     this.stickerTransfer?.stop();
     this.composingEditor = null;
     this.clear();
@@ -711,6 +715,7 @@ export class DomConnector {
     if (this.layoutDirty || this.navigationReady !== navigationReady) this.navigation?.refresh(navigationReady);
     this.navigationReady = navigationReady;
     if (this.layoutDirty) this.stickerPickerLayout?.refresh();
+    if (this.layoutDirty) this.recorderLayout?.refresh();
     const dark = this.navigation?.theme !== 'light';
     if (dark !== this.theme) for (const [key, value] of Object.entries(dark ? { background: '#161717', surface: '#242626', ink: '#e9edef', muted: '#9babae', line: '#373b3c', hover: '#2e2f2f' } : { background: '#fff', surface: '#f0f2f5', ink: '#111b21', muted: '#667781', line: '#d9e3df', hover: '#e9edef' })) this.host.style.setProperty(`--${key}`, value);
     this.theme = dark;
