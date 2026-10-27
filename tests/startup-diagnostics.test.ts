@@ -4,6 +4,23 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StartupDiagnostics, STARTUP_LOG_LIMIT } from '../src/main/startup-diagnostics';
 import type { BootStructure } from '../src/shared/boot';
+test('asset failures persist only allowlisted kinds and generation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'startup-assets-'));
+  try {
+    const logger = new StartupDiagnostics(directory);
+    logger.record('asset-failure', { kind: 'script', generation: 1 });
+    logger.record('asset-failure', { kind: 'stylesheet', generation: 2 });
+    for (const details of [{ kind: 'PRIVATE' }, { kind: 'script', url: 'https://PRIVATE' }, { kind: 'stylesheet', message: 'PRIVATE' }])
+      logger.record('asset-failure', details as never);
+    await logger.flush();
+    const raw = await readFile(join(directory, 'diagnostics/startup.log'), 'utf8');
+    expect(raw.trim().split('\n').map(line => JSON.parse(line))).toEqual([
+      expect.objectContaining({ event: 'asset-failure', kind: 'script', generation: 1 }),
+      expect.objectContaining({ event: 'asset-failure', kind: 'stylesheet', generation: 2 })
+    ]);
+    expect(raw).not.toMatch(/PRIVATE|https:|message|url/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('ordered private diagnostics append across interrupted launches and reject private fields', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'startup-log-'));

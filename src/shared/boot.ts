@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const bootPhaseSchema = z.enum(['splash', 'shell', 'login', 'blocked', 'unknown']);
 export type BootPhase = z.infer<typeof bootPhaseSchema>;
+export const bootAssetKindSchema = z.enum(['script', 'stylesheet']);
+export type BootAssetKind = z.infer<typeof bootAssetKindSchema>;
 // Fixed WhatsApp identifiers used by connector selectors, never arbitrary page values.
 export const bootStructuralIdentifierSchema = z.enum([
   'app', 'main', 'pane-side', 'side', 'initial_startup', 'startup-screen',
@@ -34,7 +36,8 @@ export const bootStructureSchema = z.object({
 export type BootStructure = z.infer<typeof bootStructureSchema>;
 export const bootObservationSchema = z.object({
   phase: bootPhaseSchema, progress: z.number().int().min(0).max(10).nullable(),
-  visible: z.boolean(), online: z.boolean(), chatListReady: z.boolean().optional(), structure: bootStructureSchema.optional()
+  visible: z.boolean(), online: z.boolean(), chatListReady: z.boolean().optional(), structure: bootStructureSchema.optional(),
+  assetFailed: z.boolean().optional(), assetFailureKind: bootAssetKindSchema.optional()
 }).strict();
 export type BootObservation = z.infer<typeof bootObservationSchema>;
 export const bootSessionSchema = z.object({ nonce: z.string().uuid().length(36), generation: z.number().int().nonnegative() }).strict();

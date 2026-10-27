@@ -96,7 +96,7 @@ async function start() {
   const modelCatalog = new ModelCatalog();
   const root = __dirname;
   const uiURL = pathToFileURL(join(root, 'ui/index.html')).href;
-  const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href + (process.argv.includes('--fixture-startup-watchdog') ? '#startup-stuck' : process.argv.includes('--fixture-startup-splash') ? '#startup-splash' : '') : 'https://web.whatsapp.com/';
+  const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href + (process.argv.includes('--fixture-startup-asset-failure') ? '#startup-asset-failure' : process.argv.includes('--fixture-startup-watchdog') ? '#startup-stuck' : process.argv.includes('--fixture-startup-splash') ? '#startup-splash' : '') : 'https://web.whatsapp.com/';
   const conversations = new Conversations(store, () => { assistant.message = 'Conversation observations could not be saved. Check disk space and the data directory.'; publish(); });
   const stickerTransfer = new StickerTransfer();
   const directStickerSafety = new DirectStickerSafety(store, stickerTransfer, () => {
@@ -127,10 +127,10 @@ async function start() {
   let gcTimer: ReturnType<typeof setTimeout> | undefined;
   let permissionDialogsOpen = 0;
   // Test thresholds are fixed, main-only and impossible to enable in packaged/live mode.
-  const startupWatchdog = new StartupWatchdog(fixture && process.argv.includes('--fixture-startup-watchdog') ? { splashMs: 600, stalledMs: 300, spacingMs: 1200, heartbeatGapMs: 6000 } : undefined);
+  const startupWatchdog = new StartupWatchdog(fixture && (process.argv.includes('--fixture-startup-watchdog') || process.argv.includes('--fixture-startup-asset-failure')) ? { splashMs: 600, stalledMs: 300, assetFailureMs: 300, spacingMs: 1200, heartbeatGapMs: 6000 } : undefined);
   let bootSession = { nonce: randomUUID(), generation: 0 };
   startupWatchdog.navigate(bootSession);
-  let detectorSeen = false, structureLogged = false, shellChromeSynced = false, connectorReady = false;
+  let detectorSeen = false, structureLogged = false, assetFailureLogged = false, shellChromeSynced = false, connectorReady = false;
   let lastBoot: { phase: string; progress: number | null; visible: boolean; online: boolean; chatListReady?: boolean } | undefined;
   let lastDecision: string | undefined;
   let stickerIntakeError: string | undefined;
@@ -582,6 +582,10 @@ async function start() {
       structureLogged = true;
       startupDiagnostics.record('structure', { structure: observation.structure, generation: bootSession.generation });
     }
+    if (!assetFailureLogged && observation.assetFailed && observation.assetFailureKind) {
+      assetFailureLogged = true;
+      startupDiagnostics.record('asset-failure', { kind: observation.assetFailureKind, generation: bootSession.generation });
+    }
     if (lastBoot?.phase !== observation.phase) startupDiagnostics.record('phase', { phase: observation.phase, generation: bootSession.generation });
     if (lastBoot?.progress !== observation.progress) startupDiagnostics.record('progress', { progress: observation.progress });
     if (lastBoot?.visible !== observation.visible || lastBoot?.online !== observation.online) startupDiagnostics.record('visibility', { visible: observation.visible, online: observation.online });
@@ -930,7 +934,7 @@ async function start() {
   remote.webContents.on('did-start-navigation', details => {
     if (!details.isMainFrame || details.isSameDocument || closing) return;
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
-    startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
+    startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; assetFailureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
     startupDiagnostics.record('remote-navigation', { generation: bootSession.generation });
     chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend();
   });
@@ -945,7 +949,7 @@ async function start() {
   remote.webContents.on('render-process-gone', (_event, details) => {
     startupDiagnostics.record('render-process-gone', { reason: ['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction'].includes(details.reason) ? details.reason : 'other' });
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
-    startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
+    startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; assetFailureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
     pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); chromeSync.reset(); });
   remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
   const stopRuntime = cleanupOnce([

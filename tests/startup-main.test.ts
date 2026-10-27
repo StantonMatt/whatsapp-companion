@@ -314,6 +314,35 @@ test('main watchdog actually reloads remote webContents and preserves its budget
   expect(contents.reload).toHaveBeenCalledTimes(2);
   expect(mocks.records.filter(record => record.event === 'reload').map(record => record.details.reloads)).toEqual([1, 2]);
 });
+test('hidden failed-asset splash reloads promptly and logs one authenticated asset failure per generation', () => {
+  const win = mocks.windows[0], contents = mocks.views[1].webContents, clock = vi.spyOn(performance, 'now');
+  win.close(); win.show.mockClear();
+  const session = bootSession(), heartbeat = { ...session, phase: 'splash', progress: 0, visible: false, online: true,
+    assetFailed: true, assetFailureKind: 'stylesheet' };
+  clock.mockReturnValue(0);
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, generation: 0 });
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, assetFailureKind: 'PRIVATE' });
+  mocks.ipc.emit('companion:boot-heartbeat', { ...bootEvent(), sender: mocks.views[0].webContents }, heartbeat);
+  mocks.ipc.emit('companion:boot-heartbeat', { ...bootEvent(), senderFrame: { ...contents.frame } }, heartbeat);
+  expect(mocks.records.filter(record => record.event === 'asset-failure')).toHaveLength(0);
+  for (let now = 0; now <= 4000; now += 2000) {
+    clock.mockReturnValue(now); mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  }
+  expect(contents.reload).not.toHaveBeenCalled();
+  clock.mockReturnValue(6000); mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  expect(contents.reload).toHaveBeenCalledOnce();
+  expect(win.visible).toBe(false); expect(win.show).not.toHaveBeenCalled();
+  expect(mocks.records.filter(record => record.event === 'asset-failure')).toEqual([
+    { event: 'asset-failure', details: { kind: 'stylesheet', generation: session.generation } }
+  ]);
+  expect(mocks.records.filter(record => record.event === 'reload')).toEqual([
+    { event: 'reload', details: { reloads: 1, generation: session.generation } }
+  ]);
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), heartbeat);
+  expect(mocks.records.filter(record => record.event === 'asset-failure')).toHaveLength(1);
+  mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...heartbeat, ...bootSession(), assetFailureKind: 'script' });
+  expect(mocks.records.filter(record => record.event === 'asset-failure')).toHaveLength(2);
+});
 test('main layout retains positive remote bounds while parent reports zero, then follows positive bounds', () => {
   const win = mocks.windows[0], remote = mocks.views[1], bounds = { ...remote.bounds };
   const readBounds = vi.spyOn(win.contentView, 'getBounds');

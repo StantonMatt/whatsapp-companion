@@ -1,4 +1,4 @@
-import { bootStructuralIdentifierSchema, bootStructuralTagSchema, type BootObservation, type BootStructure } from '../shared/boot';
+import { bootStructuralIdentifierSchema, bootStructuralTagSchema, type BootAssetKind, type BootObservation, type BootStructure } from '../shared/boot';
 
 // Fixed structural selectors only. Never read page text, QR data, URLs or account attributes.
 const shell = '#pane-side, [data-testid="chat-list"], [data-testid="side-panel"], [data-testid="main-navigation"], nav [data-navbar-item]';
@@ -71,9 +71,23 @@ export class BootDetector {
   private startedAt = 0;
   private completeObserved = false;
   private structureSent = false;
-  constructor(private doc: Document, private heartbeat: (observation: BootObservation) => void, private activate: (reason: 'phase' | 'timeout') => void, private intervalMs = 2000) {}
+  private assetFailureKind?: BootAssetKind;
+  private assetsSettled = false;
+  private assetError = (event: Event) => {
+    const target = event.target, view = this.doc.defaultView;
+    if (this.assetsSettled || this.assetFailureKind || !view || !(target instanceof view.Element) || target.ownerDocument !== this.doc) return;
+    if (target.tagName === 'SCRIPT') this.assetFailureKind = 'script';
+    else if (target instanceof view.HTMLLinkElement) {
+      if (target.relList.contains('stylesheet') || (target.relList.contains('preload') && target.getAttribute('as') === 'style')) this.assetFailureKind = 'stylesheet';
+      else if (target.relList.contains('modulepreload') || (target.relList.contains('preload') && target.getAttribute('as') === 'script')) this.assetFailureKind = 'script';
+    }
+  };
+  constructor(private doc: Document, private heartbeat: (observation: BootObservation) => void, private activate: (reason: 'phase' | 'timeout') => void, private intervalMs = 2000) {
+    this.doc.defaultView?.addEventListener('error', this.assetError, true);
+  }
   start() {
     if (this.timer !== undefined) return;
+    this.doc.defaultView?.addEventListener('error', this.assetError, true);
     this.startedAt = performance.now();
     this.completeObserved = false;
     this.timer = setInterval(() => this.tick(), this.intervalMs);
@@ -86,8 +100,10 @@ export class BootDetector {
     this.completeObserved = complete;
     // Preserve the one-shot diagnostic until startup markup exists or unknown has settled.
     const observation = classifyBoot(this.doc, !this.structureSent, unknownReady);
+    if (this.assetFailureKind) { observation.assetFailed = true; observation.assetFailureKind = this.assetFailureKind; }
     if (observation.structure) this.structureSent = true;
     const recognized = observation.phase === 'shell' || observation.phase === 'login' || observation.phase === 'blocked';
+    if (recognized) this.assetsSettled = true;
     if (!this.activated && (recognized || (observation.phase === 'unknown' && unknownReady) || expired)) {
       this.activated = true;
       clearTimeout(this.deadline); this.deadline = undefined;
@@ -95,5 +111,8 @@ export class BootDetector {
     }
     this.heartbeat(observation);
   }
-  stop() { clearInterval(this.timer); clearTimeout(this.deadline); this.timer = this.deadline = undefined; }
+  stop() {
+    clearInterval(this.timer); clearTimeout(this.deadline); this.timer = this.deadline = undefined;
+    this.doc.defaultView?.removeEventListener('error', this.assetError, true);
+  }
 }

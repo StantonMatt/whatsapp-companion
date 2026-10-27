@@ -20,6 +20,17 @@ afterEach(() => {
   vi.useRealTimers(); vi.restoreAllMocks(); document.body.replaceChildren();
 });
 async function load() { await import('../src/preload/remote'); await Promise.resolve(); }
+test('preload captures non-bubbling asset errors before the asynchronous session handshake resolves', async () => {
+  let resolve!: (session: typeof mocks.session) => void;
+  mocks.invoke.mockReturnValue(new Promise(done => { resolve = done; }));
+  document.body.innerHTML = '<div id="initial_startup"></div><link rel="stylesheet" href="https://PRIVATE">';
+  await load(); document.querySelector('link')!.dispatchEvent(new Event('error'));
+  expect(mocks.send).not.toHaveBeenCalled();
+  resolve(mocks.session); await Promise.resolve(); vi.advanceTimersByTime(2000);
+  expect(mocks.send).toHaveBeenLastCalledWith('companion:boot-heartbeat', { ...mocks.session, phase: 'splash', progress: null,
+    visible: true, online: true, assetFailed: true, assetFailureKind: 'stylesheet' });
+  expect(JSON.stringify(mocks.send.mock.calls)).not.toContain('PRIVATE');
+});
 
 test('preload logs forced activation after 20s and continues splash heartbeats', async () => {
   document.body.innerHTML = '<div id="initial_startup"></div>'; await load();
