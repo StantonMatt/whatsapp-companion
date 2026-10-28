@@ -3,15 +3,16 @@ import { mkdir, chmod, lstat, open, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { bootPhaseSchema, bootStructureSchema } from '../shared/boot';
+import { bootAssetKindSchema, bootPhaseSchema, bootStructureSchema } from '../shared/boot';
 
-const eventSchema = z.enum(['lock', 'app-ready', 'store-load', 'migration', 'gc', 'window-created', 'tray-created', 'tray-unavailable', 'views-created', 'bounds', 'bounds-rejected', 'controls-loaded', 'remote-navigation', 'dom-ready', 'finish-load', 'detector-ready', 'connector-deferral-expired', 'phase', 'visibility', 'progress', 'structure', 'watchdog', 'reload', 'preload-error', 'render-process-gone', 'unresponsive', 'responsive', 'close-requested', 'intake-drained', 'views-destroyed', 'before-quit', 'quit']);
+const eventSchema = z.enum(['lock', 'app-ready', 'store-load', 'migration', 'gc', 'window-created', 'tray-created', 'tray-unavailable', 'views-created', 'bounds', 'bounds-rejected', 'controls-loaded', 'remote-navigation', 'dom-ready', 'finish-load', 'detector-ready', 'connector-deferral-expired', 'asset-failure', 'phase', 'visibility', 'progress', 'structure', 'watchdog', 'reload', 'preload-error', 'render-process-gone', 'unresponsive', 'responsive', 'close-requested', 'intake-drained', 'views-destroyed', 'before-quit', 'quit']);
 const detailsSchema = z.object({
   durationMs: z.number().finite().min(0).max(86_400_000).optional(),
   acquired: z.boolean().optional(), visible: z.boolean().optional(), online: z.boolean().optional(),
   width: z.number().finite().min(0).max(100_000).optional(), height: z.number().finite().min(0).max(100_000).optional(),
   phase: bootPhaseSchema.optional(), progress: z.number().int().min(0).max(10).nullable().optional(),
   structure: bootStructureSchema.optional(),
+  kind: bootAssetKindSchema.optional(),
   generation: z.number().int().nonnegative().optional(), reloads: z.number().int().min(0).max(2).optional(),
   decision: z.enum(['observing', 'gated', 'unknown', 'progress', 'waiting', 'spacing', 'exhausted', 'reload']).optional(),
   reason: z.enum(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction', 'other']).optional(),

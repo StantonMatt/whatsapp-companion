@@ -15,6 +15,58 @@ import { z } from 'zod';
 beforeEach(() => { vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({ width: 100, height: 100 } as DOMRect); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); document.body.replaceChildren(); });
 test.each([
+  ['<script src="https://PRIVATE"></script>', 'script'],
+  ['<link rel="stylesheet" href="https://PRIVATE">', 'stylesheet'],
+  ['<link rel="preload" as="style" href="https://PRIVATE">', 'stylesheet'],
+  ['<link rel="preload" as="script" href="https://PRIVATE">', 'script'],
+  ['<link rel="modulepreload" href="https://PRIVATE">', 'script'],
+  ['<img src="https://PRIVATE">', undefined],
+  ['<link rel="preload" as="image" href="https://PRIVATE">', undefined],
+  ['<link rel="preload" as="font" href="https://PRIVATE">', undefined],
+  ['<link rel="icon" href="https://PRIVATE">', undefined]
+])('captures only startup script/style failures: %s', (html, kind) => {
+  vi.useFakeTimers();
+  document.body.innerHTML = `<div id="initial_startup"></div>${html}`;
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {});
+  try {
+    document.body.lastElementChild!.dispatchEvent(new Event('error'));
+    detector.start();
+    expect(heartbeat.mock.lastCall![0].assetFailed).toBe(kind ? true : undefined);
+    expect(heartbeat.mock.lastCall![0].assetFailureKind).toBe(kind);
+    expect(JSON.stringify(heartbeat.mock.calls)).not.toContain('PRIVATE');
+    expect(bootHeartbeatSchema.safeParse({ nonce: '00000000-0000-4000-8000-000000000001', generation: 1, ...heartbeat.mock.lastCall![0] }).success).toBe(true);
+  } finally { detector.stop(); }
+});
+test('runtime errors, failures after shell activation and failures after stop are ignored', () => {
+  vi.useFakeTimers(); document.body.innerHTML = '<div id="initial_startup"></div><script></script>';
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {});
+  try {
+    window.dispatchEvent(new ErrorEvent('error', { message: 'PRIVATE' })); detector.start();
+    expect(heartbeat.mock.lastCall![0].assetFailed).toBeUndefined();
+    detector.stop(); document.querySelector('script')!.dispatchEvent(new Event('error')); detector.start();
+    expect(heartbeat.mock.lastCall![0].assetFailed).toBeUndefined();
+    document.body.innerHTML = '<div id="pane-side"></div><script></script>'; vi.advanceTimersByTime(2000);
+    document.querySelector('script')!.dispatchEvent(new Event('error')); vi.advanceTimersByTime(2000);
+    expect(heartbeat.mock.lastCall![0].assetFailed).toBeUndefined();
+  } finally { detector.stop(); }
+});
+test('first asset failure kind persists without retaining other error data', () => {
+  vi.useFakeTimers(); document.body.innerHTML = '<div id="initial_startup"></div><script></script><link rel="stylesheet">';
+  const heartbeat = vi.fn(), detector = new BootDetector(document, heartbeat, () => {});
+  try {
+    detector.start(); document.querySelector('script')!.dispatchEvent(new Event('error'));
+    document.querySelector('link')!.dispatchEvent(new Event('error')); vi.advanceTimersByTime(6000);
+    expect(heartbeat.mock.lastCall![0]).toMatchObject({ assetFailed: true, assetFailureKind: 'script' });
+  } finally { detector.stop(); }
+});
+test('asset failure heartbeat fields accept only a boolean and fixed kinds', () => {
+  const heartbeat = { nonce: '00000000-0000-4000-8000-000000000001', generation: 1, phase: 'splash', progress: 0, visible: false, online: true };
+  expect(bootHeartbeatSchema.safeParse({ ...heartbeat, assetFailed: false }).success).toBe(true);
+  expect(bootHeartbeatSchema.safeParse({ ...heartbeat, assetFailed: true, assetFailureKind: 'stylesheet' }).success).toBe(true);
+  for (const extra of [{ assetFailed: 'script' }, { assetFailureKind: 'PRIVATE' }, { assetFailed: true, url: 'PRIVATE' }])
+    expect(bootHeartbeatSchema.safeParse({ ...heartbeat, ...extra }).success).toBe(false);
+});
+test.each([
   ['<div id="initial_startup"><progress max="100" value="43"></progress></div>', 'splash', 4],
   ['<div id="initial_startup"><progress value="0.5"></progress></div>', 'splash', 5],
   ['<div data-testid="startup-screen"><div role="progressbar" aria-valuenow="75" aria-valuemax="100"></div></div>', 'splash', 7],

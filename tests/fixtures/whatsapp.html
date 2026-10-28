@@ -215,11 +215,15 @@ window.require=name=>{if(window.fixtureDirectModulesMissing)throw new Error('fix
 
 // Startup fixture variants never connect to WhatsApp. Detach the shell entirely
 // so structural checks cannot see hidden shell markers behind the splash.
-if(location.hash==='#startup-splash'||location.hash==='#startup-stuck'){
+if(location.hash==='#startup-splash'||location.hash==='#startup-stuck'||location.hash==='#startup-asset-failure'){
  const shell=document.createDocumentFragment();
  for(const child of [...document.body.children])if(child.tagName!=='SCRIPT')shell.append(child);
  const splash=document.createElement('div');
  splash.innerHTML='<progress max="100" value="10"></progress>';document.body.append(splash);
+ if(location.hash==='#startup-asset-failure'){
+  splash.id='initial_startup';splash.querySelector('progress').value=0;
+  const asset=document.createElement('link');asset.rel='stylesheet';asset.href='./fixture-missing-startup.css';document.head.append(asset);
+ }
  if(location.hash==='#startup-splash')setTimeout(()=>{splash.remove();document.body.append(shell);},5000);
 }
 </script></html>

@@ -6,7 +6,6 @@ import type { RemoteCommand } from '../shared/connector';
 
 // Isolated preload only: no contextBridge, window bindings or page-callable API.
 let connector: DomConnector | undefined;
-let detector: BootDetector | undefined;
 let bootSession: BootSession | undefined;
 let disposed = false;
 function startConnector() {
@@ -23,21 +22,22 @@ function startConnector() {
   }
 }
 ipcRenderer.on('companion:command', (_event, command: RemoteCommand) => { if (!disposed) connector?.command(command); });
+const detector = new BootDetector(document, observation => {
+  if (bootSession && !disposed) ipcRenderer.send('companion:boot-heartbeat', { ...bootSession, ...observation });
+}, reason => {
+  if (reason === 'timeout') ipcRenderer.send('companion:boot-deferral-expired', bootSession);
+  // The connector's observer needs a body; activation remains one-shot.
+  if (document.body) startConnector();
+  else document.addEventListener('DOMContentLoaded', startConnector, { once: true });
+});
 void ipcRenderer.invoke('companion:boot-session').then(raw => {
   const session = bootSessionSchema.safeParse(raw);
-  if (!session.success || disposed) return;
+  if (!session.success || disposed) { detector.stop(); return; }
   bootSession = session.data;
-  detector = new BootDetector(document, observation => ipcRenderer.send('companion:boot-heartbeat', { ...session.data, ...observation }), reason => {
-    if (reason === 'timeout') ipcRenderer.send('companion:boot-deferral-expired', session.data);
-    // At document start an unknown page may not have a body yet. The connector's
-    // observer needs that target; activation remains one-shot once it exists.
-    if (document.body) startConnector();
-    else document.addEventListener('DOMContentLoaded', startConnector, { once: true });
-  });
   detector.start();
-}).catch(() => { if (!disposed) ipcRenderer.send('companion:boot-error'); });
+}).catch(() => { detector.stop(); if (!disposed) ipcRenderer.send('companion:boot-error'); });
 window.addEventListener('beforeunload', () => {
-  disposed = true; detector?.stop();
+  disposed = true; detector.stop();
   document.removeEventListener('DOMContentLoaded', startConnector);
   try { connector?.stop(); } catch { /* Main owns view disposal. */ }
 }, { once: true });

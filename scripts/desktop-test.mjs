@@ -2703,6 +2703,22 @@ try {
   expect((await startupRecords()).some(record => record.event === 'quit')).toBe(true);
   console.log('PASS stuck splash uses exactly two ordinary reloads, then stops; disposed frames still quit');
 
+  const assetFailureDir = join(dir, 'startup-asset-failure');
+  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-asset-failure', '--hidden', `--data-dir=${assetFailureDir}`], timeout: 30000 });
+  const assetRecords = async () => {
+    try { return (await readFile(join(assetFailureDir, 'diagnostics/startup.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
+    catch { return []; }
+  };
+  await expect.poll(async () => (await assetRecords()).filter(record => record.event === 'reload').length, { timeout: 20000 }).toBe(2);
+  await expect.poll(async () => (await assetRecords()).some(record => record.decision === 'exhausted'), { timeout: 10000 }).toBe(true);
+  expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible())).toBe(false);
+  const assetFailures = (await assetRecords()).filter(record => record.event === 'asset-failure');
+  expect(assetFailures).toHaveLength(3);
+  expect(assetFailures.every(record => record.kind === 'stylesheet')).toBe(true);
+  expect(new Set(assetFailures.map(record => record.generation)).size).toBe(3);
+  await app.close(); app = undefined;
+  console.log('PASS isolated preload captures actual stylesheet load failure; hidden splash reloads twice, then stops');
+
   await runStickerTaggingDesktop();
 
 } catch (error) {
