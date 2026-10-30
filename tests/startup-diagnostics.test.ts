@@ -4,6 +4,24 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StartupDiagnostics, STARTUP_LOG_LIMIT } from '../src/main/startup-diagnostics';
 import type { BootStructure } from '../src/shared/boot';
+test('local startup load failures persist only allowlisted numeric codes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'startup-local-load-'));
+  try {
+    const logger = new StartupDiagnostics(directory);
+    for (const event of ['base-load-failed', 'controls-load-failed'] as const) {
+      logger.record(event, { code: -2 }); logger.record(event);
+      for (const details of [{ code: -1001 }, { code: 1 }, { code: -1.5 }, { code: NaN }, { code: -2, url: 'file:///PRIVATE' }, { message: 'PRIVATE' }])
+        logger.record(event, details as never);
+    }
+    await logger.flush();
+    const raw = await readFile(join(directory, 'diagnostics/startup.log'), 'utf8');
+    expect(raw.trim().split('\n').map(line => JSON.parse(line))).toEqual([
+      expect.objectContaining({ event: 'base-load-failed', code: -2 }), expect.objectContaining({ event: 'base-load-failed' }),
+      expect.objectContaining({ event: 'controls-load-failed', code: -2 }), expect.objectContaining({ event: 'controls-load-failed' })
+    ]);
+    expect(raw).not.toMatch(/PRIVATE|file:|message|url/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 test('load recovery records only bounded numeric codes and attempts without navigation details', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'startup-recovery-'));
   try {

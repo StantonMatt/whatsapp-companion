@@ -1,10 +1,11 @@
-import { _electron as electron, expect } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 
+import { launchApp, closeApp, preserveDiagnostics } from './desktop-harness.mjs';
 import { runTrayDesktop } from './tray-desktop.mjs';
 import { runStickerTaggingDesktop } from './sticker-tagging-desktop.mjs';
 
@@ -70,10 +71,13 @@ const dir = await mkdtemp(join(scratch, 'companion-desktop-'));
 const savedState = async (dataDir = dir) => JSON.parse(await readFile(join(dataDir, 'companion.json'), 'utf8'));
 await mkdir('.local/screenshots', { recursive: true });
 let app;
+let appDataDir = dir;
+let failed = false;
+const diagnosticDirs = [['desktop', dir], ...['migration', 'startup-watchdog', 'startup-asset-failure', 'startup-stall'].map(label => [label, join(dir, label)])];
 try {
   const fixtureSeed = await runTrayDesktop();
   await writeFile(join(dir, 'companion.json'), JSON.stringify(fixtureSeed), { mode: 0o600 });
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-splash', `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } });
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-splash', `--data-dir=${dir}`], timeout: 30000, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' } }, dir);
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const local = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   const remote = await expect.poll(async () => (await app.windows()).find(p => fixturePage(p))).not.toBeUndefined().then(async () => (await app.windows()).find(p => fixturePage(p)));
@@ -2601,8 +2605,8 @@ try {
   expect(await local.evaluate(async () => window.companion.action({ type: 'preferences', scope: 'global',
     patch: { language: (await window.companion.status()).state.global.language } }))).toMatchObject({ ok: true });
   await expect(directToggle).toBeChecked(); await assertDirectPreference(true);
-  await app.close(); app = undefined;
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000 });
+  await closeApp(app, dir, 'desktop restart'); app = undefined;
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000 }, dir);
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const reopened = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   await reopened.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
@@ -2635,8 +2639,8 @@ try {
   const restoredDirectToggle = reopened.getByLabel('Send stickers directly (experimental)', { exact: true });
   await restoredDirectToggle.uncheck(); await expect(restoredDirectToggle).not.toBeChecked();
   await assertDirectPreference(false, reopened);
-  await app.close(); app = undefined;
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000 });
+  await closeApp(app, dir, 'desktop disabled restart'); app = undefined;
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${dir}`], timeout: 30000 }, dir);
   await expect.poll(async () => (await app.windows()).some(p => p.url().endsWith('/ui/index.html'))).toBe(true);
   const disabledReopened = (await app.windows()).find(p => p.url().endsWith('/ui/index.html'));
   await disabledReopened.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
@@ -2644,7 +2648,7 @@ try {
   await assertDirectPreference(false, disabledReopened);
   console.log('PASS disabling direct sticker sending also persists across an actual application restart');
 
-  await app.close(); app = undefined;
+  await closeApp(app, dir, 'desktop before migration'); app = undefined;
   const migrationDir = join(dir, 'migration'); await mkdir(migrationDir);
   const sample = JSON.parse(await readFile('tests/fixtures/sticker-dedupe/images.json', 'utf8')).animated;
   const migrationBytes = Buffer.from(sample.image.split(',')[1], 'base64');
@@ -2653,7 +2657,8 @@ try {
     forgottenStickers: JSON.parse(await readFile(join(dir, 'companion.json'), 'utf8')).forgottenStickers.filter(id => id !== migrationId),
     stickers: [{ id: migrationId, image: sample.image, searchTerms: 'migration animation', firstSeen: 10, lastSeen: 20 }] };
   const legacyText = JSON.stringify(legacy); await writeFile(join(migrationDir, 'companion.json'), legacyText);
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${migrationDir}`], timeout: 30000 });
+  appDataDir = migrationDir;
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', `--data-dir=${migrationDir}`], timeout: 30000 }, migrationDir);
   await expect.poll(async () => (await app.windows()).some(page => page.url().endsWith('/ui/index.html'))).toBe(true);
   const migrated = (await app.windows()).find(page => page.url().endsWith('/ui/index.html'));
   await migrated.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
@@ -2680,9 +2685,11 @@ try {
   await expect(migrated.getByRole('button', { name: 'Image unavailable. Retry' })).toHaveCount(0);
   console.log('PASS missing blobs retain cards, sends fail closed, and restoring the file plus Retry recovers the image');
 
-  await app.close(); app = undefined;
+  await closeApp(app, migrationDir, 'migration'); app = undefined;
+  console.log(`${new Date().toISOString()} STEP startup: watchdog`);
   const watchdogDir = join(dir, 'startup-watchdog');
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-watchdog', `--data-dir=${watchdogDir}`], timeout: 30000 });
+  appDataDir = watchdogDir;
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-watchdog', `--data-dir=${watchdogDir}`], timeout: 30000 }, watchdogDir);
   const startupRecords = async () => {
     try { return (await readFile(join(watchdogDir, 'diagnostics/startup.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
     catch { return []; }
@@ -2699,12 +2706,14 @@ try {
     win.contentView.children[0].webContents.close();
     win.contentView.children[1].webContents.send = () => { throw new Error('fixture disposed send'); };
   });
-  await app.close(); app = undefined;
+  await closeApp(app, watchdogDir, 'startup watchdog'); app = undefined;
   expect((await startupRecords()).some(record => record.event === 'quit')).toBe(true);
   console.log('PASS stuck splash uses exactly two ordinary reloads, then stops; disposed frames still quit');
 
+  console.log(`${new Date().toISOString()} STEP startup: asset failure`);
   const assetFailureDir = join(dir, 'startup-asset-failure');
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-asset-failure', '--hidden', `--data-dir=${assetFailureDir}`], timeout: 30000 });
+  appDataDir = assetFailureDir;
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-asset-failure', '--hidden', `--data-dir=${assetFailureDir}`], timeout: 30000 }, assetFailureDir);
   const assetRecords = async () => {
     try { return (await readFile(join(assetFailureDir, 'diagnostics/startup.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
     catch { return []; }
@@ -2716,11 +2725,13 @@ try {
   expect(assetFailures).toHaveLength(3);
   expect(assetFailures.every(record => record.kind === 'stylesheet')).toBe(true);
   expect(new Set(assetFailures.map(record => record.generation)).size).toBe(3);
-  await app.close(); app = undefined;
+  await closeApp(app, assetFailureDir, 'startup asset failure'); app = undefined;
   console.log('PASS isolated preload captures actual stylesheet load failure; hidden splash reloads twice, then stops');
 
+  console.log(`${new Date().toISOString()} STEP startup: stall`);
   const stallDir = join(dir, 'startup-stall');
-  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-stall', '--hidden', `--data-dir=${stallDir}`], timeout: 30000 });
+  appDataDir = stallDir;
+  app = await launchApp({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-stall', '--hidden', `--data-dir=${stallDir}`], timeout: 30000 }, stallDir);
   const stallRecords = async () => {
     try { return (await readFile(join(stallDir, 'diagnostics/startup.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
     catch { return []; }
@@ -2733,16 +2744,24 @@ try {
   expect(recoveredRecords.some(record => record.event === 'relaunch')).toBe(false);
   expect((await app.windows()).some(fixturePage)).toBe(true);
   expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible())).toBe(false);
-  await app.close(); app = undefined;
+  await closeApp(app, stallDir, 'startup stall'); app = undefined;
   console.log('PASS hidden uncommitted navigation stops and retries into fixture shell without relaunch');
 
   await runStickerTaggingDesktop();
 
 } catch (error) {
-  if (app) { const pages = await app.windows(); for (const page of pages) console.log(page.url(), (await page.locator('body').innerText()).slice(0, 2500)); }
+  failed = true;
+  try { if (app) { const pages = await app.windows(); for (const page of pages) console.log(page.url(), (await page.locator('body').innerText({ timeout: 3000 })).slice(0, 2500)); } }
+  catch (diagnosticError) { console.error('Could not inspect desktop pages:', diagnosticError); }
   throw error;
 } finally {
-  await app?.close(); await rm(dir, { recursive: true, force: true });
+  let cleanupError;
+  try { await closeApp(app, appDataDir, 'desktop cleanup'); }
+  catch (error) { console.error('Desktop cleanup:', error); cleanupError = error; }
+  if (failed || cleanupError) for (const [label, dataDir] of diagnosticDirs) await preserveDiagnostics(dataDir, label);
+  try { await rm(dir, { recursive: true, force: true }); }
+  catch (error) { console.error('Desktop data cleanup:', error); cleanupError ??= error; }
+  if (!failed && cleanupError) throw cleanupError;
 }
 
 }

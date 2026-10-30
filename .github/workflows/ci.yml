@@ -99,6 +99,22 @@ jobs:
           sudo chown root:root node_modules/electron/dist/chrome-sandbox
           sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
       - name: Sandboxed Electron desktop fixture
+        timeout-minutes: 15
+        env:
+          COMPANION_TEST_SCRATCH: ${{ runner.temp }}/companion-desktop
         run: xvfb-run -a npm run test:desktop
+      # A hang killed by the step timeout skips the scripts' cleanup, so also
+      # collect startup logs straight from the disposable profiles.
+      - name: Upload desktop diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: desktop-diagnostics
+          path: |
+            .local/desktop-diagnostics/
+            ${{ runner.temp }}/companion-desktop/**/diagnostics/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Package Linux AppImage (never publish)
         run: npm run package:linux -- --publish never

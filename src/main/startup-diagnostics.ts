@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { bootAssetKindSchema, bootPhaseSchema, bootStructureSchema } from '../shared/boot';
 
-const eventSchema = z.enum(['lock', 'app-ready', 'store-load', 'migration', 'gc', 'window-created', 'tray-created', 'tray-unavailable', 'views-created', 'bounds', 'bounds-rejected', 'controls-loaded', 'remote-navigation', 'load-failed', 'load-retry', 'navigation-stalled', 'relaunch', 'dom-ready', 'finish-load', 'detector-ready', 'connector-deferral-expired', 'asset-failure', 'phase', 'visibility', 'progress', 'structure', 'watchdog', 'reload', 'preload-error', 'render-process-gone', 'unresponsive', 'responsive', 'close-requested', 'intake-drained', 'views-destroyed', 'before-quit', 'quit']);
+const eventSchema = z.enum(['lock', 'app-ready', 'store-load', 'migration', 'gc', 'window-created', 'tray-created', 'tray-unavailable', 'views-created', 'bounds', 'bounds-rejected', 'base-load-failed', 'controls-load-failed', 'controls-loaded', 'remote-navigation', 'load-failed', 'load-retry', 'navigation-stalled', 'relaunch', 'dom-ready', 'finish-load', 'detector-ready', 'connector-deferral-expired', 'asset-failure', 'phase', 'visibility', 'progress', 'structure', 'watchdog', 'reload', 'preload-error', 'render-process-gone', 'unresponsive', 'responsive', 'close-requested', 'intake-drained', 'views-destroyed', 'before-quit', 'quit']);
 const detailsSchema = z.object({
   durationMs: z.number().finite().min(0).max(86_400_000).optional(),
   acquired: z.boolean().optional(), visible: z.boolean().optional(), online: z.boolean().optional(),

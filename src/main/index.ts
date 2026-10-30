@@ -60,7 +60,7 @@ if (process.platform === 'linux' && !app.commandLine.hasSwitch('password-store')
 }
 const acquired = app.requestSingleInstanceLock();
 const startupDiagnostics = new StartupDiagnostics(app.getPath('userData'), acquired);
-let quitStarted = false, quitAllowed = false;
+let closing = false, quitStarted = false, quitAllowed = false;
 let closeWindow: (() => void) | undefined;
 const quit = () => {
   if (quitStarted) return;
@@ -80,7 +80,7 @@ startupDiagnostics.record('lock', { acquired, app: app.getVersion(), electron: p
 if (!acquired) quit();
 else void app.whenReady().then(() => { if (!quitStarted) return start(); }).catch(() => {
   try {
-    dialog.showErrorBox('WhatsApp Companion could not start', 'The local data file or OS credential store could not be opened. Your files have been preserved. See README for recovery steps.');
+    if (!closing && !quitStarted) dialog.showErrorBox('WhatsApp Companion could not start', 'The local data file or OS credential store could not be opened. Your files have been preserved. See README for recovery steps.');
   } catch { /* A native error dialog failure must not prevent shutdown. */ }
   finally { if (closeWindow) closeWindow(); else quit(); }
 });
@@ -125,7 +125,7 @@ async function start() {
   let shieldRestoreTimer: ReturnType<typeof setTimeout> | undefined;
   let shieldRestoreNonce: string | undefined;
   let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
-  let closing = false, indexDrained = false;
+  let indexDrained = false;
   let gcTimer: ReturnType<typeof setTimeout> | undefined;
   let permissionDialogsOpen = 0;
   // Test thresholds are fixed, main-only and impossible to enable in packaged/live mode.
@@ -1046,14 +1046,27 @@ async function start() {
   recordVisibility();
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { if (closing || remote.webContents.isDestroyed()) return; cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL).catch(() => {}); } }, { role: 'quit', accelerator: 'CmdOrCtrl+Q' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
-  await win.loadURL('about:blank');
-  await controls.webContents.loadURL(uiURL);
-  startupDiagnostics.record('controls-loaded');
+  const recordLoadFailure = (event: 'base-load-failed' | 'controls-load-failed', error: unknown) => {
+    if (closing) return;
+    const code = error && typeof error === 'object' && 'errno' in error ? error.errno : undefined;
+    startupDiagnostics.record(event, typeof code === 'number' && Number.isFinite(code) ? { code: Math.max(-1000, Math.min(0, Math.trunc(code))) } : {});
+  };
   if (closing) return;
+  await win.loadURL('about:blank').catch(error => recordLoadFailure('base-load-failed', error));
+  if (closing) return;
+  await controls.webContents.loadURL(uiURL).catch(async error => {
+    if (closing) return;
+    recordLoadFailure('controls-load-failed', error);
+    if (!controls.webContents.isDestroyed() && controls.webContents.getURL() !== uiURL)
+      await controls.webContents.loadURL(uiURL).catch(error => recordLoadFailure('controls-load-failed', error));
+  });
+  if (closing) return;
+  if (!controls.webContents.isDestroyed() && controls.webContents.getURL() === uiURL) startupDiagnostics.record('controls-loaded');
   // Let navigation begin before best-effort GC; migration was already durable.
   gcTimer = setTimeout(() => { if (!closing) store.collectGarbage((phase, durationMs) => startupDiagnostics.record(phase, { durationMs })); }, 5000);
   if (fixtureStartupStall) remoteSession.protocol.handle('companion-fixture-stall', () => new Promise<Response>(() => {}));
   await remote.webContents.loadURL(fixtureStartupStall ? 'companion-fixture-stall://startup/' : remoteURL).catch(() => {});
+  if (closing) return;
   suppressStartupActivation = false;
   publish();
 }

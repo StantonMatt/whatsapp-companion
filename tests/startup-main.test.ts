@@ -301,12 +301,12 @@ test('splash deferral expiry is logged only for the trusted current boot session
   ]);
 });
 test('initialization failure after shutdown handlers are installed closes the window before quitting', async () => {
-  const Window = mocks.windows[0].constructor;
+  const { Menu } = await import('electron');
   mocks.app.emit('before-quit', { preventDefault() {} });
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
   mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.power.removeAllListeners(); mocks.app.quit.mockClear();
   mocks.windows.length = mocks.views.length = mocks.records.length = 0; mocks.handlers.clear();
-  vi.spyOn(Window.prototype, 'loadURL').mockRejectedValue(new Error('native window load failed'));
+  vi.spyOn(Menu, 'setApplicationMenu').mockImplementation(() => { throw new Error('native menu initialization failed'); });
   // Electron's quit may be cancelled by a window's asynchronous close handler.
   // The final quit must therefore happen only after that handler has drained.
   mocks.app.quit.mockImplementation(() => { expect(mocks.windows[0].isDestroyed()).toBe(true); });
@@ -624,7 +624,7 @@ test('ready while hidden waits for show; quitting an open prompt discards its an
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
   expect(existsSync(join(directory, 'companion.json'))).toBe(false);
 });
-async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?: boolean; startupStall?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
+async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?: boolean; startupStall?: boolean; waitForRemote?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
   mocks.app.emit('before-quit', { preventDefault() {} }); await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalled());
   mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.power.removeAllListeners(); mocks.app.quit.mockClear(); mocks.messageBox.mockClear();
   mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = 0; mocks.handlers.clear();
@@ -634,8 +634,99 @@ async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?:
   vi.resetModules();
   if (options.failSave) { const { Store } = await import('../src/main/store'); vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); }); }
   await import('../src/main/index');
-  await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged ? 'https://web.whatsapp.com/' : options.startupStall ? 'companion-fixture-stall:' : 'fixture.html'));
+  if (options.waitForRemote !== false) await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged ? 'https://web.whatsapp.com/' : options.startupStall ? 'companion-fixture-stall:' : 'fixture.html'));
 }
+test.each([true, false])('base page load rejection continues startup (numeric errno %s)', async numeric => {
+  const Window = mocks.windows[0].constructor, error = new Error('PRIVATE file:///PRIVATE');
+  if (numeric) Object.assign(error, { errno: -2 });
+  vi.spyOn(Window.prototype, 'loadURL').mockRejectedValue(error);
+  await restart();
+  expect(mocks.errors).not.toHaveBeenCalled(); expect(mocks.app.quit).not.toHaveBeenCalled();
+  expect(mocks.views[0].webContents.loaded).toBe(true);
+  expect(mocks.records.filter(record => ['base-load-failed', 'controls-loaded', 'remote-navigation'].includes(record.event))).toEqual([
+    { event: 'base-load-failed', details: numeric ? { code: -2 } : {} },
+    { event: 'controls-loaded', details: {} }, { event: 'remote-navigation', details: { generation: 1 } }
+  ]);
+});
+test.each([
+  ['committed controls page', true, 1], ['retry succeeds', false, 1], ['retry also rejects', false, 2]
+] as const)('controls load rejection continues remote startup: %s', async (_mode, committed, failures) => {
+  const prototype = mocks.views[0].webContents.constructor.prototype as { loadURL(url: string): Promise<void> }, loadURL = prototype.loadURL;
+  let attempts = 0;
+  vi.spyOn(prototype, 'loadURL').mockImplementation(async function (this: any, url: string) {
+    if (!url.endsWith('/ui/index.html')) return loadURL.call(this, url);
+    attempts++;
+    if (committed) { this.url = this.frame.url = url; this.loaded = true; this.emit('dom-ready'); this.emit('did-stop-loading'); }
+    else if (attempts > failures) await loadURL.call(this, url);
+    if (attempts <= failures) throw Object.assign(new Error('PRIVATE file:///PRIVATE'), { errno: -2 });
+  });
+  await restart();
+  expect(attempts).toBe(committed ? 1 : 2);
+  expect(mocks.errors).not.toHaveBeenCalled(); expect(mocks.app.quit).not.toHaveBeenCalled();
+  expect(mocks.views[1].webContents.url).toContain('fixture.html');
+  expect(mocks.records.filter(record => ['controls-load-failed', 'controls-loaded', 'remote-navigation'].includes(record.event))).toEqual([
+    ...Array.from({ length: failures }, () => ({ event: 'controls-load-failed', details: { code: -2 } })),
+    ...(committed || failures === 1 ? [{ event: 'controls-loaded', details: {} }] : []),
+    { event: 'remote-navigation', details: { generation: 1 } }
+  ]);
+  expect(JSON.stringify(mocks.records)).not.toContain('PRIVATE');
+});
+test.each([
+  ['base', false], ['base', true], ['controls', false], ['controls', true], ['controls retry', false], ['controls retry', true]
+] as const)('shutdown while %s load is pending stops startup quietly (reject %s)', async (phase, rejected) => {
+  const prototype = mocks.views[0].webContents.constructor.prototype as { loadURL(url: string): Promise<void> }, loadURL = prototype.loadURL;
+  let settle: (() => void) | undefined, attempts = 0;
+  vi.spyOn(prototype, 'loadURL').mockImplementation(function (this: any, url: string) {
+    const target = phase === 'base' ? url === 'about:blank' : url.endsWith('/ui/index.html');
+    if (!target) return loadURL.call(this, url);
+    attempts++;
+    if (phase === 'controls retry' && attempts === 1) return Promise.reject(Object.assign(new Error('load failed'), { errno: -2 }));
+    return new Promise<void>((resolve, reject) => { settle = () => rejected ? reject(Object.assign(new Error('load stopped'), { errno: -2 })) : resolve(); });
+  });
+  await restart({ noTray: true, waitForRemote: false });
+  await vi.waitFor(() => expect(settle).toBeDefined());
+  const view = mocks.views[0], controls = view.webContents, readDestroyedContents = vi.fn(() => undefined);
+  controls.close.mockImplementation(() => {
+    controls.destroyed = true; controls.emit('destroyed');
+    Object.defineProperty(view, 'webContents', { configurable: true, get: readDestroyedContents });
+  });
+  mocks.windows[0].close();
+  await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
+  expect(controls.close).toHaveBeenCalledOnce(); expect(mocks.windows[0].isDestroyed()).toBe(true);
+  const records = [...mocks.records];
+  settle!();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(readDestroyedContents).not.toHaveBeenCalled();
+  expect(mocks.errors).not.toHaveBeenCalled(); expect(mocks.app.quit).toHaveBeenCalledOnce();
+  expect(attempts).toBe(phase === 'controls retry' ? 2 : 1);
+  expect(mocks.records).toEqual(records);
+  expect(mocks.records.some(record => record.event === 'remote-navigation')).toBe(false);
+});
+test('initialization failure during window shutdown skips the startup error box', async () => {
+  const { Menu } = await import('electron');
+  vi.spyOn(Menu, 'setApplicationMenu').mockImplementation(() => {
+    mocks.windows[0].close();
+    expect(mocks.records.some(record => record.event === 'close-requested')).toBe(true);
+    expect(mocks.app.quit).not.toHaveBeenCalled();
+    throw new Error('native menu initialization failed');
+  });
+  await restart({ noTray: true, waitForRemote: false });
+  await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
+  expect(mocks.errors).not.toHaveBeenCalled();
+  expect(mocks.windows[0].isDestroyed()).toBe(true);
+  expect(mocks.records.map(record => record.event)).toEqual(expect.arrayContaining(['intake-drained', 'views-destroyed', 'quit']));
+});
+test('readiness failure after quit skips the startup error box', async () => {
+  let reject!: (error: Error) => void;
+  vi.spyOn(mocks.app, 'whenReady').mockReturnValue(new Promise<void>((_resolve, rejectReady) => { reject = rejectReady; }));
+  await restart({ waitForRemote: false });
+  expect(mocks.windows).toHaveLength(0);
+  mocks.app.emit('before-quit', { preventDefault() {} });
+  await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
+  reject(new Error('readiness failed'));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(mocks.errors).not.toHaveBeenCalled(); expect(mocks.app.quit).toHaveBeenCalledOnce();
+});
 test('fixture stall flag selects an uncommitted first load and shortened main-only recovery', async () => {
   vi.useFakeTimers();
   try {

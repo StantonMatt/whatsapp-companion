@@ -30,6 +30,7 @@ vi.mock('electron', async () => {
     session = permissions();
     send = vi.fn();
     loadURL = vi.fn(async (url: string) => { this.mainFrame.url = url; });
+    getURL = () => this.mainFrame.url;
     isDestroyed = () => false;
     getZoomFactor = () => 1;
     setZoomMode = vi.fn();
