@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { bootAssetKindSchema, bootPhaseSchema, bootStructureSchema } from '../shared/boot';
 
-const eventSchema = z.enum(['lock', 'app-ready', 'store-load', 'migration', 'gc', 'window-created', 'tray-created', 'tray-unavailable', 'views-created', 'bounds', 'bounds-rejected', 'controls-loaded', 'remote-navigation', 'dom-ready', 'finish-load', 'detector-ready', 'connector-deferral-expired', 'asset-failure', 'phase', 'visibility', 'progress', 'structure', 'watchdog', 'reload', 'preload-error', 'render-process-gone', 'unresponsive', 'responsive', 'close-requested', 'intake-drained', 'views-destroyed', 'before-quit', 'quit']);
+const eventSchema = z.enum(['lock', 'app-ready', 'store-load', 'migration', 'gc', 'window-created', 'tray-created', 'tray-unavailable', 'views-created', 'bounds', 'bounds-rejected', 'controls-loaded', 'remote-navigation', 'load-failed', 'load-retry', 'navigation-stalled', 'relaunch', 'dom-ready', 'finish-load', 'detector-ready', 'connector-deferral-expired', 'asset-failure', 'phase', 'visibility', 'progress', 'structure', 'watchdog', 'reload', 'preload-error', 'render-process-gone', 'unresponsive', 'responsive', 'close-requested', 'intake-drained', 'views-destroyed', 'before-quit', 'quit']);
 const detailsSchema = z.object({
   durationMs: z.number().finite().min(0).max(86_400_000).optional(),
   acquired: z.boolean().optional(), visible: z.boolean().optional(), online: z.boolean().optional(),
@@ -14,6 +14,7 @@ const detailsSchema = z.object({
   structure: bootStructureSchema.optional(),
   kind: bootAssetKindSchema.optional(),
   generation: z.number().int().nonnegative().optional(), reloads: z.number().int().min(0).max(2).optional(),
+  code: z.number().int().min(-1000).max(0).optional(), attempt: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
   decision: z.enum(['observing', 'gated', 'unknown', 'progress', 'waiting', 'spacing', 'exhausted', 'reload']).optional(),
   reason: z.enum(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction', 'other']).optional(),
   app: z.string().max(40).regex(/^\d+(?:\.\d+)*(?:-[a-z0-9.]+)?$/i).optional(),

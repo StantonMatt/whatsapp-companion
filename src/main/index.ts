@@ -40,6 +40,7 @@ import { StartAtLogin, loginExecutable } from './autostart';
 import { createCompanionTray } from './tray';
 import { StartupDiagnostics } from './startup-diagnostics';
 import { StartupWatchdog } from './startup-watchdog';
+import { RemoteLoadRecovery } from './remote-load-recovery';
 import { bootSessionSchema } from '../shared/boot';
 import { safeRendererSend, requireRendererSend, positiveBounds, cleanupOnce, quitAfterFlush } from './lifecycle';
 
@@ -97,6 +98,7 @@ async function start() {
   const root = __dirname;
   const uiURL = pathToFileURL(join(root, 'ui/index.html')).href;
   const remoteURL = fixture ? pathToFileURL(join(root, 'fixture.html')).href + (process.argv.includes('--fixture-startup-asset-failure') ? '#startup-asset-failure' : process.argv.includes('--fixture-startup-watchdog') ? '#startup-stuck' : process.argv.includes('--fixture-startup-splash') ? '#startup-splash' : '') : 'https://web.whatsapp.com/';
+  const fixtureStartupStall = fixture && process.argv.includes('--fixture-startup-stall');
   const conversations = new Conversations(store, () => { assistant.message = 'Conversation observations could not be saved. Check disk space and the data directory.'; publish(); });
   const stickerTransfer = new StickerTransfer();
   const directStickerSafety = new DirectStickerSafety(store, stickerTransfer, () => {
@@ -931,7 +933,14 @@ async function start() {
   controls.webContents.session.setPermissionCheckHandler(() => false);
   controls.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   remoteSession.on('will-download', (_event, item) => { item.setSaveDialogOptions({ title: 'Save WhatsApp attachment' }); });
+  const remoteLoadRecovery = new RemoteLoadRecovery({
+    load: () => { void remote.webContents.loadURL(remoteURL).catch(() => {}); }, stop: () => remote.webContents.stop(),
+    closing: () => closing || remote.webContents.isDestroyed(), visible: () => !win.isDestroyed() && win.isVisible(),
+    execPath: process.execPath, args: process.argv.slice(1), env: process.env,
+    relaunch: options => { app.relaunch(options); app.quit(); }, record: (event, details) => startupDiagnostics.record(event, details)
+  }, fixtureStartupStall ? { stalledMs: 1500, repeatStalledMs: 2000, retryMs: [200, 500, 1000] } : undefined);
   remote.webContents.on('did-start-navigation', details => {
+    remoteLoadRecovery.navigate(details.isMainFrame, details.isSameDocument);
     if (!details.isMainFrame || details.isSameDocument || closing) return;
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
     startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; assetFailureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
@@ -939,9 +948,10 @@ async function start() {
     chromeSync.reset(); pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend();
   });
   remote.webContents.on('did-start-loading', () => chromeSync.reset());
-  remote.webContents.on('destroyed', () => chromeSync.reset());
+  remote.webContents.on('destroyed', () => { chromeSync.reset(); remoteLoadRecovery.close(); });
   controls.webContents.on('render-process-gone', () => { panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); statusPublisher.reset(); });
-  remote.webContents.on('dom-ready', () => startupDiagnostics.record('dom-ready'));
+  remote.webContents.on('did-navigate', (_event, _url, httpResponseCode) => remoteLoadRecovery.commit(httpResponseCode));
+  remote.webContents.on('dom-ready', () => { remoteLoadRecovery.domReady(); startupDiagnostics.record('dom-ready'); });
   remote.webContents.on('preload-error', () => startupDiagnostics.record('preload-error'));
   remote.webContents.on('unresponsive', () => startupDiagnostics.record('unresponsive'));
   remote.webContents.on('responsive', () => startupDiagnostics.record('responsive'));
@@ -951,8 +961,13 @@ async function start() {
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
     startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; assetFailureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
     pickerDiagnostics.cancel(); cancelSticker(); finishMakerInput(); clearStickerShield(); assistant.suspend(); assistant.message = 'WhatsApp stopped responding. Use Reload WhatsApp to reconnect.'; publish(); chromeSync.reset(); });
-  remote.webContents.on('did-fail-load', (_event, _code, _description, _url, mainFrame) => { if (mainFrame) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); } });
+  remote.webContents.on('did-fail-provisional-load', (_event, code, _description, _url, mainFrame) => remoteLoadRecovery.fail(code, mainFrame, true));
+  remote.webContents.on('did-fail-load', (_event, code, _description, _url, mainFrame) => {
+    remoteLoadRecovery.fail(code, mainFrame);
+    if (mainFrame && code !== -3 && !closing) { assistant.message = 'WhatsApp could not load. Check your connection and use Reload WhatsApp.'; publish(); }
+  });
   const stopRuntime = cleanupOnce([
+    () => remoteLoadRecovery.close(),
     () => conversations.close(), () => cancelSticker(), () => stopMakerInput(), () => assistant.cancel(true),
     () => clearStickerShield(true), () => pickerDiagnostics.cancel(), () => stickerTransfer.cancel(), () => recordStickerSend(),
     () => { clearTimeout(locateRequest?.timer); clearTimeout(stickerSendTimer); clearTimeout(stickerReadinessTimer); clearTimeout(shieldCapTimer); clearTimeout(shieldRestoreTimer); },
@@ -1037,7 +1052,8 @@ async function start() {
   if (closing) return;
   // Let navigation begin before best-effort GC; migration was already durable.
   gcTimer = setTimeout(() => { if (!closing) store.collectGarbage((phase, durationMs) => startupDiagnostics.record(phase, { durationMs })); }, 5000);
-  await remote.webContents.loadURL(remoteURL).catch(() => {});
+  if (fixtureStartupStall) remoteSession.protocol.handle('companion-fixture-stall', () => new Promise<Response>(() => {}));
+  await remote.webContents.loadURL(fixtureStartupStall ? 'companion-fixture-stall://startup/' : remoteURL).catch(() => {});
   suppressStartupActivation = false;
   publish();
 }

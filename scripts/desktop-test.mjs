@@ -2719,6 +2719,23 @@ try {
   await app.close(); app = undefined;
   console.log('PASS isolated preload captures actual stylesheet load failure; hidden splash reloads twice, then stops');
 
+  const stallDir = join(dir, 'startup-stall');
+  app = await electron.launch({ chromiumSandbox: true, args: [resolve('.'), '--fixture', '--fixture-startup-stall', '--hidden', `--data-dir=${stallDir}`], timeout: 30000 });
+  const stallRecords = async () => {
+    try { return (await readFile(join(stallDir, 'diagnostics/startup.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
+    catch { return []; }
+  };
+  await expect.poll(async () => (await stallRecords()).some(record => record.event === 'load-retry'), { timeout: 15000 }).toBe(true);
+  await expect.poll(async () => (await stallRecords()).some(record => record.event === 'phase' && record.phase === 'shell'), { timeout: 15000 }).toBe(true);
+  const recoveredRecords = await stallRecords();
+  expect(recoveredRecords.filter(record => record.event === 'navigation-stalled')).toHaveLength(1);
+  expect(recoveredRecords.filter(record => record.event === 'load-retry')).toHaveLength(1);
+  expect(recoveredRecords.some(record => record.event === 'relaunch')).toBe(false);
+  expect((await app.windows()).some(fixturePage)).toBe(true);
+  expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible())).toBe(false);
+  await app.close(); app = undefined;
+  console.log('PASS hidden uncommitted navigation stops and retries into fixture shell without relaunch');
+
   await runStickerTaggingDesktop();
 
 } catch (error) {

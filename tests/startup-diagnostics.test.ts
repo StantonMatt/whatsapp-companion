@@ -4,6 +4,24 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StartupDiagnostics, STARTUP_LOG_LIMIT } from '../src/main/startup-diagnostics';
 import type { BootStructure } from '../src/shared/boot';
+test('load recovery records only bounded numeric codes and attempts without navigation details', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'startup-recovery-'));
+  try {
+    const logger = new StartupDiagnostics(directory);
+    logger.record('load-failed', { code: -105, attempt: 1 });
+    logger.record('load-retry', { attempt: 1 }); logger.record('navigation-stalled', { attempt: 2 }); logger.record('relaunch', { attempt: 2 });
+    for (const details of [{ code: -1001 }, { code: 1 }, { code: -1.5 }, { code: NaN }, { attempt: 0 }, { attempt: 1.5 },
+      { attempt: Infinity }, { attempt: Number.MAX_SAFE_INTEGER + 1 }, { code: -105, url: 'https://PRIVATE' }, { description: 'PRIVATE' }])
+      logger.record('load-failed', details as never);
+    await logger.flush();
+    const raw = await readFile(join(directory, 'diagnostics/startup.log'), 'utf8');
+    expect(raw.trim().split('\n').map(line => JSON.parse(line))).toEqual([
+      expect.objectContaining({ event: 'load-failed', code: -105, attempt: 1 }), expect.objectContaining({ event: 'load-retry', attempt: 1 }),
+      expect.objectContaining({ event: 'navigation-stalled', attempt: 2 }), expect.objectContaining({ event: 'relaunch', attempt: 2 })
+    ]);
+    expect(raw).not.toMatch(/PRIVATE|https:|description|url/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 test('asset failures persist only allowlisted kinds and generation', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'startup-assets-'));
   try {
