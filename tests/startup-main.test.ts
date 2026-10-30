@@ -23,6 +23,7 @@ vi.mock('electron', async () => {
     frame = { url: '', isDestroyed: () => false };
     get mainFrame() { return this.frame; }
     send = vi.fn(); close = vi.fn(() => { this.destroyed = true; this.emit('destroyed'); });
+    stop = vi.fn();
     reload = vi.fn(() => { this.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false }); });
     isDestroyed() { return this.destroyed; }
     getURL() { return this.url; }
@@ -30,6 +31,7 @@ vi.mock('electron', async () => {
       this.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
       this.url = this.frame.url = url;
       if (mocks.activateOnLoad) { mocks.activateOnLoad = false; mocks.app.emit('activate'); }
+      if (url.startsWith('companion-fixture-stall:')) await new Promise<void>(() => {});
       if (url.includes('fixture.html')) await mocks.pendingRemoteLoad;
       this.loaded = true; this.emit('dom-ready'); this.emit('did-finish-load');
     }
@@ -68,7 +70,7 @@ vi.mock('electron', async () => {
     isPackaged: false, directory: '',
     commandLine: { removeSwitch() {}, hasSwitch: () => true, appendSwitch() {} }, enableSandbox() {}, setName() {},
     setPath(_name: string, value: string) { this.directory = value; }, getPath() { return this.directory; },
-    getVersion: () => '0.1.0', requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), quit: vi.fn()
+    getVersion: () => '0.1.0', requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), quit: vi.fn(), relaunch: vi.fn()
   });
   mocks.power = new EventEmitter();
   class Tray extends EventEmitter {
@@ -93,7 +95,7 @@ vi.mock('../src/main/startup-diagnostics', () => ({ StartupDiagnostics: class {
 } }));
 let directory: string, args: string[];
 beforeEach(async () => {
-  vi.resetModules(); mocks.app?.removeAllListeners(); mocks.ipc?.removeAllListeners(); mocks.power?.removeAllListeners(); mocks.app?.quit.mockReset(); if (mocks.app) mocks.app.isPackaged = false;
+  vi.resetModules(); mocks.app?.removeAllListeners(); mocks.ipc?.removeAllListeners(); mocks.power?.removeAllListeners(); mocks.app?.quit.mockReset(); mocks.app?.relaunch.mockReset(); if (mocks.app) mocks.app.isPackaged = false;
   mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = mocks.menus.length = mocks.images.length = 0; mocks.trayFailure = false; mocks.activateOnLoad = false; mocks.pendingRemoteLoad = undefined; mocks.handlers.clear(); mocks.errors.mockClear(); mocks.messageBox.mockReset().mockResolvedValue({ response: 0 });
   directory = mkdtempSync(join(tmpdir(), 'startup-main-')); args = process.argv;
   process.argv = [...args, '--fixture', `--data-dir=${directory}`]; vi.stubGlobal('__dirname', '/fixture-build');
@@ -122,6 +124,58 @@ function expectManualNotice() {
     type: 'notice', text: expect.stringContaining('Enable conversation context in AI settings')
   }]);
 }
+test('hidden remote failure survives error-page commit/dom-ready and retries; manual navigation cancels retry', () => {
+  const contents = mocks.views[1].webContents, win = mocks.windows[0], load = vi.spyOn(contents, 'loadURL');
+  vi.useFakeTimers();
+  try {
+    win.hide(); contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    contents.emit('did-fail-provisional-load', {}, -105, 'PRIVATE', 'https://PRIVATE', true);
+    contents.emit('did-navigate', {}, 'chrome-error://chromewebdata/', -1);
+    contents.emit('dom-ready'); contents.emit('did-finish-load');
+    contents.emit('did-fail-load', {}, -105, 'PRIVATE', 'https://PRIVATE', true);
+    vi.advanceTimersByTime(1999); expect(load).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1); expect(load).toHaveBeenCalledExactlyOnceWith(contents.url);
+    expect(win.isVisible()).toBe(false);
+    expect(mocks.records).toContainEqual({ event: 'load-failed', details: { code: -105, attempt: 1 } });
+    expect(mocks.records).toContainEqual({ event: 'load-retry', details: { attempt: 1 } });
+    expect(JSON.stringify(mocks.records)).not.toContain('PRIVATE');
+    contents.emit('did-fail-load', {}, -105, 'PRIVATE', 'https://PRIVATE', true);
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    contents.emit('dom-ready'); vi.advanceTimersByTime(5000); expect(load).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
+test('main ignores aborted/subframe loads and shutdown cancels retry', () => {
+  const contents = mocks.views[1].webContents, load = vi.spyOn(contents, 'loadURL');
+  vi.useFakeTimers();
+  try {
+    contents.emit('did-fail-load', {}, -3, 'aborted', '', true);
+    contents.emit('did-fail-load', {}, -105, 'subframe', '', false);
+    vi.advanceTimersByTime(5000); expect(load).not.toHaveBeenCalled();
+    expect(mocks.records.some(record => record.event === 'load-failed')).toBe(false);
+    contents.emit('did-fail-load', {}, -105, '', '', true);
+    mocks.app.emit('before-quit', { preventDefault() {} });
+    vi.advanceTimersByTime(5000); expect(load).not.toHaveBeenCalled();
+  } finally { vi.useRealTimers(); }
+});
+test('two uncommitted navigations stop/reload then relaunch through normal shutdown', async () => {
+  const contents = mocks.views[1].webContents;
+  vi.spyOn(contents, 'loadURL').mockImplementation(() => {
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    return new Promise<void>(() => {});
+  });
+  mocks.app.quit.mockImplementationOnce(() => mocks.app.emit('before-quit', { preventDefault() {} }));
+  vi.useFakeTimers();
+  try {
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    vi.advanceTimersByTime(45_000);
+    expect(contents.stop).toHaveBeenCalledOnce(); expect(contents.loadURL).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(45_000);
+    expect(mocks.app.relaunch).toHaveBeenCalledExactlyOnceWith({ execPath: process.execPath,
+      args: [...process.argv.slice(1).filter(arg => arg !== '--hidden'), '--relaunched-after-stall'] });
+    expect(mocks.records.some(record => record.event === 'close-requested')).toBe(true);
+  } finally { vi.useRealTimers(); }
+  await vi.waitFor(() => expect(mocks.records.some(record => record.event === 'quit')).toBe(true));
+});
 test('remote session has the page UA before view construction', () => {
   const remote = mocks.views[1];
   expect(remote.initialUserAgent).toContain('Chrome/');
@@ -570,18 +624,43 @@ test('ready while hidden waits for show; quitting an open prompt discards its an
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
   expect(existsSync(join(directory, 'companion.json'))).toBe(false);
 });
-async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
+async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?: boolean; startupStall?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
   mocks.app.emit('before-quit', { preventDefault() {} }); await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalled());
   mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.power.removeAllListeners(); mocks.app.quit.mockClear(); mocks.messageBox.mockClear();
   mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = 0; mocks.handlers.clear();
   mocks.trayFailure = options.noTray ?? false; mocks.app.isPackaged = options.packaged ?? false;
   if (options.desktop) writeFileSync(join(directory, 'companion.json'), JSON.stringify({ ...initialState(), desktop: options.desktop }));
-  process.argv = [...args, '--fixture', `--data-dir=${directory}`, ...(options.hidden ? ['--hidden'] : [])];
+  process.argv = [...args, '--fixture', `--data-dir=${directory}`, ...(options.hidden ? ['--hidden'] : []), ...(options.startupStall ? ['--fixture-startup-stall'] : [])];
   vi.resetModules();
   if (options.failSave) { const { Store } = await import('../src/main/store'); vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); }); }
   await import('../src/main/index');
-  await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged ? 'https://web.whatsapp.com/' : 'fixture.html'));
+  await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged ? 'https://web.whatsapp.com/' : options.startupStall ? 'companion-fixture-stall:' : 'fixture.html'));
 }
+test('fixture stall flag selects an uncommitted first load and shortened main-only recovery', async () => {
+  vi.useFakeTimers();
+  try {
+    await restart({ hidden: true, startupStall: true });
+    const contents = mocks.views[1].webContents;
+    expect(contents.session.protocol.handle).toHaveBeenCalledWith('companion-fixture-stall', expect.any(Function));
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(contents.stop).toHaveBeenCalledOnce(); expect(contents.url).toContain('fixture.html');
+    expect(mocks.records.filter(record => record.event === 'navigation-stalled')).toHaveLength(1);
+    expect(mocks.records.filter(record => record.event === 'load-retry')).toHaveLength(1);
+    expect(mocks.windows[0].isVisible()).toBe(false);
+  } finally { vi.useRealTimers(); }
+});
+test('packaged app ignores fixture stall protocol and shortened thresholds', async () => {
+  vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg'));
+  await restart({ packaged: true, startupStall: true });
+  const contents = mocks.views[1].webContents;
+  expect(contents.session.protocol.handle).not.toHaveBeenCalledWith('companion-fixture-stall', expect.any(Function));
+  vi.useFakeTimers();
+  try {
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    vi.advanceTimersByTime(44_999); expect(contents.stop).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1); expect(contents.stop).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
 test('hidden launch loads the remote, keeps watchdog gated, and relinking does not show the window', async () => {
   await restart({ hidden: true }); const win = mocks.windows[0], contents = mocks.views[1].webContents;
   expect(win.show).not.toHaveBeenCalled(); expect(win.visible).toBe(false);
