@@ -15,7 +15,6 @@ export class StickerFiles {
   durabilityWarning = false;
   private cache = new Map<string, { signature: string; verified: ReturnType<typeof verifyStickerBytes> }>();
   private cacheBytes = 0;
-  private pending = new Map<string, Promise<ReturnType<typeof verifyStickerBytes>>>();
   private activeReads = new Set<ActiveRead>();
   readonly cacheBudget: number;
   private signature(stat: BigIntStats) {
@@ -25,8 +24,7 @@ export class StickerFiles {
     // Removal is terminal for requests already in progress, even if the same
     // hash is subsequently restored before they finish.
     for (const read of this.activeReads) if ((!id || read.id === id) && read.invalidated !== 'removed') read.invalidated = reason;
-    if (!id) { this.cache.clear(); this.cacheBytes = 0; this.pending.clear(); return; }
-    for (const key of this.pending.keys()) if (key.startsWith(`${id}:`)) this.pending.delete(key);
+    if (!id) { this.cache.clear(); this.cacheBytes = 0; return; }
     const old = this.cache.get(id);
     if (old) { this.cacheBytes -= old.verified.bytes.length; this.cache.delete(id); }
   }
@@ -61,48 +59,34 @@ export class StickerFiles {
       if (!(await lstat(this.directory)).isDirectory()) throw new InvalidStickerError('Invalid sticker directory.');
       const fd = handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const stat = await fd.stat({ bigint: true });
-      // Do not let a cancelled attempt register new shared work after the
-      // invalidation has cleared pending entries for its replacement.
       this.checkRead(read);
       if (!stat.isFile() || stat.size < 12n || stat.size > BigInt(MAX_STICKER_BYTES)) throw new InvalidStickerError('Invalid sticker file.');
-      const signature = this.signature(stat), cached = this.cache.get(id);
-      if (cached?.signature === signature) {
-        this.checkRead(read);
+      const signature = this.signature(stat);
+      const buffer = Buffer.allocUnsafe(Number(stat.size) + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await fd.read(buffer, length, buffer.length - length, null);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      if (BigInt(length) !== stat.size || this.signature(await fd.stat({ bigint: true })) !== signature) throw new StickerReadChangedError('Sticker file changed during read.');
+      this.checkRead(read);
+      const bytes = buffer.subarray(0, length), cached = this.cache.get(id);
+      // Inode, size and timestamps can all survive a same-tick overwrite.
+      // Compare the opened file's bytes before reusing their verification.
+      if (cached?.signature === signature && bytes.equals(cached.verified.bytes)) {
         this.cache.delete(id); this.cache.set(id, cached);
         return cached.verified;
       }
       if (cached) { this.cache.delete(id); this.cacheBytes -= cached.verified.bytes.length; }
-      const key = `${id}:${signature}`;
-      let work = this.pending.get(key);
-      if (!work) {
-        work = (async () => {
-          const buffer = Buffer.allocUnsafe(Number(stat.size) + 1);
-          let length = 0;
-          while (length < buffer.length) {
-            const { bytesRead } = await fd.read(buffer, length, buffer.length - length, null);
-            if (!bytesRead) break;
-            length += bytesRead;
-          }
-          if (BigInt(length) !== stat.size || this.signature(await fd.stat({ bigint: true })) !== signature) throw new StickerReadChangedError('Sticker file changed during read.');
-          const verified = verifyStickerBytes(buffer.subarray(0, length), id);
-          this.checkRead(read);
-          if (verified.bytes.length <= this.cacheBudget) {
-            const replaced = this.cache.get(id);
-            if (replaced) { this.cacheBytes -= replaced.verified.bytes.length; this.cache.delete(id); }
-            while (this.cacheBytes + verified.bytes.length > this.cacheBudget && this.cache.size) {
-              const oldest = this.cache.keys().next().value!;
-              this.cacheBytes -= this.cache.get(oldest)!.verified.bytes.length; this.cache.delete(oldest);
-            }
-            this.cache.set(id, { signature, verified }); this.cacheBytes += verified.bytes.length;
-          }
-          return verified;
-        })();
-        this.pending.set(key, work);
-        void work.finally(() => { if (this.pending.get(key) === work) this.pending.delete(key); }).catch(() => {});
+      const verified = verifyStickerBytes(bytes, id);
+      if (verified.bytes.length <= this.cacheBudget) {
+        while (this.cacheBytes + verified.bytes.length > this.cacheBudget && this.cache.size) {
+          const oldest = this.cache.keys().next().value!;
+          this.cacheBytes -= this.cache.get(oldest)!.verified.bytes.length; this.cache.delete(oldest);
+        }
+        this.cache.set(id, { signature, verified }); this.cacheBytes += verified.bytes.length;
       }
-      const verified = await work;
-      this.checkRead(read);
-      if (this.signature(await fd.stat({ bigint: true })) !== signature) throw new StickerReadChangedError('Sticker file changed during read.');
       return verified;
     } catch (error) {
       const cached = this.cache.get(id);
