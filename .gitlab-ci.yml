@@ -1,0 +1,91 @@
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    # Fork MRs run in the fork, never on this project's private runner.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      # Complement of **/*.md and docs/**. The first glob covers root files;
+      # the second covers non-docs top-level directories and non-.md basenames.
+      # Filter here so a docs push cannot cancel an unfinished source pipeline.
+      changes: &non_docs_changes
+        paths:
+          - '{*[!d],*[!m]d,*[!.]md,d,md}'
+          - '{[!d]*,d,d[!o]*,do,do[!c]*,doc,doc[!s]*,docs?*}/**/{*[!d],*[!m]d,*[!.]md,d,md}'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes: *non_docs_changes
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+default:
+  image: node:22-bookworm
+  tags: [ci-general]
+  interruptible: true
+  cache:
+    key:
+      files: [package-lock.json]
+      prefix: node22-linux
+    paths:
+      - .npm/
+      - .local/ci-cache/electron/
+      - .local/ci-cache/electron-builder/
+  before_script:
+    # Recheck the diff and fail closed if its base revision is unavailable.
+    - source scripts/ci-changes.sh
+
+variables:
+  GIT_DEPTH: "0"
+  npm_config_cache: "$CI_PROJECT_DIR/.npm"
+  npm_config_prefer_offline: "true"
+  ELECTRON_CACHE: "$CI_PROJECT_DIR/.local/ci-cache/electron"
+  ELECTRON_BUILDER_CACHE: "$CI_PROJECT_DIR/.local/ci-cache/electron-builder"
+
+stages: [fast, full]
+
+fast:
+  stage: fast
+  timeout: 10m
+  variables:
+    ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+  script:
+    - node --test scripts/check-ci-changes.mjs
+    - npm ci
+    - ./node_modules/.bin/tsc --noEmit
+    - git diff --check "$CI_CHECK_BASE" "$CI_COMMIT_SHA"
+    # Storage fixtures fsync thousands of disposable writes; avoid OverlayFS
+    # latency without weakening their assertions or increasing test timeouts.
+    - TMPDIR=/dev/shm npm test -- --maxWorkers=2
+    - npm run build
+
+full:
+  stage: full
+  needs: [fast]
+  timeout: 20m
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_LABELS =~ /(^|,)ci:full(,|$)/'
+  variables:
+    COMPANION_TEST_SCRATCH: "$CI_PROJECT_DIR/.local/companion-desktop"
+    # Leave time to collect diagnostics before the job's hard timeout.
+    RUNNER_SCRIPT_TIMEOUT: 19m
+  script:
+    - apt-get update
+    - apt-get install --yes --no-install-recommends xvfb xauth libgtk-3-0 libnss3 libasound2 libgbm1
+    - npm ci
+    - node node_modules/electron/install.js && test -x node_modules/electron/dist/electron
+    # Electron refuses root with its sandbox enabled. The runner must allow
+    # Chromium's namespaces/setuid sandbox; never add --no-sandbox.
+    - chown -R node:node "$CI_PROJECT_DIR"
+    - chown root:root node_modules/electron/dist/chrome-sandbox
+    - chmod 4755 node_modules/electron/dist/chrome-sandbox
+    - runuser -u node -- timeout --kill-after=10s 15m xvfb-run -a npm run test:desktop
+    - runuser -u node -- npm run package:linux -- --publish never
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - .local/desktop-diagnostics/
+      - .local/companion-desktop/**/diagnostics/
