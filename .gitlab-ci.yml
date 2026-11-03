@@ -8,15 +8,14 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_DRAFT == "true"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       # Complement of **/*.md and docs/**. The first glob covers root files;
       # the second covers non-docs top-level directories and non-.md basenames.
-      # Filter here so a docs push cannot cancel an unfinished source pipeline.
+      # Filter main pushes so docs cannot cancel an unfinished source pipeline.
       changes: &non_docs_changes
         paths:
           - '{*[!d],*[!m]d,*[!.]md,d,md}'
           - '{[!d]*,d,d[!o]*,do,do[!c]*,doc,doc[!s]*,docs?*}/**/{*[!d],*[!m]d,*[!.]md,d,md}'
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
-      changes: *non_docs_changes
     - if: '$CI_PIPELINE_SOURCE == "web"'
     - when: never
 

@@ -13,7 +13,7 @@ This is the user-owned WhatsApp Companion implementation. Keep changes in this p
 
 ## CI
 
-- GitLab CI runs on non-draft MRs to `main` and pushes to `main`: dependency install, TypeScript checks, whitespace checks, the full Vitest unit/fixture integration suite, and build. No source linter is configured. Documentation-only changes are skipped. See [CI operation](docs/ci.md).
+- GitLab CI runs on non-draft MRs to `main` and pushes to `main`: dependency install, TypeScript checks, whitespace checks, the full Vitest unit/fixture integration suite, and build. No source linter is configured. Documentation-only MRs get a successful check-skipping job; documentation-only main pushes skip pipelines. See [CI operation](docs/ci.md).
 - Keep MRs draft until stable and batch fixes into a ready push. Let GitLab CI run full suites and builds instead of repeating them on the shared desktop. Require passing CI before merging; review before committing/pushing still applies, using focused local checks and any relevant manual verification before review.
 - Add `ci:full` to composer/renderer MRs and packaging changes before marking them ready. This adds sandboxed Electron/Playwright desktop fixtures under Xvfb and unsigned Linux AppImage packaging; it also runs on later updates while the label remains. GitLab label edits do not trigger pipelines: run a new MR pipeline after adding the label, or after marking ready if no pipeline starts. A manual web pipeline runs both jobs. Never use real WhatsApp sessions or provider keys in CI.
 - Live account linking, provider/key-store checks, and Windows/macOS validation remain explicit manual checks on suitable systems. If CI is unavailable, run required full checks locally through `heavy`.
