@@ -1,6 +1,6 @@
 # CI operation
 
-GitLab is the current host: `git@gitlab.com:stantonmatthewj/whatsapp-companion.git`.
+GitLab is the current host: `git@gitlab.com:StantonMatt/whatsapp-companion.git`.
 `.gitlab-ci.yml` uses Node.js 22 in a Debian Bookworm container on the private
 `ci-general` Docker runner. No provider keys or real WhatsApp sessions are used.
 

@@ -1,6 +1,6 @@
 # Repository instructions
 
-This is the user-owned WhatsApp Companion implementation. Keep changes in this project. Use SSH URLs for GitLab Git operations (`git@gitlab.com:stantonmatthewj/whatsapp-companion.git`). Do not create another Codex task.
+This is the user-owned WhatsApp Companion implementation. Keep changes in this project. Use SSH URLs for GitLab Git operations (`git@gitlab.com:StantonMatt/whatsapp-companion.git`). Do not create another Codex task.
 
 - Keep the remote WhatsApp page sandboxed with context isolation and no Node or desktop API bridge. Main may run fixed, bundled, reviewed main-world code in WhatsApp’s page only for user-initiated, opt-in actions (direct sticker sending), never exposing a page-callable API. Providers, keys and send permissions belong to the main process.
 - Do not read unrelated credentials, reuse browser sessions as WhatsApp credentials, or send live messages to contacts as tests. Account linking requires the user's QR interaction.
