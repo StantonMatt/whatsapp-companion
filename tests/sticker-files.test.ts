@@ -607,6 +607,29 @@ test.each(['missing', 'corrupt', 'symlink'])('cached display detects later %s da
   expect((await stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' })).status).toBe(200);
 });
 
+test('cached display detects same-size corruption even when filesystem timestamps collide', async () => {
+  const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
+  const original = readFileSync(blob(dir)), timestamps = statSync(blob(dir), { bigint: true });
+  const open = fsPromises.open;
+  // Older kernels can give successive tmpfs writes identical mtime/ctime.
+  // Keep real file handles and bytes, but make that collision deterministic.
+  vi.spyOn(fsPromises, 'open').mockImplementation(async (path, flags, mode) => {
+    const handle = await open(path, flags, mode), stat = handle.stat.bind(handle);
+    vi.spyOn(handle, 'stat').mockImplementation(async (...args: Parameters<typeof handle.stat>) => {
+      const actual = await stat(...args);
+      return Object.assign(actual, { mtimeNs: timestamps.mtimeNs, ctimeNs: timestamps.ctimeNs });
+    });
+    return handle;
+  });
+  const request = () => stickerResponse(store, { url: `companion-sticker://${entry.id}`, method: 'GET' });
+  expect((await request()).status).toBe(200);
+  const changed = Buffer.from(original); changed[changed.length - 1] ^= 1;
+  writeFileSync(blob(dir), changed);
+  expect((await request()).status).toBe(404);
+  writeFileSync(blob(dir), original);
+  expect((await request()).status).toBe(200);
+});
+
 test('identical rediscovery retains cached bytes; actual repair replaces them', async () => {
   const dir = directory(); seed(dir); const store = new Store(dir), entry = observation();
   const first = await store.readStickerBytes(entry.id);
