@@ -1,6 +1,6 @@
 # CI operation
 
-GitLab is the current host: `git@gitlab.com:stantonmatthewj/whatsapp-companion.git`.
+GitLab is the current host: `git@gitlab.com:StantonMatt/whatsapp-companion.git`.
 `.gitlab-ci.yml` uses Node.js 22 in a Debian Bookworm container on the private
 `ci-general` Docker runner. No provider keys or real WhatsApp sessions are used.
 
@@ -22,12 +22,11 @@ GitLab is the current host: `git@gitlab.com:stantonmatthewj/whatsapp-companion.g
 - **Build → Pipelines → New pipeline** on a branch or tag runs both jobs,
   including on a draft MR's branch; this is the equivalent of GitHub's workflow
   dispatch. Tag pushes still do not trigger CI.
-- Documentation-only diffs (`**/*.md` and `docs/**`) are filtered by workflow
-  `rules:changes`. Complement globs match every other path, including mixed
-  source/documentation diffs, so a docs-only push cannot cancel an unfinished
-  source pipeline. A script rechecks the diff before dependency installation;
-  manual web pipelines always run checks. If GitLab's merge gate requires a
-  pipeline for a docs-only MR, run a manual web pipeline on its branch.
+- Documentation-only main pushes (`**/*.md` and `docs/**`) are filtered by
+  workflow `rules:changes`. Ready MRs always get a pipeline so the successful
+  pipeline merge gate can pass. The existing diff script exits successfully
+  before dependency installation for a docs-only MR; it fails closed if the
+  base cannot be read. Manual web pipelines always run checks.
 - New commits cancel superseded interruptible work. Jobs time out after 10 and
   20 minutes respectively; the full job reserves one minute for artifact upload.
   Desktop diagnostics are collected regardless of the script result and retained
