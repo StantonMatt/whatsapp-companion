@@ -20,8 +20,7 @@ test('CI diff gate skips only documentation and fails closed', () => {
   const run = (source, base, head) => spawnSync('bash', ['-c', 'source "$1"; echo "CHECKS:$CI_CHECK_BASE"', 'ci-test', script], {
     cwd: repo,
     encoding: 'utf8',
-    env: { ...process.env, CI_PIPELINE_SOURCE: source, CI_COMMIT_SHA: head,
-      CI_COMMIT_BEFORE_SHA: base, CI_MERGE_REQUEST_DIFF_BASE_SHA: base },
+    env: { ...process.env, GITHUB_EVENT_NAME: source, GITHUB_SHA: head, CI_BASE_SHA: base },
   });
   const check = (source, base, head, needed) => {
     const result = run(source, base, head);
@@ -44,12 +43,12 @@ test('CI diff gate skips only documentation and fails closed', () => {
     check('push', nested, docs, false);
     check('push', docs, source, true);
     check('push', root, laterDocs, true); // Mixed multi-commit push.
-    check('merge_request_event', root, laterDocs, true); // Entire MR, not last commit.
-    check('merge_request_event', source, laterDocs, false);
+    check('pull_request', root, laterDocs, true); // Entire PR, not last commit.
+    check('pull_request', source, laterDocs, false);
     check('push', '0'.repeat(40), root, true);
-    check('web', root, markdown, true);
-    check('web', '', root, true); // Root commit also has a whitespace base.
-    const error = run('merge_request_event', 'missing-revision', source);
+    check('workflow_dispatch', root, markdown, true);
+    check('workflow_dispatch', '', root, true); // Root commit also has a whitespace base.
+    const error = run('pull_request', 'missing-revision', source);
     assert.notEqual(error.status, 0);
     assert.ok(!error.stdout.includes('CHECKS:'));
     assert.notEqual(run('schedule', root, source).status, 0);

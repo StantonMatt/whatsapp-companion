@@ -120,20 +120,16 @@ The app uses a custom emerald chat/handset icon with a mint Companion sparkle. L
 
 ## Releases
 
-This desktop application is distributed as a Linux AppImage; it has no hosted web deployment or automatic updater. Release artifacts contain application code and assets, never the development machine's account data, sticker library or API keys. Download the AppImage from [GitLab Releases](https://gitlab.com/StantonMatt/whatsapp-companion/-/releases), make it executable, and launch it:
+This desktop application is distributed as a Linux AppImage; it has no hosted web deployment or automatic updater. Release artifacts contain application code and assets, never the development machine's account data, sticker library or API keys. Download the AppImage from [GitHub Releases](https://github.com/StantonMatt/whatsapp-companion/releases), make it executable, and launch it:
 
 ```bash
 chmod +x 'WhatsApp Companion-0.1.0.AppImage'
 ./'WhatsApp Companion-0.1.0.AppImage'
 ```
 
-To prepare a release, run the verification commands above and `npm run package:linux -- --publish never`, then complete the repository's required review-fix-loop before committing or pushing. Publish the reviewed commit on `main`, create the matching version tag, upload the AppImage plus its SHA-256 checksum to the project's generic package registry, and link those assets from the tag's GitLab release. The project is private, so downloads require GitLab access. Releases are unsigned; Windows/macOS packages are not yet validated. A source push by itself does not deploy an update to installed applications.
+To prepare a release, run the verification commands above and `npm run package:linux -- --publish never`, then complete the repository's required review-fix-loop before committing or pushing. Publish the reviewed commit on `main`, create the matching version tag, attach the AppImage and its SHA-256 checksum to the tag's GitHub release. The project is private, so downloads require GitHub access. Releases are unsigned; Windows/macOS packages are not yet validated. A source push by itself does not deploy an update to installed applications.
 
-CI runs through [GitLab pipelines](https://gitlab.com/StantonMatt/whatsapp-companion/-/pipelines); see [CI operation and switching back to GitHub](docs/ci.md).
-
-### If moving back to GitHub
-
-Use the retained `github` SSH remote and [GitHub Releases](https://github.com/StantonMatt/whatsapp-companion/releases), attaching the AppImage and checksum to the version tag's release. Restore required GitHub CI checks as described in [CI operation](docs/ci.md).
+CI runs through [GitHub Actions](https://github.com/StantonMatt/whatsapp-companion/actions); see [CI operation](docs/ci.md).
 
 ## Data and security
 
