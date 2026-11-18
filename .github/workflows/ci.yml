@@ -9,9 +9,6 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   workflow_dispatch:
 
 permissions:
@@ -30,41 +27,62 @@ jobs:
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
       (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_LIGHT_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 10
+    outputs:
+      needed: ${{ steps.changes.outputs.needed }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: '22'
           cache: npm
+      - name: Check CI path filter
+        run: node --test scripts/check-ci-changes.mjs
+      - name: Detect changes
+        id: changes
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          source scripts/ci-changes.sh
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "base=$CI_CHECK_BASE" >> "$GITHUB_OUTPUT"
       - name: Install dependencies
+        if: steps.changes.outputs.needed == 'true'
         run: npm ci
         env:
           # Unit tests mock Electron; the fast job does not launch it.
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - name: Typecheck
+        if: steps.changes.outputs.needed == 'true'
         run: ./node_modules/.bin/tsc --noEmit
       - name: Check whitespace (no source linter configured)
-        # On PRs HEAD is GitHub's merge commit, so this checks the whole PR.
-        run: git diff --check HEAD^ HEAD
+        if: steps.changes.outputs.needed == 'true'
+        env:
+          CI_CHECK_BASE: ${{ steps.changes.outputs.base }}
+        run: git diff --check "$CI_CHECK_BASE" "$GITHUB_SHA"
       - name: Unit and fixture integration tests
+        if: steps.changes.outputs.needed == 'true'
+        env:
+          TMPDIR: /dev/shm
         run: npm test -- --maxWorkers=2
       - name: Build
+        if: steps.changes.outputs.needed == 'true'
         # npm run build includes the same typecheck already run above.
         run: npm run build
 
   full:
     needs: fast
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      needs.fast.outputs.needed == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
-      contains(github.event.pull_request.labels.*.name, 'ci:full'))
-    runs-on: ubuntu-latest
+      contains(github.event.pull_request.labels.*.name, 'ci:full')))
+    runs-on: ${{ fromJSON(vars.CI_LIGHT_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 20
     env:
       ELECTRON_CACHE: ${{ github.workspace }}/.local/ci-cache/electron
@@ -103,10 +121,12 @@ jobs:
         env:
           COMPANION_TEST_SCRATCH: ${{ runner.temp }}/companion-desktop
         run: xvfb-run -a npm run test:desktop
+      - name: Package Linux AppImage (never publish)
+        run: npm run package:linux -- --publish never
       # A hang killed by the step timeout skips the scripts' cleanup, so also
       # collect startup logs straight from the disposable profiles.
       - name: Upload desktop diagnostics
-        if: failure() || cancelled()
+        if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
           name: desktop-diagnostics
@@ -116,5 +136,3 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
-      - name: Package Linux AppImage (never publish)
-        run: npm run package:linux -- --publish never
