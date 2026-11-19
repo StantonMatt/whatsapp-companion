@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "description": "A private desktop companion for WhatsApp Web",
   "author": "WhatsApp Companion contributors",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "dist/main.cjs",
