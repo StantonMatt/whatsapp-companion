@@ -68,7 +68,7 @@ test('local identity scopes preferences/style, cannot be supplied by remote or a
   const id = registry.identify(snap)!;
   expect(snapshotSchema.safeParse({ ...snap, settingsId: id }).success).toBe(false);
   expect(actionSchema.safeParse({ type: 'autoPermission', chatId: id, permission: 'enable' }).success).toBe(false);
-  store.update(s => { setPreferences(s, id, { style: 'conversation', learnFromSent: true, tone: 'friendly' }); });
+  store.update(s => { s.global.aiFeatures = true; setPreferences(s, id, { style: 'conversation', learnFromSent: true, tone: 'friendly' }); });
   const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
   assistant.receive({ ...snapshot(['CHAT_A_001', 'CHAT_A_002', 'CHAT_A_003', 'CHAT_A_004', 'CHAT_A_005']), settingsId: id });
   expect(store.state.profiles[id]?.samples).toBe(5);

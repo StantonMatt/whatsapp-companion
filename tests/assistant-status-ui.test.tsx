@@ -101,3 +101,21 @@ test.each(['reload', 'crash and reload'])('controls %s renders the reopened stic
     expect(unsubscribe).toHaveBeenCalledOnce(); document.body.replaceChildren(); vi.unstubAllGlobals();
   }
 });
+
+test('AI off hides scheduled-reply controls even during an intermediate pending status update', async () => {
+  vi.resetModules(); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  document.body.innerHTML = '<div id="root"></div>';
+  let receive!: (update: StatusUpdate) => void;
+  const status: Status = { sequence: 1, state: initialState(), chat: { ...emptySnapshot, canSendSticker: false }, runtimePaused: false,
+    keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true,
+    message: '', pending: { text: 'Synthetic queued reply', due: Date.now() + 30_000 }, panel: 'settings' };
+  Object.assign(window, { companion: { status: async () => status, subscribe: (callback: typeof receive) => { receive = callback; return () => {}; }, action: vi.fn(async () => ({ ok: true })) } });
+  try {
+    await act(async () => { await import('../src/ui/index'); });
+    expect(document.querySelector('.pending')).toBeNull();
+    await act(async () => receive({ sequence: 2, state: { global: { ...status.state.global, aiFeatures: true } } }));
+    expect(document.querySelector('.pending')?.textContent).toContain('Synthetic queued reply');
+    await act(async () => receive({ sequence: 3, state: { global: { ...status.state.global, aiFeatures: false } } }));
+    expect(document.querySelector('.pending')).toBeNull();
+  } finally { await act(async () => mounted.root?.unmount()); document.body.replaceChildren(); vi.unstubAllGlobals(); }
+});

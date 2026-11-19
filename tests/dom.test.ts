@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, test, expect, vi, afterEach } from 'vitest';
-import { DomConnector, peerFromMessageId, caretAtEnd, readDraft, accountSafetyReason } from '../src/connector/dom';
+import { DomConnector as BaseDomConnector, peerFromMessageId, caretAtEnd, readDraft, accountSafetyReason } from '../src/connector/dom';
 import { stickerImageState } from '../src/connector/sticker-image-state';
 import { snapshotSchema, initialState, type Snapshot, type State } from '../src/shared/model';
 import { Assistant } from '../src/main/assistant';
@@ -13,6 +13,9 @@ import type { RemoteEvent, RemoteCommand } from '../src/shared/connector';
 import { composerProvablyEmpty } from '../src/connector/draft';
 import { emptyComposers } from './fixtures/empty-composers';
 import { composerStyle } from '../src/connector/composer-style';
+class DomConnector extends BaseDomConnector {
+  override start() { super.start(); this.command({ type: 'chrome', panel: null, pending: false, aiFeatures: true }); }
+}
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.getSelection()?.removeAllRanges(); document.body.replaceChildren(); });
 function fixture() {
   document.body.innerHTML = '<div id="main"><header><span title="A friend">A friend</span></header><div data-id="false_123@c.us_one"><span class="selectable-text copyable-text">Hi</span></div><footer><div contenteditable="true" role="textbox">A draft</div></footer></div>';
@@ -966,7 +969,7 @@ function retryClicks() {
 }
 function integratedAssistant(generator: typeof generate, identify?: (snapshot: Snapshot) => string, queued = false) {
   const editor = fixture(); editor.tabIndex = 0;
-  const state = initialState(); state.global.suggestions = true; state.global.shareContext = true;
+  const state = initialState(); state.global.aiFeatures = true; state.global.suggestions = true; state.global.shareContext = true;
   const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
   const events: RemoteEvent[] = [];
   let assistant!: Assistant;
@@ -2422,6 +2425,7 @@ describe('connector work budgets', () => {
     vi.spyOn(header, 'insertBefore').mockImplementation((node, child) => { wrote = true; return nativeInsert(node, child); });
     const events: RemoteEvent[] = [], navigation = new Navigation(document, event => events.push(event));
     try {
+      navigation.update(null, false, true);
       navigation.refresh(true);
       expect(top.getBoundingClientRect).toHaveBeenCalledTimes(1); expect(bottom.getBoundingClientRect).toHaveBeenCalledTimes(1);
       expect(navigation.chatHost.parentElement).toBe(header);
@@ -2454,4 +2458,26 @@ describe('connector work budgets', () => {
     const next = { ...changed, messages: [{ ...snapshot.messages[0], directionFallback: true as const }] };
     expect(keys.keys(next)).toEqual({ snapshot: snapshotKey(next), suggestion: suggestionKey(next) });
   });
+});
+
+
+test('AI switch hides composer and chat controls, closes the popup, and restores only ready controls', () => {
+  vi.useFakeTimers(); fixture(); const connector = new BaseDomConnector(document, () => {});
+  connector.start();
+  try {
+    vi.advanceTimersByTime(800);
+    const button = (connector as unknown as { button: HTMLButtonElement }).button;
+    expect(button.hidden).toBe(true); expect(document.querySelector('#companion-chat-settings')).toBeNull();
+    connector.command({ type: 'chrome', panel: null, pending: false, aiFeatures: true });
+    expect(button.hidden).toBe(false); expect(document.querySelector('#companion-chat-settings')).not.toBeNull();
+    connector.command({ type: 'notice', text: 'Fixture AI notice' });
+    const popup = (connector as unknown as { popup: HTMLElement }).popup; expect(popup.hidden).toBe(false);
+    connector.command({ type: 'chrome', panel: null, pending: true, aiFeatures: false });
+    expect((connector as unknown as { navigation: { cancel: HTMLButtonElement } }).navigation.cancel.hidden).toBe(true);
+    expect(button.hidden).toBe(true); expect(popup.hidden).toBe(true); expect(document.querySelector('#companion-chat-settings')).toBeNull();
+    connector.command({ type: 'notice', text: 'Stale result' }); expect(popup.hidden).toBe(true);
+    connector.command({ type: 'chrome', panel: null, pending: false, aiFeatures: true });
+    expect(button.hidden).toBe(false); expect(popup.hidden).toBe(true);
+    document.querySelector('footer')!.remove(); vi.advanceTimersByTime(800); expect(button.hidden).toBe(true);
+  } finally { connector.stop(); }
 });

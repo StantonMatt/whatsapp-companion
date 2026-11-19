@@ -20,7 +20,8 @@ afterEach(() => {
 test('splash-delayed real preload and connector recover the suspended assistant after load-time snapshot retries are missed', async () => {
   document.body.innerHTML = '<div id="initial_startup"></div>';
   let deliver: (_event: unknown, command: RemoteCommand) => void = () => {};
-  const state = initialState(), commands: RemoteCommand[] = [];
+  const state = initialState(); state.global.aiFeatures = true;
+  const commands: RemoteCommand[] = [];
   const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
   const assistant = new Assistant(store, {} as Vault, { send: command => { commands.push(command); deliver({}, command); }, focus() {} }, () => {}, true);
   ipc.on.mockImplementation((channel, handler) => { if (channel === 'companion:command') deliver = handler; });
@@ -51,6 +52,6 @@ test('splash-delayed real preload and connector recover the suspended assistant 
     expect(document.querySelector('#companion-overlay')).not.toBeNull();
     expect(assistant.snapshot.ready).toBe(true);
     await assistant.request();
-    expect(commands.at(-1)).toMatchObject({ type: 'notice', text: expect.stringContaining('Enable conversation context in AI settings') });
+    expect(commands.at(-1)).toMatchObject({ type: 'notice', text: expect.stringContaining('Enable conversation context in Settings') });
   } finally { assistant.cancel(true); }
 });

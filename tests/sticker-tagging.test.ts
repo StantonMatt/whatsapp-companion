@@ -9,7 +9,7 @@ const terms = 'happy, feliz, smile, sonrisa, cartoon, dibujo, thanks, gracias, g
 const output = JSON.stringify({ searchTerms: terms, groups: ['Favorites'] });
 const sticker = (n: number): Sticker => ({ id: n.toString(16).padStart(64, '0'), searchTerms: '', groups: [], kind: 'static', size: 12, firstSeen: n, lastSeen: n });
 function setup(count = 6, options: Partial<ConstructorParameters<typeof StickerTagQueue>[0]> = {}) {
-  let state = initialState(); state.stickers = Array.from({ length: count }, (_, i) => sticker(i + 1)); state.stickerGroups = [{ id: group, name: 'Favorites' }];
+  let state = initialState(); state.global.aiFeatures = true; state.stickers = Array.from({ length: count }, (_, i) => sticker(i + 1)); state.stickerGroups = [{ id: group, name: 'Favorites' }];
   const dispatch = options.dispatch ?? vi.fn(async () => output), publish = vi.fn();
   const queue = new StickerTagQueue({ state: () => state, update: mutate => { const next = structuredClone(state); mutate(next); state = next; }, key: () => 'secret-key', images: async () => [{ mime: 'image/png', data: 'AAAA' }], dispatch, publish, ...options });
   queues.push(queue);
@@ -415,4 +415,19 @@ test('new automatic work reattributes progress while keeping older failure items
   expect(env.queue.progress).toMatchObject({ state: 'blocked', provider: 'anthropic', failed: 2 });
   expect(env.queue.items[sticker(1).id]).toMatchObject({ state: 'failed', provider: 'openai' });
   expect(env.queue.items[sticker(2).id]).toMatchObject({ state: 'failed', provider: 'anthropic' });
+});
+
+test('AI off rejects manual and automatic tags; turning off aborts the queue and discards late output', async () => {
+  let finish!: (text: string) => void;
+  const dispatch = vi.fn((request: GenerateInput) => new Promise<string>(resolve => { finish = resolve; }));
+  const f = setup(2, { dispatch });
+  f.mutate(s => { s.global.aiFeatures = false; s.global.automaticStickerTags = true; });
+  f.queue.observe(); f.queue.enqueue([f.state.stickers[0].id]); f.queue.suggest(f.state.stickers[1].id, 'nonce', '');
+  await settle(); expect(dispatch).not.toHaveBeenCalled();
+  f.mutate(s => { s.global.aiFeatures = true; }); f.queue.observe(); f.queue.enqueue([f.state.stickers[0].id]); await settle();
+  expect(dispatch).toHaveBeenCalledTimes(1); const signal = dispatch.mock.calls[0][0].signal!;
+  f.mutate(s => { s.global.aiFeatures = false; }); f.queue.observe(); expect(signal.aborted).toBe(true);
+  finish(output); await settle(); expect(f.state.stickers.every(s => s.searchTerms === '')).toBe(true);
+  f.mutate(s => { s.global.aiFeatures = true; }); f.queue.observe(); await settle(); expect(dispatch).toHaveBeenCalledTimes(1);
+  expect(f.state.global.automaticStickerTags).toBe(true);
 });

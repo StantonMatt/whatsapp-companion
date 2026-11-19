@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { DesktopAPI, Status, StatusUpdate, Action, Panel } from '../shared/model';
+import type { DesktopAPI, Status, StatusUpdate, Action, ActionResult, Panel } from '../shared/model';
 import { StatusCache } from '../core/status';
 import { Settings } from './settings';
 import { Stickers } from './stickers';
@@ -8,7 +8,7 @@ import { useShield } from './shield';
 import './style.css';
 
 declare global { interface Window { companion: DesktopAPI } }
-export type Act = (action: Action) => Promise<boolean>;
+export type Act = (action: Action, inline?: (result: ActionResult) => void) => Promise<boolean>;
 function App() {
   const [status, setStatus] = useState<Status>();
   const panel = status?.panel ?? null;
@@ -36,9 +36,9 @@ function App() {
       for (const name of ['pointerdown', 'keydown', 'beforeinput', 'wheel']) document.removeEventListener(name, activity, true);
     };
   }, []);
-  const act: Act = useCallback(async action => {
-    try { const result = await window.companion.action(action); setError(result.error ?? ''); return result.ok; }
-    catch { setError('The desktop operation failed. Try again.'); return false; }
+  const act: Act = useCallback(async (action, inline) => {
+    try { const result = await window.companion.action(action); if (inline) inline(result); else setError(result.error ?? ''); return result.ok; }
+    catch { const result = { ok: false, error: action.type === 'key' ? 'Couldn’t save the key. Try again.' : 'The desktop operation failed. Try again.' }; if (inline) inline(result); else setError(result.error); return false; }
   }, []);
   const stickerNavigation = useRef<((panel: Panel) => void) | null>(null);
   const navigate = useCallback((panel: Panel) => {
@@ -60,8 +60,8 @@ function App() {
     <div className="app-frame" data-enlarged={shield.frame ? '' : undefined} style={shield.frame}>
       <div data-testid="assistant-status" className={panel && panel !== 'stickers' ? 'connection-status' : 'sr-only'} role="status">{status?.message === 'Thinking…' ? '' : status?.message ?? 'Starting…'}</div>
       {error && panel && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
-      {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'AI settings'}>
-        {status.pending && panel !== 'stickers' && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
+      {panel && status && <aside className="panel" aria-label={panel === 'stickers' ? 'Sticker library' : panel === 'chat' ? 'Chat AI settings' : 'Settings'}>
+        {status.state.global.aiFeatures && status.pending && panel !== 'stickers' && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
         {panel === 'stickers' ? <Stickers status={status} act={act} navigation={stickerNavigation} openProviders={() => { setSettingsTab('Providers'); void act({ type: 'panel', panel: 'settings' }); }}/> : <Settings key={`${panel}-${panel === 'chat' ? status.chat.settingsId : 'global'}`} status={status} act={act} close={close} initialTab={panel === 'settings' ? settingsTab : null}/>}
       </aside>}
     </div>

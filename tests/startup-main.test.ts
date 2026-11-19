@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   app: undefined as any, ipc: undefined as any, windows: [] as any[], views: [] as any[],
   trays: [] as any[], trayFailure: false, activateOnLoad: false, pendingRemoteLoad: undefined as Promise<void> | undefined,
   menus: [] as any[], images: [] as any[], power: undefined as any,
+  vaultKeys: new Map<string, string>(), vaultSet: vi.fn(), secure: true, external: vi.fn(), generator: vi.fn(),
   records: [] as { event: string; details: any }[], handlers: new Map<string, (...args: any[]) => any>(), errors: vi.fn(), messageBox: vi.fn(), renderer: { on: vi.fn(), invoke: vi.fn(), send: vi.fn() }
 }));
 vi.mock('electron', async () => {
@@ -83,18 +84,26 @@ vi.mock('electron', async () => {
     createFromPath: (path: string) => ({ isEmpty: () => false, toPNG: () => Buffer.from(path) })
   }, ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
     session: { defaultSession: makeSession(), fromPartition: vi.fn(() => makeSession()) }, protocol: { registerSchemesAsPrivileged() {} },
-    dialog: { showErrorBox: mocks.errors, showMessageBox: mocks.messageBox }, shell: {},
+    dialog: { showErrorBox: mocks.errors, showMessageBox: mocks.messageBox }, shell: { openExternal: mocks.external },
     Menu: { buildFromTemplate: (value: unknown) => { mocks.menus.push(value); return value; }, setApplicationMenu() {} } };
 });
 vi.mock('../src/main/vault', () => ({
-  configuredBackend: () => undefined, promptKey: vi.fn(), Vault: class { has() { return false; } secure() { return true; } }
+  configuredBackend: () => undefined, Vault: class {
+    has(provider: string) { return mocks.vaultKeys.has(provider); }
+    secure() { return mocks.secure; }
+    get(provider: string) { return mocks.vaultKeys.get(provider); }
+    set(provider: string, key: string, persist: boolean) { mocks.vaultSet(provider, key, persist); mocks.vaultKeys.set(provider, key); }
+    remove(provider: string) { mocks.vaultKeys.delete(provider); }
+  }
 }));
+vi.mock('../src/main/providers', async original => ({ ...await original<typeof import('../src/main/providers')>(), generate: mocks.generator }));
 vi.mock('../src/main/context-menu', () => ({ installEditContextMenus() {} }));
 vi.mock('../src/main/startup-diagnostics', () => ({ StartupDiagnostics: class {
   record(event: string, details: any = {}) { mocks.records.push({ event, details }); } flush() { return Promise.resolve(); }
 } }));
 let directory: string, args: string[];
 beforeEach(async () => {
+  mocks.vaultKeys.clear(); mocks.vaultSet.mockReset(); mocks.external.mockReset().mockResolvedValue(undefined); mocks.generator.mockReset().mockResolvedValue('Connected'); mocks.secure = true;
   vi.resetModules(); mocks.app?.removeAllListeners(); mocks.ipc?.removeAllListeners(); mocks.power?.removeAllListeners(); mocks.app?.quit.mockReset(); mocks.app?.relaunch.mockReset(); if (mocks.app) mocks.app.isPackaged = false;
   mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = mocks.menus.length = mocks.images.length = 0; mocks.trayFailure = false; mocks.activateOnLoad = false; mocks.pendingRemoteLoad = undefined; mocks.handlers.clear(); mocks.errors.mockClear(); mocks.messageBox.mockReset().mockResolvedValue({ response: 0 });
   directory = mkdtempSync(join(tmpdir(), 'startup-main-')); args = process.argv;
@@ -118,10 +127,13 @@ function acknowledgeSnapshot() {
     chatId: '123@c.us', name: 'Alex', ready: true, conversationOpen: true, revision: 'fixture',
     messages: [{ id: 'false_123@c.us_a', text: 'Hello', outgoing: false }] } });
 }
-function expectManualNotice() {
+async function expectManualNotice() {
+  const contents = mocks.views[0].webContents;
+  await mocks.handlers.get('companion:action')!({ sender: contents, senderFrame: contents.mainFrame }, { type: 'preferences', scope: 'global', patch: { aiFeatures: true } });
+  acknowledgeSnapshot();
   mocks.ipc.emit('companion:event', bootEvent(), { type: 'request' });
   expect(mocks.views[1].webContents.send.mock.calls).toContainEqual(['companion:command', {
-    type: 'notice', text: expect.stringContaining('Enable conversation context in AI settings')
+    type: 'notice', text: expect.stringContaining('Enable conversation context in Settings')
   }]);
 }
 test('hidden remote failure survives error-page commit/dom-ready and retries; manual navigation cancels retry', () => {
@@ -183,7 +195,7 @@ test('remote session has the page UA before view construction', () => {
   expect(remote.webContents.setUserAgent.mock.calls).toEqual([[remote.initialUserAgent]]);
   expect(remote.webContents.session.setUserAgent.mock.calls).toEqual([[remote.initialUserAgent]]);
 });
-test('load before splash-delayed activation does not spend snapshot retries; ready recovers assistance and initializes chrome', () => {
+test('load before splash-delayed activation does not spend snapshot retries; ready recovers assistance and initializes chrome', async () => {
   const contents = mocks.views[1].webContents;
   vi.useFakeTimers();
   try {
@@ -196,11 +208,12 @@ test('load before splash-delayed activation does not spend snapshot retries; rea
     contents.send.mockClear(); connectorReady();
     expect(contents.send.mock.calls).toContainEqual(['companion:command', expect.objectContaining({ type: 'chrome' })]);
     expect(snapshotRequests()).toHaveLength(1);
-    acknowledgeSnapshot(); expectManualNotice();
-    connectorReady(); expect(snapshotRequests()).toHaveLength(1);
+    acknowledgeSnapshot(); await expectManualNotice();
+    const afterOptIn = snapshotRequests().length;
+    connectorReady(); expect(snapshotRequests()).toHaveLength(afterOptIn);
   } finally { vi.useRealTimers(); }
 });
-test('readiness authenticates the current remote frame and session before resuming assistance', () => {
+test('readiness authenticates the current remote frame and session before resuming assistance', async () => {
   const valid = bootSession(), contents = mocks.views[1].webContents;
   contents.send.mockClear();
   for (const raw of [null, { ...valid, generation: valid.generation - 1 }, { ...valid, nonce: '00000000-0000-4000-8000-000000000002' }, { ...valid, text: 'PRIVATE' }])
@@ -210,9 +223,9 @@ test('readiness authenticates the current remote frame and session before resumi
   const url = contents.frame.url;
   contents.frame.url = 'https://untrusted.invalid/'; connectorReady(valid); contents.frame.url = url;
   expect(snapshotRequests()).toHaveLength(0);
-  connectorReady(); expect(snapshotRequests()).toHaveLength(1); acknowledgeSnapshot(); expectManualNotice();
+  connectorReady(); expect(snapshotRequests()).toHaveLength(1); acknowledgeSnapshot(); await expectManualNotice();
 });
-test.each(['reload', 'crash then reload'])('%s issues a fresh boot session and re-establishes assistance only after that connector activates', mode => {
+test.each(['reload', 'crash then reload'])('%s issues a fresh boot session and re-establishes assistance only after that connector activates', async mode => {
   const contents = mocks.views[1].webContents, prior = bootSession();
   connectorReady(); acknowledgeSnapshot();
   if (mode === 'crash then reload') {
@@ -224,16 +237,16 @@ test.each(['reload', 'crash then reload'])('%s issues a fresh boot session and r
   expect(current.generation).toBeGreaterThan(prior.generation); expect(current.nonce).not.toBe(prior.nonce);
   contents.send.mockClear(); contents.emit('did-finish-load'); connectorReady(prior);
   expect(snapshotRequests()).toHaveLength(0);
-  connectorReady(current); acknowledgeSnapshot(); expectManualNotice();
+  connectorReady(current); acknowledgeSnapshot(); await expectManualNotice();
 });
-test('in-page navigation retains the active document session and connector instead of stranding assistance', () => {
+test('in-page navigation retains the active document session and connector instead of stranding assistance', async () => {
   const contents = mocks.views[1].webContents, current = bootSession();
   connectorReady(); acknowledgeSnapshot(); contents.send.mockClear();
   contents.frame.url = `${contents.frame.url.split('#')[0]}#another-chat`;
   contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true });
   contents.emit('did-navigate-in-page', {}, contents.frame.url, true);
   expect(bootSession()).toEqual(current); expect(snapshotRequests()).toHaveLength(0);
-  expectManualNotice();
+  await expectManualNotice();
 });
 test('real main wiring authenticates boot sender/frame/origin and changes nonce on document navigation only', () => {
   const valid = bootSession(); expect(valid.generation).toBe(1);
@@ -341,7 +354,7 @@ test('close blocks second instance and renderer IPC immediately; disposed frame 
 });
 
 
-test('main watchdog actually reloads remote webContents and preserves its budget across navigation generations', () => {
+test('main watchdog actually reloads remote webContents and preserves its budget across navigation generations', async () => {
   const contents = mocks.views[1].webContents, clock = vi.spyOn(performance, 'now');
   let session = bootSession();
   connectorReady(session); acknowledgeSnapshot();
@@ -354,7 +367,7 @@ test('main watchdog actually reloads remote webContents and preserves its budget
   const prior = session; session = bootSession(); expect(session.generation).toBe(prior.generation + 1);
   contents.send.mockClear(); contents.emit('did-finish-load'); connectorReady(prior);
   expect(snapshotRequests()).toHaveLength(0);
-  connectorReady(session); acknowledgeSnapshot(); expectManualNotice();
+  connectorReady(session); acknowledgeSnapshot(); await expectManualNotice();
   // Stale heartbeats cannot contribute to the second observation window.
   clock.mockReturnValue(62_000);
   mocks.ipc.emit('companion:boot-heartbeat', bootEvent(), { ...prior, phase: 'splash', progress: 1, visible: true, online: true });
@@ -363,7 +376,7 @@ test('main watchdog actually reloads remote webContents and preserves its budget
   observe(180_000); expect(contents.reload).toHaveBeenCalledTimes(2); session = bootSession();
   contents.send.mockClear(); contents.emit('did-finish-load');
   expect(snapshotRequests()).toHaveLength(0);
-  connectorReady(session); acknowledgeSnapshot(); expectManualNotice();
+  connectorReady(session); acknowledgeSnapshot(); await expectManualNotice();
   for (let now = 182_000; now <= 400_000; now += 2000) observe(now);
   expect(contents.reload).toHaveBeenCalledTimes(2);
   expect(mocks.records.filter(record => record.event === 'reload').map(record => record.details.reloads)).toEqual([1, 2]);
@@ -493,6 +506,7 @@ test.each(['refinement', 'automatic suggestion', 'continuation'] as const)('%s s
     expect(events.filter(event => event.channel === 'companion:connector-ready')).toHaveLength(1);
     const action = mocks.handlers.get('companion:action')!;
     const local = { sender: mocks.views[0].webContents, senderFrame: mocks.views[0].webContents.mainFrame };
+    expect(await action(local, { type: 'preferences', scope: 'global', patch: { aiFeatures: true } })).toEqual({ ok: true });
     expect(await action(local, { type: 'preferences', scope: 'global', patch: { suggestions: operation !== 'refinement', shareContext: true } })).toEqual({ ok: true });
     if (operation === 'refinement') {
       await vi.advanceTimersByTimeAsync(100);
@@ -622,19 +636,19 @@ test('ready while hidden waits for show; quitting an open prompt discards its an
   mocks.trays[0].emit('click'); expect(mocks.messageBox).toHaveBeenCalledOnce();
   trayMenu()[5].click(); release({ response: 1 });
   await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
-  expect(existsSync(join(directory, 'companion.json'))).toBe(false);
+  expect(desktopState()).toEqual({});
 });
-async function restart(options: { hidden?: boolean; noTray?: boolean; packaged?: boolean; startupStall?: boolean; waitForRemote?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
+async function restart(options: { live?: boolean; hidden?: boolean; noTray?: boolean; packaged?: boolean; startupStall?: boolean; waitForRemote?: boolean; failSave?: boolean; desktop?: { notifications?: 'allowed' | 'denied'; startAtLogin?: boolean } } = {}) {
   mocks.app.emit('before-quit', { preventDefault() {} }); await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalled());
   mocks.app.removeAllListeners(); mocks.ipc.removeAllListeners(); mocks.power.removeAllListeners(); mocks.app.quit.mockClear(); mocks.messageBox.mockClear();
   mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = 0; mocks.handlers.clear();
   mocks.trayFailure = options.noTray ?? false; mocks.app.isPackaged = options.packaged ?? false;
   if (options.desktop) writeFileSync(join(directory, 'companion.json'), JSON.stringify({ ...initialState(), desktop: options.desktop }));
-  process.argv = [...args, '--fixture', `--data-dir=${directory}`, ...(options.hidden ? ['--hidden'] : []), ...(options.startupStall ? ['--fixture-startup-stall'] : [])];
+  process.argv = [...args, ...(options.live ? [] : ['--fixture']), `--data-dir=${directory}`, ...(options.hidden ? ['--hidden'] : []), ...(options.startupStall ? ['--fixture-startup-stall'] : [])];
   vi.resetModules();
   if (options.failSave) { const { Store } = await import('../src/main/store'); vi.spyOn(Store.prototype, 'update').mockImplementation(() => { throw new Error('disk full'); }); }
   await import('../src/main/index');
-  if (options.waitForRemote !== false) await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged ? 'https://web.whatsapp.com/' : options.startupStall ? 'companion-fixture-stall:' : 'fixture.html'));
+  if (options.waitForRemote !== false) await vi.waitFor(() => expect(mocks.views[1]?.webContents.url).toContain(options.packaged || options.live ? 'https://web.whatsapp.com/' : options.startupStall ? 'companion-fixture-stall:' : 'fixture.html'));
 }
 test.each([true, false])('base page load rejection continues startup (numeric errno %s)', async numeric => {
   const Window = mocks.windows[0].constructor, error = new Error('PRIVATE file:///PRIVATE');
@@ -762,7 +776,7 @@ test('hidden launch loads the remote, keeps watchdog gated, and relinking does n
 });
 test('tray construction failure shows a hidden launch; X quits and notification prompt omits tray detail', async () => {
   await restart({ hidden: true, noTray: true });
-  expect(mocks.windows[0].visible).toBe(true); expect(existsSync(join(directory, 'companion.json'))).toBe(false);
+  expect(mocks.windows[0].visible).toBe(true); expect(desktopState()).toEqual({});
   connectorReady(); shellHeartbeat(); await vi.waitFor(() => expect(mocks.messageBox).toHaveBeenCalledOnce());
   expect(mocks.messageBox.mock.lastCall![1]).not.toHaveProperty('detail');
   mocks.windows[0].close(); await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledOnce());
@@ -795,7 +809,7 @@ test('packaged no-tray startup does not enable autostart and cannot stay hidden'
   vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true, hidden: true, noTray: true });
   expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(false);
-  expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(mocks.windows[0].visible).toBe(true);
+  expect(desktopState()).toEqual({}); expect(mocks.windows[0].visible).toBe(true);
 });
 test('an unanswered hidden request stays deferred through relinking until the signed-in shell returns', async () => {
   const win = mocks.windows[0], contents = mocks.views[1].webContents, callback = vi.fn();
@@ -840,7 +854,7 @@ test('notification save failure reports once and keeps the answer and tray check
   shellHeartbeat(); shellHeartbeat(); expect(mocks.messageBox).toHaveBeenCalledOnce();
   const contents = mocks.views[1].webContents, callback = vi.fn();
   contents.session.setPermissionRequestHandler.mock.lastCall[0](contents, 'notifications', callback, { isMainFrame: true, requestingUrl: contents.url });
-  expect(callback).toHaveBeenCalledExactlyOnceWith(true); expect(existsSync(join(directory, 'companion.json'))).toBe(false);
+  expect(callback).toHaveBeenCalledExactlyOnceWith(true); expect(desktopState()).toEqual({});
 });
 test('activate ignores initial hidden startup and shows the window on subsequent activation', async () => {
   mocks.activateOnLoad = true; await restart({ hidden: true }); const win = mocks.windows[0];
@@ -873,13 +887,122 @@ test('failed first-run autostart save rolls back the OS entry and shows an unche
   vi.stubEnv('XDG_CONFIG_HOME', join(directory, 'xdg')); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true, failSave: true });
   expect(existsSync(join(directory, 'xdg/autostart/whatsapp-companion.desktop'))).toBe(false);
-  expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(trayMenu()[3].checked).toBe(false);
+  expect(desktopState()).toEqual({}); expect(trayMenu()[3].checked).toBe(false);
   expect(mocks.errors).toHaveBeenCalledOnce();
 });
 test('failed first-run OS apply never saves autostart or checks its checkbox', async () => {
   const config = join(directory, 'xdg'); writeFileSync(config, 'not a directory');
   vi.stubEnv('XDG_CONFIG_HOME', config); vi.stubEnv('APPIMAGE', '/opt/Companion.AppImage'); vi.stubEnv('APPDIR', dirname(process.execPath));
   await restart({ packaged: true });
-  expect(existsSync(join(directory, 'companion.json'))).toBe(false); expect(trayMenu()[3].checked).toBe(false);
+  expect(desktopState()).toEqual({}); expect(trayMenu()[3].checked).toBe(false);
   expect(mocks.errors).toHaveBeenCalledOnce();
+});
+
+
+const localEvent = () => { const sender = mocks.views[0].webContents; return { sender, senderFrame: sender.mainFrame }; };
+const localAction = (action: unknown) => mocks.handlers.get('companion:action')!(localEvent(), action);
+const localStatus = () => mocks.handlers.get('companion:status')!(localEvent());
+test('fresh main persists AI off and refuses AI operations and model listing before any provider access', async () => {
+  expect(JSON.parse(readFileSync(join(directory, 'companion.json'), 'utf8')).global.aiFeatures).toBe(false);
+  for (const action of [
+    { type: 'key', provider: 'openai', key: 'sk-synthetic_fixture_key_never_real' }, { type: 'testProvider', provider: 'openai' },
+    { type: 'getKey', provider: 'openai' }, { type: 'deleteKey', provider: 'openai' },
+    { type: 'provider', provider: 'openai', model: 'gpt-6-luna' }, { type: 'reasoning', provider: 'openai', model: 'gpt-6-luna', effort: 'none' },
+    { type: 'preferences', scope: 'global', patch: { suggestions: true } }, { type: 'learn', scope: 'general', examples: 'Synthetic example' },
+    { type: 'profile', scope: 'general', description: 'Synthetic writing habits' }, { type: 'resetProfile', scope: 'general' },
+    { type: 'resetStylePreferences', scope: '123@c.us' }, { type: 'resetPreferences', scope: 'global' },
+    { type: 'autoRules', chatId: '123@c.us', patch: { dailyLimit: 1 } }, { type: 'autoPermission', chatId: '123@c.us', permission: 'resume' },
+    { type: 'tagStickers', ids: ['a'.repeat(64)] }, { type: 'retryStickerTags', excludedIds: [] },
+    { type: 'suggestStickerTags', id: 'a'.repeat(64), nonce: '00000000-0000-4000-8000-000000000001', searchTerms: '' }
+  ]) expect(await localAction(action)).toEqual({ ok: false, error: 'AI features are off' });
+  expect(await mocks.handlers.get('companion:models')!(localEvent(), 'openai')).toEqual({ models: [], error: 'AI features are off' });
+  expect(mocks.vaultSet).not.toHaveBeenCalled(); expect(mocks.external).not.toHaveBeenCalled(); expect(mocks.generator).not.toHaveBeenCalled();
+  expect(mocks.menus.at(-1)[0].submenu.find((item: any) => item.label === 'Chat AI settings').visible).toBe(false);
+});
+test('key IPC validates in main, saves via vault, exposes booleans only, and uses fixed provider links', async () => {
+  await localAction({ type: 'preferences', scope: 'global', patch: { aiFeatures: true } });
+  const key = 'sk-synthetic_fixture_key_never_real';
+  for (const [provider, value, error] of [
+    ['openai', 'invalid', 'This does not look like a valid API key.'],
+    ['openai', 'sk-ant-synthetic_fixture_key_never_real', 'This looks like an Anthropic key.'],
+    ['anthropic', key, 'This looks like an OpenAI key.']
+  ]) expect(await localAction({ type: 'key', provider, key: value })).toEqual({ ok: false, error });
+  expect(mocks.vaultSet).not.toHaveBeenCalled();
+  const malformed = await localAction({ type: 'key', provider: 'openai', key, persist: true });
+  expect(malformed).toEqual({ ok: false, error: 'Invalid setting. Check the value and try again.' });
+  mocks.vaultSet.mockImplementationOnce(() => { throw new Error(key); });
+  expect(await localAction({ type: 'key', provider: 'openai', key })).toEqual({ ok: false, error: 'Couldn’t save the key. Try again.' });
+  expect(await localAction({ type: 'key', provider: 'openai', key })).toEqual({ ok: true });
+  expect(mocks.vaultSet).toHaveBeenLastCalledWith('openai', key, true);
+  const status = localStatus(); expect(status.keys).toEqual({ openai: true, anthropic: false });
+  expect(JSON.stringify(status)).not.toContain(key); expect(JSON.stringify(mocks.records)).not.toContain(key);
+  expect(readFileSync(join(directory, 'companion.json'), 'utf8')).not.toContain(key);
+  expect(await localAction({ type: 'testProvider', provider: 'openai' })).toEqual({ ok: true, message: '✓ Connected' });
+  expect(mocks.generator).not.toHaveBeenCalled();
+  for (const provider of ['openai', 'anthropic']) await localAction({ type: 'getKey', provider });
+  expect(mocks.external.mock.calls).toEqual([['https://platform.openai.com/api-keys'], ['https://console.anthropic.com/settings/keys']]);
+  mocks.secure = false; await localAction({ type: 'checkSecureStorage' }); expect(localStatus().secureStorage).toBe(false);
+  expect((await localAction({ type: 'key', provider: 'openai', key })).error).toContain('secure storage is unavailable');
+});
+test('saving/removing switches to a keyed provider and keeps both saved models and reasoning', async () => {
+  await localAction({ type: 'preferences', scope: 'global', patch: { aiFeatures: true } });
+  await localAction({ type: 'provider', provider: 'anthropic', model: 'claude-opus-5-5' });
+  await localAction({ type: 'provider', provider: 'openai', model: 'gpt-6-astra' });
+  await localAction({ type: 'key', provider: 'anthropic', key: 'sk-ant-synthetic_fixture_key_never_real' });
+  expect(localStatus().state.provider).toBe('anthropic');
+  await localAction({ type: 'key', provider: 'openai', key: 'sk-synthetic_fixture_key_never_real' });
+  await localAction({ type: 'deleteKey', provider: 'anthropic' }); expect(localStatus().state.provider).toBe('openai');
+  await localAction({ type: 'deleteKey', provider: 'openai' }); expect(localStatus().state.global.aiFeatures).toBe(true);
+  expect(localStatus().state.models).toEqual({ openai: 'gpt-6-astra', anthropic: 'claude-opus-5-5' });
+  expect(mocks.menus.at(-1)[0].submenu.find((item: any) => item.label === 'Chat AI settings').visible).toBe(true);
+});
+test.each([true, false])('key changes omit the provider warning and selected-provider tests clear it (fixture: %s)', async fixture => {
+  if (!fixture) await restart({ live: true });
+  await localAction({ type: 'preferences', scope: 'global', patch: { aiFeatures: true } });
+  const warning = 'Provider configuration changed. Use Test connection to check account access.';
+  await localAction({ type: 'key', provider: 'openai', key: 'sk-synthetic_fixture_key_never_real' });
+  expect(localStatus().message).not.toBe(warning);
+  await localAction({ type: 'deleteKey', provider: 'openai' });
+  expect(localStatus().message).not.toBe(warning);
+  await localAction({ type: 'key', provider: 'openai', key: 'sk-synthetic_fixture_key_never_real' });
+  await localAction({ type: 'key', provider: 'anthropic', key: 'sk-ant-synthetic_fixture_key_never_real' });
+  await localAction({ type: 'provider', provider: 'openai', model: 'gpt-6-astra' });
+  expect(localStatus().message).toBe(warning);
+  await localAction({ type: 'testProvider', provider: 'anthropic' });
+  expect(localStatus().message).toBe(warning);
+  expect(await localAction({ type: 'testProvider', provider: 'openai' })).toEqual({ ok: true, message: '✓ Connected' });
+  expect(localStatus().message).toBe('');
+  expect(mocks.views[0].webContents.send.mock.calls.filter(([channel]: [string]) => channel === 'companion:status').at(-1)?.[1].message).toBe('');
+  await localAction({ type: 'reasoning', provider: 'openai', model: 'gpt-6-astra', effort: 'low' });
+  expect(localStatus().message).toBe(warning);
+  await localAction({ type: 'testProvider', provider: 'openai' });
+  expect(localStatus().message).toBe('');
+});
+test('live provider checks use the pressed provider saved model and cancel when AI turns off', async () => {
+  await restart({ live: true });
+  await localAction({ type: 'preferences', scope: 'global', patch: { aiFeatures: true } });
+  await localAction({ type: 'key', provider: 'openai', key: 'sk-synthetic_fixture_key_never_real' });
+  await localAction({ type: 'key', provider: 'anthropic', key: 'sk-ant-synthetic_fixture_key_never_real' });
+  await localAction({ type: 'provider', provider: 'anthropic', model: 'claude-opus-5-5' });
+  await localAction({ type: 'provider', provider: 'openai', model: 'gpt-6-astra' });
+  expect(await localAction({ type: 'testProvider', provider: 'anthropic' })).toEqual({ ok: true, message: '✓ Connected' });
+  expect(mocks.generator).toHaveBeenLastCalledWith(expect.objectContaining({ provider: 'anthropic', model: 'claude-opus-5-5' }));
+  let finish!: (text: string) => void; mocks.generator.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = localAction({ type: 'testProvider', provider: 'openai' });
+  const signal = mocks.generator.mock.lastCall![0].signal;
+  await localAction({ type: 'preferences', scope: 'global', patch: { aiFeatures: false } }); expect(signal.aborted).toBe(true);
+  finish('Late Connected'); expect((await pending).ok).toBe(false);
+  const calls = mocks.generator.mock.calls.length;
+  await localAction({ type: 'testProvider', provider: 'openai' }); expect(mocks.generator.mock.calls).toHaveLength(calls);
+});
+
+test.each([false, true])('startup initializes an absent switch from saved keys once (fixture: %s)', async fixture => {
+  const state = JSON.parse(readFileSync(join(directory, 'companion.json'), 'utf8')); delete state.global.aiFeatures;
+  writeFileSync(join(directory, 'companion.json'), JSON.stringify(state));
+  mocks.vaultKeys.set('openai', 'sk-synthetic_fixture_key_never_real');
+  await restart({ live: !fixture });
+  expect(localStatus().state.global.aiFeatures).toBe(!fixture);
+  expect(JSON.parse(readFileSync(join(directory, 'companion.json'), 'utf8')).global.aiFeatures).toBe(!fixture);
+  mocks.vaultKeys.clear(); await restart({ live: !fixture });
+  expect(localStatus().state.global.aiFeatures).toBe(!fixture);
 });

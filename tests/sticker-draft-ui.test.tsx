@@ -50,7 +50,7 @@ const hide = async (view: Visibility) => {
 const prepare = async (view: Visibility) => {
   await click('Edit stickers'); await click('dog'); fill('textarea', 'unsaved dog'); await hide(view);
 };
-const paths = ['Escape', 'Done', 'Close panel', 'Close editor', 'switch editor', 'rail close', 'rail settings', 'rail chat', 'App close', 'AI settings'] as const;
+const paths = ['Escape', 'Done', 'Close panel', 'Close editor', 'switch editor', 'rail close', 'rail settings', 'rail chat', 'App close', 'Settings'] as const;
 type Path = typeof paths[number];
 const exit = async (path: Path, view: Visibility) => {
   if (path === 'Escape') { act(() => button('cat').focus()); escape(); }
@@ -60,7 +60,7 @@ const exit = async (path: Path, view: Visibility) => {
   } else if (path === 'switch editor') await click('cat');
   else if (path.startsWith('rail')) await act(async () => navigate(path === 'rail close' ? null : path === 'rail settings' ? 'settings' : 'chat'));
   else if (path === 'App close') act(() => appEscape(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })));
-  else if (path === 'AI settings') await act(async () => document.querySelector<HTMLAnchorElement>('.warn a')!.click());
+  else if (path === 'Settings') await act(async () => document.querySelector<HTMLAnchorElement>('.warn a')!.click());
   else await click(path);
 };
 
@@ -68,7 +68,7 @@ beforeEach(async () => {
   vi.resetModules(); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); actions.mockClear(); unsubscribe.mockClear(); stopNavigation.mockClear();
   document.body.innerHTML = '<div id="root"></div>';
   HTMLElement.prototype.scrollTo = vi.fn(); HTMLElement.prototype.scrollIntoView = vi.fn();
-  status = { sequence: 1, panel: 'stickers', runtimePaused: false, state: initialState(), chat: { chatId: null, name: '', kind: 'direct', ready: false, canSendSticker: false }, keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: '', pending: null };
+  status = { sequence: 1, panel: 'stickers', runtimePaused: false, state: { ...initialState(), global: { ...initialState().global, aiFeatures: true } }, chat: { chatId: null, name: '', kind: 'direct', ready: false, canSendSticker: false }, keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: '', pending: null };
   status.state.global.directStickerDisabledReason = 'send-error';
   status.state.stickerGroups = [{ id: animals, name: 'Animals' }, { id: birds, name: 'Birds' }];
   status.state.stickers = ['dog', 'cat', 'bird'].map((name, index) => ({ id: (index + 1).toString().padStart(64, '0'), searchTerms: name, kind: 'static', size: 12, firstSeen: 1, lastSeen: 3 - index, groups: index === 0 ? [animals] : [birds] }));
@@ -90,28 +90,28 @@ afterEach(() => {
 test.each(['no-key', 'auth', 'no-vision'] as const)('tagging %s links open Providers from strip and editor, then regular navigation opens the settings list', async error => {
   status = { ...status, fixture: false, stickerTagging: { state: 'blocked', total: 2, completed: 0, tagged: 0, failed: 0, provider: 'openai', error } };
   await act(async () => publish());
-  await click('AI settings', document.querySelector('.tag-strip')!);
+  await click('Settings', document.querySelector('.tag-strip')!);
   expect(status.panel).toBe('settings'); expect(document.querySelector('h1')?.textContent).toBe('Providers');
-  expect(button('Session-only key')).toBeDefined();
-  await click('Back to settings'); expect(document.querySelector('h1')?.textContent).toBe('AI settings');
+  expect(document.querySelector('input[type="password"]')).not.toBeNull();
+  await click('Back to settings'); expect(document.querySelector('h1')?.textContent).toBe('Settings');
   await act(async () => navigate('stickers'));
   await click('Edit stickers'); await click('dog');
   status = { ...status, stickerTags: { [status.state.stickers[0].id]: { state: 'failed', error } } };
   await act(async () => publish());
-  await click('AI settings', document.querySelector('.sticker-detail')!);
+  await click('Settings', document.querySelector('.sticker-detail')!);
   expect(document.querySelector('h1')?.textContent).toBe('Providers');
   await click('Close panel'); await act(async () => navigate('settings'));
-  expect(document.querySelector('h1')?.textContent).toBe('AI settings');
+  expect(document.querySelector('h1')?.textContent).toBe('Settings');
 });
 
 test('Providers navigation keeps the unsaved-draft guard and opens its destination only after Discard', async () => {
   await prepare('visible');
   status = { ...status, fixture: false, stickerTagging: { state: 'blocked', total: 2, completed: 0, tagged: 0, failed: 0, provider: 'openai', error: 'no-key' } };
   await act(async () => publish());
-  await click('AI settings', document.querySelector('.tag-strip')!);
+  await click('Settings', document.querySelector('.tag-strip')!);
   expect(prompt()).not.toBeNull(); expect(panelActions()).toHaveLength(0);
   await click('Keep editing'); expect(textarea().value).toBe('unsaved dog');
-  await click('AI settings', document.querySelector('.tag-strip')!); await click('Discard');
+  await click('Settings', document.querySelector('.tag-strip')!); await click('Discard');
   expect(status.panel).toBe('settings'); expect(document.querySelector('h1')?.textContent).toBe('Providers');
 });
 
@@ -125,8 +125,8 @@ test.each(visibility.flatMap(view => paths.map(path => ({ view, path }))))('$pat
   expect(button('dog')).toBeDefined(); expect(panelActions()).toHaveLength(0);
   await hide(view); await exit(path, view); await click('Discard');
   expect(prompt()).toBeNull();
-  const destination = path === 'rail settings' || path === 'AI settings' ? 'settings' : path === 'rail chat' ? 'chat' : null;
-  if (['Close panel', 'rail close', 'rail settings', 'rail chat', 'App close', 'AI settings'].includes(path)) {
+  const destination = path === 'rail settings' || path === 'Settings' ? 'settings' : path === 'rail chat' ? 'chat' : null;
+  if (['Close panel', 'rail close', 'rail settings', 'rail chat', 'App close', 'Settings'].includes(path)) {
     expect(panelActions()).toEqual([[{ type: 'panel', panel: destination }]]); expect(status.panel).toBe(destination);
   } else if (path === 'switch editor') expect(textarea().value).toBe('cat');
   else expect(textarea()).toBeNull();

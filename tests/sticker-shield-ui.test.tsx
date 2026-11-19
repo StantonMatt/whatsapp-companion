@@ -13,7 +13,7 @@ const shield: StickerShield = {
   panel: { x: 73, y: 0, width: 430, height: 832 }
 };
 const status = (stickerShield: StickerShield | null = shield): Status => ({
-  sequence: 1, state: initialState(), runtimePaused: false,
+  sequence: 1, state: { ...initialState(), global: { ...initialState().global, aiFeatures: true } }, runtimePaused: false,
   chat: { chatId: '123@c.us', settingsId: '123@c.us', name: 'Alex', kind: 'direct', ready: true, canSendSticker: true },
   keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true,
   message: '', pending: null, panel: 'stickers', stickerShield

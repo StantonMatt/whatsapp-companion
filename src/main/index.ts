@@ -8,12 +8,12 @@ import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { actionSchema, snapshotSchema, discoveredStickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
+import { apiKeyError, actionSchema, snapshotSchema, discoveredStickerSchema, stickerImageSchema, providerSchema, panelSchema, type Panel, type Status, type ViewBounds, type DirectStickerDisabledReason } from '../shared/model';
 import { accountSafetyEventSchema, displayAckSchema, dismissEventSchema, type AccountSafetyReason } from '../shared/connector';
 import { Store } from './store';
 import { ChromeSync } from './chrome-sync';
 import { Conversations } from './conversations';
-import { Vault, promptKey, configuredBackend } from './vault';
+import { Vault, configuredBackend } from './vault';
 import { Assistant } from './assistant';
 import { setPreferences, resetStylePreferences } from '../core/settings';
 import { learnStyle, styleSamples, minimumStyleSamples } from '../core/style';
@@ -55,7 +55,7 @@ if (dataArg && !app.isPackaged) app.setPath('userData', resolve(dataArg.slice(11
 else if (fixture) app.setPath('userData', join(app.getPath('appData'), 'whatsapp-companion-fixture'));
 app.setName('WhatsApp Companion');
 // Remember the OS backend used to encrypt this app's own keys. Never fall back to plaintext.
-if (process.platform === 'linux' && !app.commandLine.hasSwitch('password-store')) {
+if (!fixture && process.platform === 'linux' && !app.commandLine.hasSwitch('password-store')) {
   try { const backend = configuredBackend(app.getPath('userData')); if (backend) app.commandLine.appendSwitch('password-store', backend === 'gnome_libsecret' ? 'gnome-libsecret' : backend); } catch { /* Startup reports damaged data below. */ }
 }
 const acquired = app.requestSingleInstanceLock();
@@ -92,7 +92,8 @@ async function start() {
   startupDiagnostics.record('store-load', { durationMs: performance.now() - storeStarted });
   const requestCounts = new RequestCounts(app.getPath('userData'));
   useRequestCounts(requestCounts);
-  const vault = new Vault(app.getPath('userData'));
+  const vault = new Vault(app.getPath('userData'), undefined, fixture);
+  store.initializeAiFeatures(!fixture && (vault.has('openai') || vault.has('anthropic')));
   const providerCheck = new ProviderCheck();
   const modelCatalog = new ModelCatalog();
   const root = __dirname;
@@ -124,7 +125,7 @@ async function start() {
   let shieldCapTimer: ReturnType<typeof setTimeout> | undefined;
   let shieldRestoreTimer: ReturnType<typeof setTimeout> | undefined;
   let shieldRestoreNonce: string | undefined;
-  let panel: Panel = null, panelChat: string | null = null, keyPromptOpen = false;
+  let panel: Panel = null, panelChat: string | null = null;
   let indexDrained = false;
   let gcTimer: ReturnType<typeof setTimeout> | undefined;
   let permissionDialogsOpen = 0;
@@ -258,7 +259,7 @@ async function start() {
   const syncChrome = () => {
     if (closing || remote.webContents.isDestroyed() || controls.webContents.isDestroyed()) return;
     const bounds = shieldPanel ?? controls.getBounds(), zoom = remote.webContents.getZoomFactor();
-    chromeSync.next({ type: 'chrome', panel, pending: pendingChrome,
+    chromeSync.next({ type: 'chrome', panel, pending: pendingChrome, aiFeatures: store.state.global.aiFeatures,
       panelBounds: panel ? { left: bounds.x / zoom, right: (bounds.x + bounds.width) / zoom } : null });
   };
   let initialBoundsLogged = false;
@@ -529,8 +530,7 @@ async function start() {
   };
   const providerChanged = (keyProvider?: 'openai' | 'anthropic') => {
     if (!keyProvider || keyProvider === store.state.provider) stickerTags.configurationChanged();
-    providerCheck.invalidate(); assistant.reconfigure({ keyProvider });
-    assistant.message = 'Provider configuration changed. Use Test connection to check account access.';
+    providerCheck.invalidate(keyProvider); assistant.reconfigure({ keyProvider });
   };
   controls.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
     if (mainFrame && !inPlace) { statusPublisher.reset(); panel = null; panelChat = null; cancelSticker(); finishMakerInput(); clearStickerShield(true); layout(); assistant.activity(); }
@@ -576,7 +576,7 @@ async function start() {
   ipcMain.on('companion:boot-heartbeat', (event, raw: unknown) => {
     if (!isRemote(event) || win.isDestroyed()) return;
     const result = startupWatchdog.accept(raw, performance.now(), { visible: win.isVisible() && !win.isMinimized(), closing,
-      busy: permissionDialogsOpen > 0 || keyPromptOpen || Boolean(assistant.pending) || Boolean(makerInputOwner) || Boolean(stickerTransfer.send && ['finding', 'preparing', 'sending'].includes(stickerTransfer.send.state)) });
+      busy: permissionDialogsOpen > 0 || Boolean(assistant.pending) || Boolean(makerInputOwner) || Boolean(stickerTransfer.send && ['finding', 'preparing', 'sending'].includes(stickerTransfer.send.state)) });
     if (!result) return;
     const { observation, decision } = result;
     if (!detectorSeen) { detectorSeen = true; startupDiagnostics.record('detector-ready', { generation: bootSession.generation }); }
@@ -652,6 +652,7 @@ async function start() {
     const parsed = providerSchema.safeParse(raw);
     if (!parsed.success || typeof refresh !== 'boolean') return { models: [], error: 'Invalid provider.' };
     const provider = parsed.data;
+    if (!store.state.global.aiFeatures) return { models: [], error: 'AI features are off' };
     if (fixture) return { models: currentTextModels(provider, (provider === 'openai'
       ? ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-sol-2026-09-29', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-luna-2026-05-18', 'gpt-4o', 'text-embedding-3-small', 'gpt-audio']
       : ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-6']).map(id => ({ id, name: id }))) };
@@ -669,35 +670,52 @@ async function start() {
     if (!parsed.success) return { ok: false, error: 'Invalid setting. Check the value and try again.' };
     const action = parsed.data;
     try {
+      if (!store.state.global.aiFeatures && (
+        ['provider', 'reasoning', 'key', 'deleteKey', 'testProvider', 'getKey', 'learn', 'profile', 'resetProfile', 'resetStylePreferences', 'autoRules', 'autoPermission', 'tagStickers', 'suggestStickerTags', 'retryStickerTags', 'resetPreferences'].includes(action.type) ||
+        action.type === 'preferences' && Object.keys(action.patch).some(key => !['aiFeatures', 'directStickerSend'].includes(key))
+      )) return { ok: false, error: 'AI features are off' };
       if ('scope' in action) requireScope(action.scope);
       switch (action.type) {
         case 'preferences': directStickerSafety.preferences(action.scope, action.patch);
+          // Retire pending replies before publishing any switched-off status.
+          assistant.reconfigure();
+          if (!store.state.global.aiFeatures) {
+            stickerTags.stop(); providerCheck.invalidate(); modelCatalog.invalidate('openai'); modelCatalog.invalidate('anthropic');
+          }
+          if (action.patch.aiFeatures !== undefined) refreshAiMenu();
           stickerTags.observe();
           if (accountSafety) disableDirect(accountSafety);
-          assistant.reconfigure(); break;
+          break;
         case 'resetPreferences': directStickerSafety.reset(action.scope);
           stickerTags.observe();
           assistant.reconfigure(); break;
         case 'resetStylePreferences': store.update(s => resetStylePreferences(s, action.scope)); assistant.reconfigure(); break;
-        case 'provider': store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); break;
-        case 'reasoning': store.update(s => setReasoning(s, action.provider, action.model, action.effort)); providerChanged(); break;
+        case 'provider': if (!fixture && !vault.has(action.provider)) throw new Error('Add an API key for this provider.'); store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); assistant.message = 'Provider configuration changed. Use Test connection to check account access.'; break;
+        case 'reasoning': store.update(s => setReasoning(s, action.provider, action.model, action.effort)); providerChanged(); assistant.message = 'Provider configuration changed. Use Test connection to check account access.'; break;
         case 'key': {
-          if (keyPromptOpen) throw new Error('A key entry dialog is already open.');
-          keyPromptOpen = true;
-          try { vault.set(action.provider, await promptKey(action.provider), action.persist); modelCatalog.invalidate(action.provider); providerChanged(action.provider); assistant.message = 'API key configured. Use Test connection to check account access.'; }
-          finally { keyPromptOpen = false; }
+          // Validation errors are fixed strings; native storage errors never cross IPC.
+          const validation = apiKeyError(action.provider, action.key);
+          if (validation) return { ok: false, error: validation };
+          if (!vault.secure()) return { ok: false, error: 'Can’t save keys because secure storage is unavailable.' + (process.platform === 'linux' ? ' Unlock KWallet or Secret Service.' : '') };
+          try { vault.set(action.provider, action.key, true); }
+          catch { return { ok: false, error: 'Couldn’t save the key. Try again.' }; }
+          if (!vault.has(store.state.provider)) store.update(s => { s.provider = action.provider; });
+          modelCatalog.invalidate(action.provider); providerChanged(action.provider);
           break;
         }
-        case 'deleteKey': vault.remove(action.provider); modelCatalog.invalidate(action.provider); providerChanged(action.provider); break;
+        case 'deleteKey': {
+          vault.remove(action.provider);
+          const other = action.provider === 'openai' ? 'anthropic' : 'openai';
+          if (store.state.provider === action.provider && vault.has(other)) store.update(s => { s.provider = other; });
+          modelCatalog.invalidate(action.provider); providerChanged(); break;
+        }
+        case 'getKey': await shell.openExternal(action.provider === 'openai' ? 'https://platform.openai.com/api-keys' : 'https://console.anthropic.com/settings/keys'); break;
+        case 'checkSecureStorage': vault.secure(); break;
         case 'testProvider': {
-          if (fixture) { assistant.message = 'Demo provider check passed locally. No network request was made.'; break; }
-          const p = store.state.provider;
-          const configuration = { provider: p, model: store.state.models[p], key: vault.get(p), effort: savedEffort(store.state) };
-          const checking = providerCheck.run(configuration);
-          assistant.message = 'Testing provider connection…'; publish();
-          try { const result = await checking; if (result) assistant.message = result; }
-          catch (error) { assistant.message = 'Provider connection check failed.'; publish(); throw error; }
-          break;
+          const p = action.provider;
+          const result = fixture ? 'Connected' : await providerCheck.run({ provider: p, model: store.state.models[p], key: vault.get(p), effort: savedEffort({ ...store.state, provider: p }) });
+          if (result && p === store.state.provider) { assistant.message = ''; publish(); }
+          return result ? { ok: true, message: '✓ Connected' } : { ok: false, error: 'Provider configuration changed. Test again.' };
         }
         case 'autoRules': assistant.updateAutoRules(action.chatId, action.patch); break;
         case 'autoPermission': assistant.changeAutoPermission(action.chatId, action.permission); break;
@@ -787,7 +805,8 @@ async function start() {
         publish();
       }
       if (action.type === 'locateSticker') publish();
-      return { ok: false, error: error instanceof Error ? error.message : 'Operation failed. Your previous data is preserved.' };
+      if (action.type === 'key') { publish(); return { ok: false, error: 'Couldn’t save the key. Try again.' }; }
+      return { ok: false, error: error instanceof Error ? (action.type === 'testProvider' ? error.message.replace(/^(openai|anthropic) \(\d+\): /, '') : error.message) : 'Operation failed. Your previous data is preserved.' };
     }
   });
   ipcMain.on('companion:event', (event, raw: unknown) => {
@@ -1044,8 +1063,9 @@ async function start() {
   if (!hiddenStart || !tray) win.show();
   else win.setSkipTaskbar(true);
   recordVisibility();
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'AI settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { if (closing || remote.webContents.isDestroyed()) return; cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL).catch(() => {}); } }, { role: 'quit', accelerator: 'CmdOrCtrl+Q' }] }, { role: 'editMenu' },
-    { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }]));
+  function refreshAiMenu() { Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Companion', submenu: [{ label: 'Settings', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') }, { label: 'Sticker library', click: () => openPanel('stickers') }, { label: 'Chat AI settings', visible: store.state.global.aiFeatures, click: () => openPanel('chat') }, { label: 'Capture sticker picker layout', click: () => pickerDiagnostics.capture() }, { type: 'separator' }, { label: 'Reload WhatsApp', click: () => { if (closing || remote.webContents.isDestroyed()) return; cancelSticker(); finishMakerInput(); clearStickerShield(); publish(); assistant.suspend(); void remote.webContents.loadURL(remoteURL).catch(() => {}); } }, { role: 'quit', accelerator: 'CmdOrCtrl+Q' }] }, { role: 'editMenu' },
+    { label: 'View', submenu: [{ label: 'Reload controls', accelerator: 'CmdOrCtrl+R', click: () => controls.webContents.reload() }, { label: 'Force reload controls', accelerator: 'CmdOrCtrl+Shift+R', click: () => controls.webContents.reloadIgnoringCache() }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] }])); }
+  refreshAiMenu();
   const recordLoadFailure = (event: 'base-load-failed' | 'controls-load-failed', error: unknown) => {
     if (closing) return;
     const code = error && typeof error === 'object' && 'errno' in error ? error.errno : undefined;

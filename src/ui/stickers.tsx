@@ -83,7 +83,7 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
   const eligible = (sticker: Sticker) => !sticker.searchTerms.trim() && !drafts.has(sticker.id) && !suggestions.has(sticker.id) && suggesting?.id !== sticker.id && !['working', 'queued'].includes(status.stickerTags?.[sticker.id]?.state ?? '')
     && !(status.stickerTagging?.state === 'running' && status.stickerTags?.[sticker.id]?.state === 'failed');
   const startTags = (ids: string[]) => { dismissDelete(); groups.closePopover(); if (ids.length > 20) { confirmationOrigin.current = document.activeElement as HTMLElement; setTagConfirmation(ids); } else if (ids.length) void act({ type: 'tagStickers', ids }); };
-  const groups = useStickerGroups(status.state, groupAct, editMode, () => { dismissDelete(); setTagConfirmation(null); }, {
+  const groups = useStickerGroups(status.state, groupAct, editMode, () => { dismissDelete(); setTagConfirmation(null); }, status.state.global.aiFeatures ? {
     untaggedActive: !!untaggedSnapshot,
     showUntagged: !!untaggedSnapshot || untaggedIds.size > 0,
     filterChanged, eligible, start: startTags, running: status.stickerTagging?.state === 'running',
@@ -95,7 +95,7 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
         closeConfirmation();
       }}>Tag</button><button className="quiet" onClick={closeConfirmation}>Cancel</button>
     </div>
-  });
+  } : undefined);
   useLayoutEffect(() => {
     if (tagConfirmation) confirmationButton.current?.focus();
     else if (confirmationRestore.current) {
@@ -126,6 +126,7 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
   useEffect(() => {
     const request = suggestionRequest.current;
     if (!request) return;
+    if (!status.state.global.aiFeatures) return;
     const item = status.stickerTags?.[request.id];
     if (item?.nonce === request.nonce) request.observed = true;
     if (!item && request.observed) { suggestionRequest.current = null; setSuggesting(null); return; }
@@ -139,7 +140,13 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
         groups: item.suggestion!.groups.filter(id => !all.find(s => s.id === request.id)!.groups.includes(id))
       }));
     }
-  }, [status.stickerTags, all]);
+  }, [status.stickerTags, all, status.state.global.aiFeatures]);
+  useEffect(() => {
+    if (status.state.global.aiFeatures) return;
+    suggestionRequest.current = null; setSuggesting(null); setTagConfirmation(null);
+    // Keep any edited search terms as an ordinary unsaved draft.
+    setSuggestions(new Map());
+  }, [status.state.global.aiFeatures]);
   useLayoutEffect(() => {
     if (untaggedSnapshot) setUntaggedSnapshot(current => {
       if (!current) return current;
@@ -488,7 +495,7 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
 
   const detail = (index: number) => {
     const col = index % columns + 1;
-    if (editing && editingSticker && (visibleEditing || editing.prompt)) return <StickerEditor key={`editor-${editing.id}`} col={col} detached={!visibleEditing} sticker={editingSticker} groupControls={<StickerGroupToggles groups={status.state.stickerGroups} sticker={editingSticker} act={groupAct} membershipChanged={() => revise(editing.id)} suggested={suggestions.get(editing.id)?.groups.filter(id => !editingSticker.groups.includes(id))} dropSuggested={id => setSuggestions(current => {
+    if (editing && editingSticker && (visibleEditing || editing.prompt)) return <StickerEditor aiFeatures={status.state.global.aiFeatures} key={`editor-${editing.id}`} col={col} detached={!visibleEditing} sticker={editingSticker} groupControls={<StickerGroupToggles groups={status.state.stickerGroups} sticker={editingSticker} act={groupAct} membershipChanged={() => revise(editing.id)} suggested={suggestions.get(editing.id)?.groups.filter(id => !editingSticker.groups.includes(id))} dropSuggested={id => setSuggestions(current => {
       const next = new Map(current), suggestion = next.get(editing.id); if (suggestion) next.set(editing.id, { ...suggestion, groups: suggestion.groups.filter(group => group !== id) }); return next;
     })}/>} draft={editing} location={status.stickerLocation} message={message?.id === editing.id ? message : null} retry={retry} sendBlocked={sendBlocked}
       suggested={suggestions.has(editing.id)} tagBusy={suggesting?.id === editing.id || ['working', 'queued'].includes(status.stickerTags?.[editing.id]?.state ?? '')} tagQueued={!suggesting && ['working', 'queued'].includes(status.stickerTags?.[editing.id]?.state ?? '')}
@@ -623,8 +630,8 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
         flush(row);
         for (let i = row * columns; i < Math.min((row + 1) * columns, stickers.length); i++) {
           const sticker = stickers[i];
-          nodes.push(<StickerTile key={sticker.id} sticker={sticker} handlers={handlers} editMode={editMode} selected={groups.selected.has(sticker.id)} attached={detailId === sticker.id} expanded={visibleEditing?.id === sticker.id}
-            tagState={status.stickerTags?.[sticker.id]?.state} imageBroken={broken.has(sticker.id)} imageRevision={imageRevisions.get(sticker.id) ?? 0} feedback={shown?.id === sticker.id ? shown.state : null} sentName={shown?.id === sticker.id ? shown.name : ''}
+          nodes.push(<StickerTile key={sticker.id} aiFeatures={status.state.global.aiFeatures} sticker={sticker} handlers={handlers} editMode={editMode} selected={groups.selected.has(sticker.id)} attached={detailId === sticker.id} expanded={visibleEditing?.id === sticker.id}
+            tagState={status.state.global.aiFeatures ? status.stickerTags?.[sticker.id]?.state : undefined} imageBroken={broken.has(sticker.id)} imageRevision={imageRevisions.get(sticker.id) ?? 0} feedback={shown?.id === sticker.id ? shown.state : null} sentName={shown?.id === sticker.id ? shown.name : ''}
             busyState={busy?.id === sticker.id ? busy.state : null} canCancel={cancellable(busy) && busy?.id === sticker.id}
             tileDisabled={!broken.has(sticker.id) && !editMode && !busy && (!status.chat.canSendSticker || !status.chat.destinationToken) && status.chat.stickerSendBlockedReason !== 'busy'}/>);
         }
@@ -635,7 +642,7 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
     return nodes;
   }, [stickers, columns, viewport.first, viewport.last, viewport.rows, viewport.stride, detailIndex, detailId, handlers, editMode, groups.selected,
     visibleEditing?.id, broken, imageRevisions, shown?.id, shown?.state, shown?.name, busy?.id, busy?.state,
-    status.chat.canSendSticker, status.chat.destinationToken, status.chat.stickerSendBlockedReason, status.stickerTags]);
+    status.chat.canSendSticker, status.chat.destinationToken, status.chat.stickerSendBlockedReason, status.stickerTags, status.state.global.aiFeatures]);
 
   const stopReason = status.state.global.directStickerDisabledReason;
   const stopAt = status.state.global.directStickerDisabledAt ?? 0;
@@ -656,9 +663,9 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
         <button className={`sticker-mode${editMode ? ' mode-done' : ''}`} aria-label={editMode ? undefined : 'Edit stickers'} title={editMode ? undefined : 'Edit stickers'} onClick={() => editMode ? requestClose(null, 'done') : setEditMode(true)}>{editMode ? 'Done' : <EditIcon/>}</button>
       </div>
       {groups.header}
-      <TagStrip status={status} act={act} settings={() => requestClose(null, 'providers')} retry={() => void act({ type: 'retryStickerTags', excludedIds: [...new Set([...drafts.keys(), ...suggestions.keys(), ...(suggesting ? [suggesting.id] : [])])] })}/>
+      {status.state.global.aiFeatures && <TagStrip status={status} act={act} settings={() => requestClose(null, 'providers')} retry={() => void act({ type: 'retryStickerTags', excludedIds: [...new Set([...drafts.keys(), ...suggestions.keys(), ...(suggesting ? [suggesting.id] : [])])] })}/>}
       {strip && <p className="sticker-strip"><span>{strip}</span></p>}
-      {stopReason && dismissedStop !== stopAt && <p className="sticker-strip warn" role="status"><span>Direct sending turned off: {stopReasons[stopReason]} Stickers go through WhatsApp’s editor again. <a href="#ai-settings" onClick={e => { e.preventDefault(); requestClose(null, 'settings'); }}>AI settings</a></span><button className="icon-close" aria-label="Dismiss direct-send notice" onClick={() => setDismissedStop(stopAt)}>×</button></p>}
+      {stopReason && dismissedStop !== stopAt && <p className="sticker-strip warn" role="status"><span>Direct sending turned off: {stopReasons[stopReason]} Stickers go through WhatsApp’s editor again. <a href="#ai-settings" onClick={e => { e.preventDefault(); requestClose(null, 'settings'); }}>Settings</a></span><button className="icon-close" aria-label="Dismiss direct-send notice" onClick={() => setDismissedStop(stopAt)}>×</button></p>}
     </header>
     <div className="panel-body sticker-body" data-mode={editMode ? 'edit' : 'normal'}>
       {status.pending && <div className="pending"><b>Scheduled reply</b><p>{status.pending.text}</p><p>After {new Date(status.pending.due).toLocaleTimeString()}</p><button onClick={() => void act({ type: 'cancelAuto' })}>Cancel and pause</button></div>}
@@ -675,7 +682,8 @@ export function Stickers({ status, act, navigation, openProviders }: { status: S
 
 const normalizeSearch = (text: string) => text.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
 type TileHandlers = { click: (event: React.MouseEvent, id: string) => void; select: (id: string) => void; image: (id: string, ok: boolean) => void; cancel: () => void };
-const StickerTile = memo(function StickerTile({ sticker, handlers, editMode, selected, attached, expanded, imageBroken, imageRevision, feedback, sentName, busyState, canCancel, tileDisabled, tagState }: {
+const StickerTile = memo(function StickerTile({ aiFeatures, sticker, handlers, editMode, selected, attached, expanded, imageBroken, imageRevision, feedback, sentName, busyState, canCancel, tileDisabled, tagState }: {
+  aiFeatures: boolean;
   tagState?: import('../shared/model').StickerTagItem['state']; sticker: Sticker; handlers: TileHandlers; editMode: boolean; selected: boolean; attached: boolean; expanded: boolean; imageBroken: boolean; imageRevision: number;
   feedback: StickerSend['state'] | null; sentName: string; busyState: StickerSend['state'] | null; canCancel: boolean; tileDisabled: boolean;
 }) {
@@ -684,7 +692,7 @@ const StickerTile = memo(function StickerTile({ sticker, handlers, editMode, sel
   const name = sticker.searchTerms.slice(0, 120) || 'Sticker without search terms';
   const label = ownBusy ? 'Sending sticker…' : tagState === 'working' ? 'Tagging…' : tagState === 'failed' ? 'Couldn’t tag' : editMode ? name : own === 'sent' ? `Sent to ${sentName}` : own === 'cancelled' ? 'Cancelled' : imageBroken ? 'Image unavailable. Retry' : name;
   return <div className="sticker" role="group" data-sticker={sticker.id} aria-label={sticker.searchTerms.slice(0, 120) || 'Sticker without search terms'} data-selected={selected ? '' : undefined} data-attached={attached ? '' : undefined}>
-    <button className={`sticker-art${!sticker.searchTerms.trim() ? ' untagged' : ''}`} aria-label={label} title={sticker.searchTerms || undefined}
+    <button className={`sticker-art${aiFeatures && !sticker.searchTerms.trim() ? ' untagged' : ''}`} aria-label={label} title={sticker.searchTerms || undefined}
       data-tag={tagState} aria-expanded={editMode ? expanded : undefined} aria-disabled={tileDisabled || undefined} data-busy={ownBusy ? '' : undefined} data-sent={own === 'sent' ? '' : undefined} data-cancelled={own === 'cancelled' ? '' : undefined} data-broken={imageBroken || undefined}
       onClick={e => handlers.click(e, sticker.id)}>
       <img key={`${sticker.id}-${imageRevision}`} src={stickerURL(sticker.id)} loading="lazy" decoding="async" alt="" draggable={false} onError={() => handlers.image(sticker.id, false)} onLoad={() => handlers.image(sticker.id, true)}/>
@@ -715,8 +723,8 @@ function MessageBody({ message, retry, sendBlocked, dismiss }: { message: Sticke
   </>;
 }
 
-function StickerEditor({ col, detached, sticker, groupControls, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget, confirmDelete, deleting, askDelete, keepDelete, suggested, tagBusy, tagQueued, tagError, provider, suggest, tagSettings, discardSuggestion }: {
-  suggested: boolean; tagBusy: boolean; tagQueued: boolean; tagError?: import('../shared/model').StickerTagError; provider: import('../shared/model').Provider;
+function StickerEditor({ aiFeatures, col, detached, sticker, groupControls, draft, location, message, retry, sendBlocked, change, close, keep, discard, save, locate, forget, confirmDelete, deleting, askDelete, keepDelete, suggested, tagBusy, tagQueued, tagError, provider, suggest, tagSettings, discardSuggestion }: {
+  aiFeatures: boolean; suggested: boolean; tagBusy: boolean; tagQueued: boolean; tagError?: import('../shared/model').StickerTagError; provider: import('../shared/model').Provider;
   suggest(): void; tagSettings(): void; discardSuggestion(): void;
   col: number; detached: boolean; sticker: Sticker; groupControls: React.ReactNode; draft: Draft; location: Status['stickerLocation']; message: StickerSend | null;
   retry: (event: React.MouseEvent, send: StickerSend, original?: boolean) => void;
@@ -727,11 +735,11 @@ function StickerEditor({ col, detached, sticker, groupControls, draft, location,
   const id = useId();
   const result = location?.id === sticker.id ? location.state : null;
   return <div className="sticker-detail" data-detached={detached || undefined} style={{ '--col': col } as React.CSSProperties} role="region" aria-label="Search terms">
-    <div className="detail-head"><label htmlFor={id}>Search terms</label><div className="detail-tools"><button className="detail-ai" aria-disabled={tagQueued || undefined} aria-label={tagQueued ? 'Tagging…' : tagBusy ? 'Stop suggestion' : 'Suggest search terms'} title={tagQueued ? 'Tagging…' : tagBusy ? 'Stop suggestion' : 'Suggest search terms'} onClick={suggest}>{tagBusy ? <TagDots/> : <SparkIcon/>}</button><button className="icon-close" aria-label="Close" title="Close" onClick={close}>×</button></div></div>
+    <div className="detail-head"><label htmlFor={id}>Search terms</label><div className="detail-tools">{aiFeatures && <button className="detail-ai" aria-disabled={tagQueued || undefined} aria-label={tagQueued ? 'Tagging…' : tagBusy ? 'Stop suggestion' : 'Suggest search terms'} title={tagQueued ? 'Tagging…' : tagBusy ? 'Stop suggestion' : 'Suggest search terms'} onClick={suggest}>{tagBusy ? <TagDots/> : <SparkIcon/>}</button>}<button className="icon-close" aria-label="Close" title="Close" onClick={close}>×</button></div></div>
     {/* Closing the editor clears the message, so it has no Dismiss of its own here. */}
     {message && <div className="sticker-message inline"><MessageBody message={message} retry={retry} sendBlocked={sendBlocked}/></div>}
-    <p className="sr-only" aria-live="polite" aria-atomic="true">{tagError ? tagErrorMessage(tagError, provider) : ''}</p>
-    {tagError && <div className="sticker-message inline"><span className="mark" aria-hidden="true">!</span><div className="msg"><p>{tagErrorMessage(tagError, provider)}</p><button onClick={tagSettingsError(tagError) ? tagSettings : suggest}>{tagSettingsError(tagError) ? 'AI settings' : 'Try again'}</button></div></div>}
+    <p className="sr-only" aria-live="polite" aria-atomic="true">{aiFeatures && tagError ? tagErrorMessage(tagError, provider) : ''}</p>
+    {aiFeatures && tagError && <div className="sticker-message inline"><span className="mark" aria-hidden="true">!</span><div className="msg"><p>{tagErrorMessage(tagError, provider)}</p><button onClick={tagSettingsError(tagError) ? tagSettings : suggest}>{tagSettingsError(tagError) ? 'Settings' : 'Try again'}</button></div></div>}
     <textarea data-suggested={suggested || undefined} id={id} value={draft.text} maxLength={4000} rows={4} onChange={e => change(e.target.value)} placeholder="happy, feliz, good morning, buenos días"/>
     {!draft.prompt && groupControls}
     {draft.prompt

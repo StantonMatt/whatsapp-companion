@@ -207,7 +207,7 @@ try {
     } else {
       const session = await page.context().newCDPSession(page);
       try {
-        const name = panel === 'stickers' ? 'Sticker library' : 'AI settings';
+        const name = panel === 'stickers' ? 'Sticker library' : 'Settings';
         let nodes;
         await expect.poll(async () => {
           nodes = (await session.send('Accessibility.getFullAXTree')).nodes.filter(n => n.role?.value === 'button' && n.name?.value === name);
@@ -247,7 +247,7 @@ try {
       } finally { await session.detach(); }
     }
     await expect.poll(async () => (await local.evaluate(() => window.companion.status())).panel).toBe(panel);
-    await expect(local.locator('aside')).toHaveAttribute('aria-label', panel === 'chat' ? 'Chat AI settings' : panel === 'stickers' ? 'Sticker library' : 'AI settings');
+    await expect(local.locator('aside')).toHaveAttribute('aria-label', panel === 'chat' ? 'Chat AI settings' : panel === 'stickers' ? 'Sticker library' : 'Settings');
   };
   const section = async (name) => {
     const back = local.getByLabel('Back to settings');
@@ -325,6 +325,32 @@ try {
       }
     });
   }
+  // Fresh profiles expose only non-AI controls until the user opts in.
+  const composerAiVisible = async () => {
+    const session = await remote.context().newCDPSession(remote);
+    try { return (await session.send('Accessibility.getFullAXTree')).nodes.some(node => node.role?.value === 'button' && /^(Suggest reply|Refine draft|Refine suggestion|Cancel)$/.test(node.name?.value ?? '')); }
+    finally { await session.detach(); }
+  };
+  await openPanel('settings');
+  await expect(local.getByLabel('AI features', { exact: true })).not.toBeChecked();
+  await expect(local.getByRole('button', { name: 'Replies', exact: true })).toHaveCount(0);
+  await expect(local.getByRole('button', { name: 'Providers', exact: true })).toHaveCount(0);
+  await expect(local.getByText('All conversations', { exact: true })).toHaveCount(0);
+  await expect(local.getByLabel('Tag new stickers automatically', { exact: true })).toHaveCount(0);
+  await expect(local.getByLabel('Send stickers directly (experimental)', { exact: true })).toBeVisible();
+  await expect(local.getByRole('button', { name: 'Reload WhatsApp', exact: true })).toBeVisible();
+  expect(await composerAiVisible()).toBe(false); await expect(remote.locator('#companion-chat-settings')).toHaveCount(0);
+  await local.getByLabel('AI features', { exact: true }).check();
+  await expect(local.getByRole('button', { name: 'Replies', exact: true })).toBeVisible();
+  await expect(local.getByRole('button', { name: 'Providers', exact: true })).toContainText('Add an API key');
+  await expect.poll(composerAiVisible).toBe(true); await expect(remote.locator('#companion-chat-settings')).toBeVisible();
+  await local.getByLabel('AI features', { exact: true }).uncheck();
+  await expect(local.getByRole('button', { name: 'Providers', exact: true })).toHaveCount(0);
+  await expect.poll(composerAiVisible).toBe(false); await expect(remote.locator('#companion-chat-settings')).toHaveCount(0);
+  await local.getByLabel('AI features', { exact: true }).check();
+  await expect(local.getByRole('button', { name: 'Providers', exact: true })).toBeVisible();
+  await local.getByLabel('Close panel').click();
+  console.log('PASS fresh AI off, opt-in restores controls, switching off hides composer/header and AI rows immediately');
   const originalSize = (await geometry()).size;
   for (const panelOpen of [false, true]) {
     if (panelOpen) await openPanel('settings');
@@ -391,6 +417,44 @@ try {
   console.log('PASS dropdown Escape/outside-click dismissal, panel Escape and light/dark menus');
   await openPanel('settings');
   await section('Providers');
+  const openaiKey = local.getByRole('group', { name: 'OpenAI API key', exact: true });
+  const anthropicKey = local.getByRole('group', { name: 'Anthropic API key', exact: true });
+  await openaiKey.getByLabel('OpenAI API key', { exact: true }).fill('invalid fixture key');
+  await openaiKey.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(openaiKey.getByRole('alert')).toHaveText('This does not look like a valid API key.');
+  await openaiKey.getByLabel('OpenAI API key', { exact: true }).fill('sk-ant-synthetic_fixture_key_never_real');
+  await openaiKey.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(openaiKey.getByRole('alert')).toHaveText('This looks like an Anthropic key.');
+  await anthropicKey.getByLabel('Anthropic API key', { exact: true }).fill('sk-synthetic_fixture_key_never_real');
+  await anthropicKey.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(anthropicKey.getByRole('alert')).toHaveText('This looks like an OpenAI key.');
+  await anthropicKey.getByLabel('Anthropic API key', { exact: true }).fill('');
+  const keyInput = openaiKey.getByLabel('OpenAI API key', { exact: true });
+  // Dispatch a real paste event with fixture-only text; never touch the OS clipboard.
+  await keyInput.evaluate(input => { const data = new DataTransfer(); data.setData('text', ' \nsk-synthetic_fixture_key_never_real\n '); input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true })); });
+  await expect(keyInput).toHaveValue('sk-synthetic_fixture_key_never_real');
+  const savedInput = await keyInput.elementHandle();
+  await openaiKey.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(openaiKey.getByText('✓ Saved', { exact: true })).toBeVisible();
+  expect(await savedInput.evaluate(input => input.value)).toBe(''); await savedInput.dispose();
+  await openaiKey.getByRole('button', { name: 'Test connection', exact: true }).click();
+  await expect(openaiKey.getByRole('status')).toHaveText('✓ Connected');
+  await expect(anthropicKey.getByRole('status')).toHaveCount(0);
+  await openaiKey.getByRole('button', { name: 'Replace', exact: true }).click();
+  await expect(openaiKey.getByLabel('OpenAI API key', { exact: true })).toBeEmpty();
+  await openaiKey.getByLabel('OpenAI API key', { exact: true }).fill('sk-synthetic_replacement_never_real');
+  await openaiKey.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(openaiKey.getByText('✓ Saved', { exact: true })).toBeVisible();
+  await openaiKey.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(openaiKey.getByRole('button', { name: 'Keep', exact: true })).toBeFocused();
+  await openaiKey.getByRole('button', { name: 'Keep', exact: true }).click();
+  expect((await local.evaluate(() => window.companion.status())).keys.openai).toBe(true);
+  await openaiKey.getByRole('button', { name: 'Remove', exact: true }).click();
+  await openaiKey.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(openaiKey.getByLabel('OpenAI API key', { exact: true })).toBeEmpty();
+  expect((await local.evaluate(() => window.companion.status())).keys.openai).toBe(false);
+  expect(await readdir(dir)).not.toContain('credentials.json');
+  console.log('PASS fixture key entry: invalid/wrong-provider errors, trimmed paste/Save/cleared field, local per-provider Test, Replace/Cancel and Remove/Keep/Remove; no OS keyring');
   const model = local.getByRole('combobox', { name: 'Model ID', exact: true });
   await expect(model).toBeEnabled();
   expect(await model.locator('option').evaluateAll(options => options.map(option => option.value))).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']);
@@ -492,7 +556,7 @@ try {
   // One click on the star requests a suggestion directly; no menu to confirm.
   await remote.mouse.click(emptyBounds.x + emptyBounds.width - 17, emptyBounds.y - 16);
   const accessibility = await remote.context().newCDPSession(remote);
-  await expect.poll(async () => (await accessibility.send('Accessibility.getFullAXTree')).nodes.some(node => node.name?.value?.includes('Enable conversation context in AI settings'))).toBe(true);
+  await expect.poll(async () => (await accessibility.send('Accessibility.getFullAXTree')).nodes.some(node => node.name?.value?.includes('Enable conversation context in Settings'))).toBe(true);
   await accessibility.detach();
   await remote.screenshot({ path: '.local/screenshots/context-consent-notice.png' });
   console.log('PASS manual Suggest without context consent displays a visible composer explanation');
@@ -2402,9 +2466,9 @@ try {
   expect(await local.locator('aside').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await resize(originalSize);
   console.log('PASS long dropdown scrolls to last option, closes on Tab and fits a small window');
-  const fixtureCheck = await local.evaluate(() => window.companion.action({ type: 'testProvider' }));
+  const fixtureCheck = await local.evaluate(() => window.companion.action({ type: 'testProvider', provider: 'openai' }));
   expect(fixtureCheck.ok).toBe(true);
-  await expect(statusText).toHaveText('Demo provider check passed locally. No network request was made.');
+  expect(fixtureCheck.message).toBe('✓ Connected');
   console.log('PASS demo provider check needs no key and performs no real call');
   await local.getByLabel('From hour').selectOption('0');
   await local.getByLabel('Until hour').selectOption('0');

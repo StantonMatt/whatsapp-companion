@@ -179,6 +179,7 @@ export class DomConnector {
   private failedSources = new Set<string>();
   private indexing = false;
   private stopped = false;
+  private aiFeatures = false;
   private intakeController = new AbortController();
   private stickersDirty = true;
   private refreshFrame?: number;
@@ -721,7 +722,7 @@ export class DomConnector {
     this.theme = dark;
     const contentKey = keys.suggestion;
     this.publishSnapshot(snapshot, key, contentKey);
-    this.button.hidden = !snapshot.ready; this.updateTrigger(snapshot);
+    this.button.hidden = !this.aiFeatures || !snapshot.ready; this.updateTrigger(snapshot);
     if (geometry && editor) {
       const { rect, css, clientLeft, clientTop, clientWidth, clientHeight, width, height } = geometry;
       this.button.style.left = `${Math.max(12, rect.right - 30)}px`; this.button.style.top = `${rect.top - 29}px`;
@@ -805,8 +806,18 @@ export class DomConnector {
     if (command.type === 'prepareSticker') { void this.stickerTransfer?.prepare(command); return; }
     if (command.type === 'sendSticker') { void this.stickerTransfer?.send(command, command.expiresAt); return; }
     if (command.type === 'cancelSticker') { this.stickerTransfer?.cancel(); return; }
-    if (command.type === 'chrome') { this.navigation?.update(command.panel, command.pending); this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return; }
+    if (command.type === 'chrome') {
+      const changed = this.aiFeatures !== (command.aiFeatures === true);
+      this.aiFeatures = command.aiFeatures === true;
+      this.navigation?.update(command.panel, command.pending, this.aiFeatures);
+      if (changed) {
+        if (!this.aiFeatures) { this.dispatch = undefined; this.clear(); this.hidePopup(); }
+        this.layoutDirty = true; this.refresh(true);
+      }
+      this.stickerPickerLayout?.update(command.panelBounds ?? null, command.panel === 'chat' ? 'right' : 'left'); return;
+    }
     if (command.type === 'clear') { this.dispatch = undefined; this.clear(); if (this.popupMode === 'notice') this.hidePopup(); return; }
+    if (!this.aiFeatures && ['thinking', 'refining', 'suggestion', 'autoSend', 'notice'].includes(command.type)) return;
     if (command.type === 'notice') {
       if ((command.requestId && this.dismissedIds.has(command.requestId)) || (command.retryKey && command.retryKey !== suggestionKey(this.read()))) return;
       if (this.pending) this.clear();

@@ -22,56 +22,30 @@ test('persisted credentials use OS encryption and survive a new vault instance',
   expect(configuredBackend(dir)).toBe('kwallet6');
   expect(statSync(join(dir, 'credentials.json')).mode & 0o777).toBe(0o600);
 });
-test('rejects basic_text and locked keyrings; session-only keys never persist', () => {
+test('rejects basic_text and locked keyrings without writing', () => {
   storage.backend = 'basic_text'; const vault = new Vault(dir);
-  expect(vault.secure()).toBe(false); expect(() => vault.set('openai', key, true)).toThrow('Secure OS storage');
-  vault.set('openai', key, false); expect(vault.get('openai')).toBe(key);
-  expect(new Vault(dir).has('openai')).toBe(false);
+  expect(vault.secure()).toBe(false); expect(() => vault.set('openai', key, true)).toThrow('secure storage is unavailable');
+  expect(existsSync(join(dir, 'credentials.json'))).toBe(false);
   storage.available = false; expect(vault.secure()).toBe(false);
 });
-test('removing a key clears both durable and session copies', () => {
-  const vault = new Vault(dir); vault.set('anthropic', key, true); vault.remove('anthropic');
-  expect(vault.has('anthropic')).toBe(false); expect(new Vault(dir).has('anthropic')).toBe(false);
+test('fixture keys never use the OS keyring or write credentials', () => {
+  storage.available = false; const write = vi.spyOn(store, 'atomicWrite'), vault = new Vault(dir, undefined, true);
+  vault.set('openai', key, true); expect(vault.secure()).toBe(true); expect(vault.get('openai')).toBe(key);
+  expect(write).not.toHaveBeenCalled(); expect(existsSync(join(dir, 'credentials.json'))).toBe(false);
+  vault.remove('openai'); expect(vault.has('openai')).toBe(false);
 });
-test.each(['openai', 'anthropic'] as const)('session-only %s replacement clears only its stored key even with unavailable storage', (provider) => {
-  const other = provider === 'openai' ? 'anthropic' : 'openai', sessionKey = 'sk-synthetic_session_key_never_real';
-  const vault = new Vault(dir); vault.set(provider, key, true); vault.set(other, key, true);
-  const path = join(dir, 'credentials.json'), before = JSON.parse(readFileSync(path, 'utf8'));
-  storage.available = false; vault.set(provider, sessionKey, false);
-  expect(vault.get(provider)).toBe(sessionKey);
-  const after = JSON.parse(readFileSync(path, 'utf8'));
-  expect(after).toEqual({ [other]: before[other], backend: before.backend });
-  const restored = new Vault(dir); expect(restored.has(provider)).toBe(false);
-  expect(() => restored.get(provider)).toThrow('API key in Settings');
-  storage.available = true; expect(restored.get(other)).toBe(key); expect(configuredBackend(dir)).toBe('kwallet6');
+test('removing a key clears durable credentials', () => {
+  const vault = new Vault(dir); vault.set('openai', key, true); vault.remove('openai');
+  expect(vault.has('openai')).toBe(false); expect(new Vault(dir).has('openai')).toBe(false);
 });
-test('session-only replacement clears a stored key with a basic_text backend', () => {
-  const vault = new Vault(dir); vault.set('openai', key, true); storage.backend = 'basic_text';
-  vault.set('openai', 'sk-synthetic_session_key_never_real', false);
-  expect(vault.get('openai')).toBe('sk-synthetic_session_key_never_real'); expect(new Vault(dir).has('openai')).toBe(false);
-});
-test('session-only entry without a stored key does not write a file', () => {
-  const write = vi.spyOn(store, 'atomicWrite'), vault = new Vault(dir);
-  vault.set('openai', key, false);
-  expect(vault.get('openai')).toBe(key); expect(write).not.toHaveBeenCalled(); expect(existsSync(join(dir, 'credentials.json'))).toBe(false);
-});
-test('session-only entry without its own stored key leaves another provider untouched without writing', () => {
-  const vault = new Vault(dir); vault.set('anthropic', key, true);
-  const path = join(dir, 'credentials.json'), before = readFileSync(path, 'utf8'), write = vi.spyOn(store, 'atomicWrite');
-  vault.set('openai', key, false);
-  expect(write).not.toHaveBeenCalled(); expect(readFileSync(path, 'utf8')).toBe(before); expect(new Vault(dir).get('anthropic')).toBe(key);
-});
-test.each([false, true])('failed session-only removal preserves state with an existing session key: %s', (existingSession) => {
-  const original = new Vault(dir); original.set('openai', key, true);
-  const vault = existingSession ? original : new Vault(dir), path = join(dir, 'credentials.json'), before = readFileSync(path, 'utf8');
-  mkdirSync(`${path}.tmp`);
-  expect(() => vault.set('openai', 'sk-synthetic_session_key_never_real', false)).toThrow();
-  expect(vault.get('openai')).toBe(key); expect(readFileSync(path, 'utf8')).toBe(before); expect(new Vault(dir).get('openai')).toBe(key);
-});
-test.each([false, true])('invalid key rejects without changing stored or session keys (persist: %s)', (persist) => {
+test.each([
+  ['openai', 'invalid-key', 'valid API key'],
+  ['openai', 'sk-ant-synthetic_fixture_key_never_real', 'Anthropic key'],
+  ['anthropic', key, 'OpenAI key']
+] as const)('invalid %s key rejects without changing disk or exposing text', (provider, invalid, message) => {
   const vault = new Vault(dir); vault.set('openai', key, true);
   const path = join(dir, 'credentials.json'), before = readFileSync(path, 'utf8'), write = vi.spyOn(store, 'atomicWrite');
-  expect(() => vault.set('openai', 'invalid-key', persist)).toThrow('valid API key');
+  expect(() => vault.set(provider, invalid, true)).toThrow(message);
   expect(write).not.toHaveBeenCalled(); expect(readFileSync(path, 'utf8')).toBe(before); expect(vault.get('openai')).toBe(key);
 });
 test.each(['write', 'sync', 'replace', 'rename', 'directory-sync', 'directory'])('vault removal failure at %s keeps disk and memory aligned on later writes', checkpoint => {
@@ -83,20 +57,20 @@ test.each(['write', 'sync', 'replace', 'rename', 'directory-sync', 'directory'])
   else expect(() => vault.remove('openai')).toThrow('IO failure');
   expect(vault.has('openai')).toBe(!replaced); expect(new Vault(dir).has('openai')).toBe(!replaced);
   expect(vault.durabilityWarning).toBe(replaced); fail = false;
-  vault.set('anthropic', key, true);
+  vault.set('anthropic', 'sk-ant-synthetic_fixture_key_never_real', true);
   expect(new Vault(dir).has('openai')).toBe(!replaced); expect(vault.durabilityWarning).toBe(false);
 });
-test.each([false, true])('vault replacement adopts its session and durable state after directory sync failure (persist: %s)', persist => {
+test('vault replacement adopts durable state after directory sync failure', () => {
   let fail = false;
   const vault = new Vault(dir, step => { if (fail && step.endsWith(':directory-sync')) throw new Error('sync failed'); });
   vault.set('openai', key, true); fail = true;
   const replacement = 'sk-synthetic_replacement_never_real';
-  expect(() => vault.set('openai', replacement, persist)).not.toThrow();
+  expect(() => vault.set('openai', replacement, true)).not.toThrow();
   expect(vault.get('openai')).toBe(replacement); expect(vault.durabilityWarning).toBe(true);
-  const restored = new Vault(dir); expect(restored.has('openai')).toBe(persist);
-  if (persist) expect(restored.get('openai')).toBe(replacement);
-  expect(() => vault.set('anthropic', key, true)).not.toThrow();
+  const restored = new Vault(dir); expect(restored.has('openai')).toBe(true);
+  expect(restored.get('openai')).toBe(replacement);
+  expect(() => vault.set('anthropic', 'sk-ant-synthetic_fixture_key_never_real', true)).not.toThrow();
   expect(vault.has('anthropic')).toBe(true); fail = false;
-  vault.set('anthropic', key, true); expect(vault.durabilityWarning).toBe(false);
-  expect(new Vault(dir).has('openai')).toBe(persist);
+  vault.set('anthropic', 'sk-ant-synthetic_fixture_key_never_real', true); expect(vault.durabilityWarning).toBe(false);
+  expect(new Vault(dir).has('openai')).toBe(true);
 });

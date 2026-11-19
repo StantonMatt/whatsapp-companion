@@ -60,6 +60,9 @@ export async function runTrayDesktop() {
   };
   try {
     let remote = await launch(directory);
+    const freshLocal = (await app.windows()).find(page => page.url().endsWith('/ui/index.html'));
+    expect((await freshLocal.evaluate(() => window.companion.status())).state.global.aiFeatures).toBe(false);
+    expect(await remote.locator('#companion-chat-settings').count()).toBe(0);
     expect(await app.evaluate(() => globalThis.notificationDialogs)).toEqual([]);
     expect(await remote.evaluate(() => Notification.permission)).toBe('denied');
     await app.evaluate(({ app }) => app.emit('second-instance', {}, [], process.cwd()));
