@@ -43,7 +43,7 @@ afterEach(() => { act(() => root.unmount()); host.remove(); vi.restoreAllMocks()
 test('bulk trash confirms, focuses Keep, deletes in one action and focuses the replacement tile', async () => {
   await click('Edit stickers'); await click('Select dog'); await click('Select bird');
   const ids = [status.state.stickers[0].id, status.state.stickers[2].id];
-  expect([...bar().children].map(e => e.textContent)).toEqual(['×', '2 selected', '', 'Groups ▾', '']);
+  expect([...bar().children].map(e => e.textContent)).toEqual(['×', '2 selected', 'Groups ▾', '']);
   await click('Delete 2 stickers'); expect(actions).not.toHaveBeenCalled(); expect(document.activeElement).toBe(button('Keep', bar()));
   expect(bar().getAttribute('aria-label')).toBe('Delete 2 stickers?');
   await click('Delete', bar()); expect(actions).toHaveBeenCalledExactlyOnceWith({ type: 'forgetStickers', ids });

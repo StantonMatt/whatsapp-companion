@@ -15,7 +15,7 @@ const a = '123@c.us', b = '456@c.us';
 const snap = (patch: Partial<Snapshot> = {}): Snapshot => ({ ...emptySnapshot, chatId: a, settingsId: a, name: 'A', revision: '1',
   ready: true, conversationOpen: true, focused: true, caretAtEnd: true, messages: [{ id: 'last', text: 'Hello', outgoing: false }], ...patch });
 function setup(generator = vi.fn<typeof generate>().mockResolvedValue('Reply')) {
-  const state = initialState(); state.global.suggestions = true; state.global.shareContext = true;
+  const state = initialState(); state.global.aiFeatures = true; state.global.suggestions = true; state.global.shareContext = true;
   const store = { state, update: (change: (state: State) => void) => change(state) } as Store;
   const commands: RemoteCommand[] = [];
   const changed = vi.fn(() => {});
@@ -1704,4 +1704,45 @@ test('a failed takeover save pauses immediately without retrying or publishing f
   assistant.activity(); expect(assistant.isRuntimePaused()).toBe(true); expect(changed).toHaveBeenCalledTimes(1);
   for (let i = 0; i < 20; i++) assistant.activity();
   expect(update).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledTimes(1); assistant.cancel(true);
+});
+
+
+test('AI off blocks explicit suggestion/refinement/retry, automatic generation, and observed style learning', async () => {
+  const { assistant, state, generator, commands } = setup(); state.global.aiFeatures = false;
+  state.global.style = 'conversation'; state.global.learnFromSent = true;
+  state.auto[a] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0 };
+  assistant.receive(snap({ messages: Array.from({ length: 8 }, (_, i) => ({ id: String(i), text: `This is my writing sample number ${i}.`, outgoing: true })) }));
+  for (const instruction of [undefined, 'Refine this draft']) await assistant.request(instruction);
+  await assistant.request(undefined, true); await assistant.request(undefined, false, { operation: 'retry' });
+  await vi.advanceTimersByTimeAsync(120000);
+  expect(generator).not.toHaveBeenCalled(); expect(state.profiles[a]).toBeUndefined();
+  expect(commands.some(c => ['suggestion', 'thinking', 'refining', 'autoSend'].includes(c.type))).toBe(false);
+  assistant.cancel(true);
+});
+test('switching off aborts detached and live requests and drops unaccepted completions', async () => {
+  let finish!: (text: string) => void;
+  const { assistant, state, generator, commands } = setup(vi.fn(() => new Promise<string>(resolve => { finish = resolve; })));
+  assistant.receive(snap()); await vi.advanceTimersByTimeAsync(1000);
+  const signal = generator.mock.calls[0][0].signal!;
+  setPreferences(state, 'global', { aiFeatures: false }); assistant.reconfigure();
+  expect(signal.aborted).toBe(true); expect(assistant.pending).toBeNull();
+  const boundary = commands.length; finish('Late completion'); await Promise.resolve(); await vi.advanceTimersByTimeAsync(1000);
+  expect(commands.slice(boundary).some(c => c.type === 'suggestion')).toBe(false);
+  setPreferences(state, 'global', { aiFeatures: true }); assistant.reconfigure(); assistant.receive(snap(), true);
+  expect(state.global.suggestions).toBe(true); expect(state.global.shareContext).toBe(true);
+  assistant.cancel(true);
+});
+test('switching off cancels a scheduled automatic reply and switching on leaves its rule paused', async () => {
+  const { assistant, state, commands } = setup();
+  state.global.suggestions = false;
+  state.auto[a] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0, delaySeconds: 15 };
+  assistant.receive(snap()); assistant.receive(snap({ messages: [{ id: 'new-ai-switch', outgoing: false, text: 'A new message' }] }));
+  await assistant.request(undefined, true);
+  expect(assistant.pending).not.toBeNull();
+  setPreferences(state, 'global', { aiFeatures: false }); assistant.reconfigure();
+  expect(assistant.pending).toBeNull(); expect(state.auto[a].enabled).toBe(true); expect(state.auto[a].paused).toBe(true);
+  setPreferences(state, 'global', { aiFeatures: true }); assistant.reconfigure();
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(state.auto[a].paused).toBe(true); expect(commands.some(c => c.type === 'autoSend')).toBe(false);
+  expect(assistant.authorizeAutomatic('untrusted')).toBe(false); assistant.cancel(true);
 });

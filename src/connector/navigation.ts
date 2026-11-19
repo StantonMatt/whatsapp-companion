@@ -15,6 +15,7 @@ export class Navigation {
   readonly chatHost: HTMLElement;
   private buttons: Record<'settings' | 'stickers' | 'chat', HTMLButtonElement>;
   private cancel: HTMLButtonElement;
+  private aiFeatures = false;
   private lastGeometry = '';
   constructor(private doc: Document, private emit: (event: RemoteEvent) => void) {
     this.host = doc.createElement('div'); this.host.id = 'companion-navigation';
@@ -30,7 +31,7 @@ export class Navigation {
       b.addEventListener('click', e => { if (e.isTrusted) { e.stopPropagation(); this.emit({ type: 'navigate', panel: key }); } });
       (key === 'chat' ? chatRoot : railRoot).append(b); if (key !== 'chat') b.className = 'rail'; return b;
     };
-    this.buttons = { settings: button('settings', 'AI settings'), stickers: button('stickers', 'Sticker library'), chat: button('chat', 'Chat AI settings') };
+    this.buttons = { settings: button('settings', 'Settings'), stickers: button('stickers', 'Sticker library'), chat: button('chat', 'Chat AI settings') };
     this.cancel = doc.createElement('button'); this.cancel.className = 'cancel'; this.cancel.textContent = 'Cancel automatic reply'; this.cancel.hidden = true;
     this.cancel.addEventListener('click', e => { if (e.isTrusted) this.emit({ type: 'cancelAuto' }); }); railRoot.append(this.cancel);
     doc.documentElement.append(this.host);
@@ -39,9 +40,11 @@ export class Navigation {
   private nativeNavigation = (event: Event) => {
     if (event.isTrusted && event.target instanceof Element && event.target.closest('[data-navbar-item]')) this.emit({ type: 'navigate', panel: null });
   };
-  update(panel: Panel, pending: boolean) {
+  update(panel: Panel, pending: boolean, aiFeatures = false) {
+    this.aiFeatures = aiFeatures;
+    if (!aiFeatures) this.chatHost.remove();
     for (const [key, b] of Object.entries(this.buttons)) b.setAttribute('aria-pressed', String(key === panel));
-    this.cancel.hidden = !pending;
+    this.cancel.hidden = !aiFeatures || !pending;
   }
   refresh(ready: boolean) {
     const items = [...this.doc.querySelectorAll<HTMLElement>('[data-navbar-item]')].map(element => element.getBoundingClientRect()).filter(rect => rect.width > 0);
@@ -53,7 +56,7 @@ export class Navigation {
     const dark = !darkColor || (darkColor[3] === 0) || darkColor.slice(0, 3).reduce((a, b) => a + b, 0) < 380;
     const editor = this.doc.querySelector('#main footer')?.getBoundingClientRect();
     // Finish all geometry/style reads before mounting controls or writing styles.
-    if (header && ready) {
+    if (header && ready && this.aiFeatures) {
       if (this.chatHost.parentElement !== header) header.insertBefore(this.chatHost, header.lastElementChild);
     } else this.chatHost.remove();
     this.theme = dark ? 'dark' : 'light';

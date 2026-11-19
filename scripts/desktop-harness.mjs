@@ -1,4 +1,4 @@
-import { _electron as electron } from '@playwright/test';
+import { _electron as electron, expect } from '@playwright/test';
 import { cp, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -48,4 +48,17 @@ export async function preserveDiagnostics(dataDir, label) {
     await cp(join(dataDir, 'diagnostics'), target, { recursive: true });
     console.error(`Saved desktop diagnostics: ${target}`);
   } catch (error) { if (error.code !== 'ENOENT') console.error(`Could not save ${label} diagnostics: ${error.message}`); }
+}
+
+
+// Opt in through the same toggle as a fresh real profile. Fixture status is local.
+export async function enableFixtureAi(local) {
+  const status = await local.evaluate(() => window.companion.status());
+  if (status.state.global.aiFeatures) return;
+  await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'settings' }));
+  await expect(local.getByLabel('AI features', { exact: true })).not.toBeChecked();
+  await expect(local.getByRole('button', { name: 'Replies', exact: true })).toHaveCount(0);
+  await local.getByLabel('AI features', { exact: true }).check();
+  await expect(local.getByRole('button', { name: 'Replies', exact: true })).toBeVisible();
+  await local.getByLabel('Close panel').click();
 }

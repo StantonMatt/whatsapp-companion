@@ -10,6 +10,7 @@ export type ModelsResult = { models: ModelOption[]; error?: string; cancelled?: 
 export const reasoningEffortSchema = z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 export const preferencesSchema = z.object({
+  aiFeatures: z.boolean().default(false),
   directStickerSend: z.boolean().default(false),
   automaticStickerTags: z.boolean().default(false),
   suggestions: z.boolean(),
@@ -32,7 +33,7 @@ const globalPreferencesSchema = preferencesSchema.extend({
 });
 // Defaults migrate complete global preferences; sparse patches/overrides must
 // leave omitted fields alone (Zod's partial() preserves field defaults).
-const preferencesPatchSchema = preferencesSchema.extend({ directStickerSend: z.boolean(), automaticStickerTags: z.boolean() }).partial();
+const preferencesPatchSchema = preferencesSchema.extend({ aiFeatures: z.boolean(), directStickerSend: z.boolean(), automaticStickerTags: z.boolean() }).partial();
 export type ChatKind = 'direct' | 'group' | 'unknown';
 export const chatIdSchema = z.string().regex(/^[\d-]+@(c\.us|s\.whatsapp\.net|g\.us|lid)$/);
 export const settingsIdSchema = z.union([chatIdSchema, z.string().regex(/^local:[0-9a-f-]{36}$/)]);
@@ -55,7 +56,7 @@ export const autoPermissionSchema = z.enum(['enable', 'disable', 'pause', 'resum
 export type AutoPermission = z.infer<typeof autoPermissionSchema>;
 export const defaultAuto: AutoRules = { enabled: false, startHour: 9, endHour: 18, dailyLimit: 5, cooldownMinutes: 10, delaySeconds: 30, paused: false };
 export const defaults: Preferences = {
-  directStickerSend: false, automaticStickerTags: false, suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
+  aiFeatures: false, directStickerSend: false, automaticStickerTags: false, suggestions: false, tone: 'natural', length: 'brief', language: 'Match the conversation',
   emoji: 'match', instructions: '', style: 'off', learnFromSent: false, shareContext: false
 };
 const attachmentSchema = z.enum(['image', 'sticker', 'audio', 'video', 'document']);
@@ -175,14 +176,16 @@ export type ControlsState = Omit<State, 'conversations' | 'ledger' | 'forgottenS
 export type StatusUpdate = Partial<Omit<Status, 'state' | 'sequence' | 'stickerShield'>> & { sequence: number; state?: Partial<ControlsState>; stickerShield?: Omit<StickerShield, 'image'> & { image?: string } | null; stickerTagChanges?: { upsert: Record<string, StickerTagItem>; removed: string[] }; stickerChanges?: { upsert: Omit<Sticker, 'fingerprint'>[]; removed: string[] } };
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()
-    .refine(action => action.scope === 'global' || (action.patch.directStickerSend === undefined && action.patch.automaticStickerTags === undefined)),
+    .refine(action => action.scope === 'global' || (action.patch.aiFeatures === undefined && action.patch.directStickerSend === undefined && action.patch.automaticStickerTags === undefined)),
   z.object({ type: z.literal('resetPreferences'), scope: scopeSchema }).strict(),
   z.object({ type: z.literal('resetStylePreferences'), scope: settingsIdSchema }).strict(),
   z.object({ type: z.literal('provider'), provider: providerSchema, model: modelIdSchema }).strict(),
   z.object({ type: z.literal('reasoning'), provider: providerSchema, model: modelIdSchema, effort: reasoningEffortSchema }).strict(),
-  z.object({ type: z.literal('key'), provider: providerSchema, persist: z.boolean() }).strict(),
+  z.object({ type: z.literal('key'), provider: providerSchema, key: z.string().min(1).max(503) }).strict(),
   z.object({ type: z.literal('deleteKey'), provider: providerSchema }).strict(),
-  z.object({ type: z.literal('testProvider') }).strict(),
+  z.object({ type: z.literal('testProvider'), provider: providerSchema }).strict(),
+  z.object({ type: z.literal('getKey'), provider: providerSchema }).strict(),
+  z.object({ type: z.literal('checkSecureStorage') }).strict(),
   z.object({ type: z.literal('autoRules'), chatId: chatIdSchema, patch: autoPatchSchema }).strict(),
   z.object({ type: z.literal('autoPermission'), chatId: chatIdSchema, permission: autoPermissionSchema }).strict(),
   z.object({ type: z.literal('profile'), scope: z.union([z.literal('general'), settingsIdSchema]), description: z.string().max(2000) }).strict(),
@@ -210,4 +213,11 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('cancelAuto') }).strict(),
 ]);
 export type Action = z.infer<typeof actionSchema>;
-export interface DesktopAPI { subscribePanelNavigation(fn: (panel: Panel) => void): () => void; shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider, refresh?: boolean): Promise<ModelsResult>; action(action: Action): Promise<{ ok: boolean; error?: string }>; subscribe(fn: (status: StatusUpdate) => void): () => void }
+export type ActionResult = { ok: boolean; error?: string; message?: string };
+export interface DesktopAPI { subscribePanelNavigation(fn: (panel: Panel) => void): () => void; shieldReady(nonce: string, reducedMotion: boolean): Promise<void>; shieldFaded(nonce: string): Promise<void>; status(): Promise<Status>; models(provider: Provider, refresh?: boolean): Promise<ModelsResult>; action(action: Action): Promise<ActionResult>; subscribe(fn: (status: StatusUpdate) => void): () => void }
+
+export function apiKeyError(provider: Provider, key: string): string | undefined {
+  if (!/^sk-[A-Za-z0-9_-]{16,500}$/.test(key)) return 'This does not look like a valid API key.';
+  if (provider === 'openai' && key.startsWith('sk-ant-')) return 'This looks like an Anthropic key.';
+  if (provider === 'anthropic' && !key.startsWith('sk-ant-')) return 'This looks like an OpenAI key.';
+}

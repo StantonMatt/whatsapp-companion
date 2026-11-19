@@ -24,7 +24,7 @@ export function TagStrip({ status, act, settings, retry }: { status: Status; act
         : progress.state === 'stopped' ? <>Stopped · {progress.tagged} of {progress.total} tagged{progress.failed ? ` · ${progress.failed} failed` : ''}</>
         : <>{progress.tagged} tagged · {progress.failed} failed</>}</span>
       {running && progress.failed > 0 && link('Try again', retry)}
-      {running ? link('Stop', () => void act({ type: 'stopStickerTags' })) : blocked && tagSettingsError(progress.error) ? link('AI settings', settings)
+      {running ? link('Stop', () => void act({ type: 'stopStickerTags' })) : blocked && tagSettingsError(progress.error) ? link('Settings', settings)
         : (blocked || progress.failed > 0) && link('Try again', retry)}
       {!running && progress.state !== 'done' && <button className="icon-close" aria-label="Dismiss tagging result" onClick={() => void act({ type: 'dismissStickerTags' })}>×</button>}
     </p>

@@ -79,11 +79,12 @@ export class StickerTagQueue {
   private closed = false;
   private halted = false;
   constructor(private readonly deps: Dependencies) {
-    this.known = new Set(deps.state().stickers.map(s => s.id)); this.enabled = deps.state().global.automaticStickerTags;
+    this.known = new Set(deps.state().stickers.map(s => s.id)); this.enabled = deps.state().global.aiFeatures && deps.state().global.automaticStickerTags;
   }
   observe() {
     const state = this.deps.state(), ids = new Set(state.stickers.map(s => s.id));
-    const enabled = state.global.automaticStickerTags;
+    const enabled = state.global.aiFeatures && state.global.automaticStickerTags;
+    if (!state.global.aiFeatures) this.stop();
     if (enabled !== this.enabled) {
       this.enabled = enabled; this.pause = null;
       // Capture the library at the transition: enabling never queues old entries.
@@ -110,7 +111,7 @@ export class StickerTagQueue {
   }
   private eligible(id: string, nonce?: string, job?: Job, readmit = false) {
     const sticker = this.deps.state().stickers.find(s => s.id === id), active = this.active.get(id);
-    return !!sticker && (!!nonce || !sticker.searchTerms.trim()) && (readmit || !this.withdrawn.has(id))
+    return this.deps.state().global.aiFeatures && !!sticker && (!!nonce || !sticker.searchTerms.trim()) && (readmit || !this.withdrawn.has(id))
       && !job?.succeeded && !job?.controller.signal.aborted
       // Replacements may wait behind aborted/failed jobs; pump never dispatches
       // them until the old job releases its active concurrency slot.
@@ -118,7 +119,7 @@ export class StickerTagQueue {
       && !this.pending.some(other => other.id === id && other !== job);
   }
   private add(ids: string[], automatic: boolean, suggestion?: { nonce: string; terms: string }, readmit = false) {
-    if (this.closed) return;
+    if (this.closed || !this.deps.state().global.aiFeatures) return;
     const state = this.deps.state();
     const jobs = [...new Set(ids)].filter(id => this.eligible(id, suggestion?.nonce, undefined, readmit));
     if (!jobs.length) return;

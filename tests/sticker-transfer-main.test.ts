@@ -97,6 +97,7 @@ vi.mock('../src/main/store', () => ({ Store: class {
   durabilityWarning = false;
   state = { ...initialState(), stickers: [{ id: 'a'.repeat(64), groups: [], kind: 'static' as const, size: 12, firstSeen: 0, lastSeen: 0, searchTerms: '' }] };
   constructor() { mocks.store = this; }
+  initializeAiFeatures = vi.fn();
   collectGarbage = vi.fn();
   readSticker = (id: string) => { mocks.reads.push(id); if (mocks.readFailure) throw new Error('Sticker file is missing or damaged.'); return { image: 'data:image/webp;base64,UklGRg==', bytes: Buffer.alloc(12), animated: mocks.animated }; };
   readStickerBytes = async (id: string) => { const { image: _image, ...verified } = this.readSticker(id); return verified; };
@@ -1123,9 +1124,9 @@ test('clicking the active sticker rail requests a guarded panel close', async ()
   expect(status().panel).toBe('stickers');
 });
 
-test.each(['AI settings', 'Chat AI settings'])('%s application menu navigation waits for the draft guard', label => {
+test.each(['Settings', 'Chat AI settings'])('%s application menu navigation waits for the draft guard', label => {
   controls().send.mockClear();
   mocks.menu[0].submenu.find((item: any) => item.label === label).click();
-  expect(controls().send).toHaveBeenCalledWith('companion:panel-navigation', label === 'AI settings' ? 'settings' : 'chat');
+  expect(controls().send).toHaveBeenCalledWith('companion:panel-navigation', label === 'Settings' ? 'settings' : 'chat');
   expect(status().panel).toBe('stickers');
 });

@@ -17,7 +17,7 @@ const publish = (fields: Partial<Status>) => act(() => { status = { ...status, .
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); actions.mockReset().mockResolvedValue(true); HTMLElement.prototype.scrollIntoView = vi.fn(); HTMLElement.prototype.scrollTo = vi.fn();
   host = document.createElement('div'); host.className = 'panel'; document.body.append(host); root = createRoot(host);
-  status = { sequence: 1, panel: 'stickers', runtimePaused: false, state: initialState(), chat: { chatId: null, name: '', kind: 'direct', ready: false, canSendSticker: false }, keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: '', pending: null };
+  status = { sequence: 1, panel: 'stickers', runtimePaused: false, state: { ...initialState(), global: { ...initialState().global, aiFeatures: true } }, chat: { chatId: null, name: '', kind: 'direct', ready: false, canSendSticker: false }, keys: { openai: false, anthropic: false }, secureStorage: false, fixture: true, message: '', pending: null };
   status.state.stickerGroups = [{ id: group, name: 'Favorites' }]; status.state.stickers = Array.from({ length: 4 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), searchTerms: i === 3 ? 'curated' : '', groups: [], kind: 'static', size: 12, firstSeen: 1, lastSeen: 4 - i })); act(draw);
 });
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
@@ -74,7 +74,7 @@ test('pending suggestion Escape cancels, progress Stop and failures retry/settin
   expect(host.textContent).toContain('Tagging 2 of 3'); await click('Stop'); expect(actions).toHaveBeenLastCalledWith({ type: 'stopStickerTags' });
   publish({ stickerTagging: { state: 'partial', total: 3, completed: 3, tagged: 2, failed: 1, provider: 'openai' }, stickerTags: { [id]: { state: 'failed', error: 'failed' } } });
   await click('Try again', host.querySelector('.tag-strip')!); expect(actions).toHaveBeenLastCalledWith({ type: 'retryStickerTags', excludedIds: [] });
-  publish({ stickerTagging: { state: 'blocked', total: 3, completed: 0, tagged: 0, failed: 0, error: 'no-vision', provider: 'openai' } }); expect(host.textContent).toContain('The selected model can’t read images'); expect(button('AI settings', host.querySelector('.tag-strip')!)).toBeDefined();
+  publish({ stickerTagging: { state: 'blocked', total: 3, completed: 0, tagged: 0, failed: 0, error: 'no-vision', provider: 'openai' } }); expect(host.textContent).toContain('The selected model can’t read images'); expect(button('Settings', host.querySelector('.tag-strip')!)).toBeDefined();
 });
 test('automatic setting starts off, names configured provider and shows pause reason', async () => {
   act(() => root.render(<Settings status={{ ...status, panel: 'settings' }} act={actions} close={() => {}}/>));
@@ -359,4 +359,24 @@ test('leaving settings preserves the queued Off click after an outstanding On re
   act(() => root.render(<div/>)); await act(async () => pending[0](true));
   expect(actions).toHaveBeenLastCalledWith({ type: 'preferences', scope: 'global', patch: { automaticStickerTags: false } });
   await act(async () => pending[1](true));
+});
+
+test('AI off hides every tagging entry point and keeps manual search-term editing and groups', async () => {
+  expect(host.querySelectorAll('.sticker-art.untagged')).toHaveLength(3);
+  publish({ state: { ...status.state, global: { ...status.state.global, aiFeatures: false } } });
+  expect(host.querySelectorAll('.sticker-art.untagged')).toHaveLength(0);
+  publish({ state: { ...status.state, global: { ...status.state.global, aiFeatures: true } } });
+  expect(host.querySelectorAll('.sticker-art.untagged')).toHaveLength(3);
+  await click('Edit stickers');
+  const id = status.state.stickers[0].id;
+  await act(async () => host.querySelector<HTMLButtonElement>(`[data-sticker="${id}"] .sticker-art`)!.click());
+  await fill('manual unsaved search terms');
+  publish({ state: { ...status.state, global: { ...status.state.global, aiFeatures: false } }, stickerTags: { [id]: { state: 'failed', error: 'no-key' } }, stickerTagging: { state: 'blocked', total: 1, completed: 0, tagged: 0, failed: 1, provider: 'openai', error: 'no-key' } });
+  expect(host.querySelector('.detail-ai')).toBeNull(); expect(host.querySelector('.tag-ai')).toBeNull(); expect(host.querySelector('.tag-untagged')).toBeNull(); expect(host.querySelector('.tag-strip')).toBeNull();
+  expect(host.textContent).not.toContain('Add an OpenAI API key');
+  expect(host.querySelectorAll('.sticker-art.untagged')).toHaveLength(0);
+  expect(host.querySelector('textarea')?.value).toBe('manual unsaved search terms');
+  expect(button('Favorites')).toBeDefined(); expect(button('Save')).toBeDefined();
+  publish({ state: { ...status.state, global: { ...status.state.global, aiFeatures: true } } });
+  expect(host.querySelectorAll('.sticker-art.untagged')).toHaveLength(3);
 });

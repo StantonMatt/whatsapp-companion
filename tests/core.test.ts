@@ -18,6 +18,8 @@ import type { Vault } from '../src/main/vault';
 import type { RemoteCommand } from '../src/shared/connector';
 import { StatusCache, statusUpdate } from '../src/core/status';
 
+function enableAi(store: Store) { store.state.global.aiFeatures = true; return store; }
+
 test('larger animated stickers persist as metadata without inline images', () => {
   const bytes = Buffer.alloc(966752); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WEBP', 8);
   bytes.write('ANIM', 12); bytes.writeUInt32LE(bytes.length - 20, 16);
@@ -58,7 +60,7 @@ describe('settings inheritance and authorization', () => {
     expect(resolveSettings(state, 'direct', chat).values.tone).toBe('professional');
   });
   test('defaults forbid context sharing, learning and automatic replies', () => {
-    const state = initialState(); expect(state.global).toMatchObject({ suggestions: false, shareContext: false, style: 'off', learnFromSent: false });
+    const state = initialState(); expect(state.global).toMatchObject({ aiFeatures: false, suggestions: false, shareContext: false, style: 'off', learnFromSent: false });
     expect(state.auto).toEqual({}); expect(defaultAuto.enabled).toBe(false);
   });
   test('unidentified chats use global settings without guessing a direct/group scope', () => {
@@ -126,7 +128,7 @@ describe('stale suggestions', () => {
     let finish!: (text: string) => void;
     const generator = vi.fn<typeof generate>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue('Current effort reply');
     const commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     assistant.receive(snap()); const pending = assistant.request();
     expect(generator.mock.calls[0][0].effort).toBe('none');
     store.update(s => setReasoning(s, 'openai', 'gpt-6-luna', 'high')); assistant.reconfigure();
@@ -142,7 +144,7 @@ describe('stale suggestions', () => {
   test.each(['image', 'document'] as const)('%s-only context starts a suggestion after stable-context debounce, marks unseen contents and cannot trigger automatic sending', async attachment => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; s.auto[chat] = { ...defaultAuto, enabled: true, startHour: 0, endHour: 0 }; });
     const generator = vi.fn(async () => 'Thanks for sending that.'), commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     const image = snap({ focused: false, caretAtEnd: false, messages: [{ id: 'media', text: '', outgoing: false, attachment }] });
     assistant.receive(image); await vi.advanceTimersByTimeAsync(1000);
     expect(generator).toHaveBeenCalledOnce(); expect(commands.some(c => c.type === 'suggestion')).toBe(true);
@@ -156,7 +158,7 @@ describe('stale suggestions', () => {
   });
   test.each([true, false, null])('empty composer automatically suggests only for an incoming last author (%s), without granting sending permission', async outgoing => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; });
-    const commands: RemoteCommand[] = [], assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
+    const commands: RemoteCommand[] = [], assistant = new Assistant(enableAi(store), {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
     assistant.receive(snap({ focused: true, messages: [{ id: 'last', text: 'I will let you know.', outgoing }] }));
     await vi.advanceTimersByTimeAsync(1500);
     expect(commands.some(c => c.type === 'suggestion')).toBe(outgoing === false);
@@ -168,7 +170,7 @@ describe('stale suggestions', () => {
   test('unidentified live chats can suggest with global context but cannot learn or arm per-chat sending', async () => {
     const store = new Store(directory()); store.update(s => { s.global.shareContext = true; s.global.style = 'conversation'; s.global.learnFromSent = true; s.profiles[chat] = { description: 'PRIVATE PROFILE', samples: 5, updatedAt: 1, source: 'edited' }; });
     const generator = vi.fn(async () => 'A suggestion'), commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     assistant.receive(snap({ chatId: null, kind: 'unknown', messages: [{ id: 'ABC123456', text: 'Synthetic question', outgoing: null }] }));
     await assistant.request(); expect(commands.some(c => c.type === 'suggestion')).toBe(true);
     expect(JSON.stringify(generator.mock.calls)).not.toContain('PRIVATE PROFILE');
@@ -197,7 +199,7 @@ describe('stale suggestions', () => {
     expect(snapshotKey({ ...original, stickerPreparation: undefined })).toBe(snapshotKey(original));
     expect(suggestionKey(assigned)).toBe(suggestionKey(original));
     const changed = vi.fn(), store = new Store(directory());
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, changed, true);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, changed, true);
     assistant.receive(original); changed.mockClear();
     assistant.receive(assigned);
     expect(assistant.snapshot.stickerPreparation).toBe('maker-1');
@@ -208,13 +210,13 @@ describe('stale suggestions', () => {
   });
   test.each([['Thank', 's!'], ['Thanks', ' again!']])('preserves a provider suffix after %s', async (draft, suffix) => {
     const store = new Store(directory()), commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, async () => suffix);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, async () => suffix);
     assistant.receive(snap({ draft, focused: true })); await assistant.request();
     expect(commands.find(c => c.type === 'suggestion')).toMatchObject({ text: suffix }); assistant.cancel();
   });
   test('dismissal survives an activity snapshot without re-requesting the same context', async () => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; });
-    const commands: RemoteCommand[] = [], assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
+    const commands: RemoteCommand[] = [], assistant = new Assistant(enableAi(store), {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
     assistant.receive(snap({ draft: 'Hello', focused: true })); await vi.advanceTimersByTimeAsync(1500);
     const count = commands.filter(c => c.type === 'suggestion').length;
     assistant.dismiss(); assistant.receive(snap({ draft: 'Hello', focused: true, activity: 1 })); await vi.advanceTimersByTimeAsync(3000);
@@ -224,7 +226,7 @@ describe('stale suggestions', () => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; });
     let finish!: (text: string) => void;
     const generator = vi.fn((_request: Parameters<typeof generate>[0]) => new Promise<string>(resolve => { finish = resolve; })), commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     assistant.receive(snap({ focused: false, caretAtEnd: false })); await vi.advanceTimersByTimeAsync(1000);
     expect(generator).toHaveBeenCalledOnce(); const before = commands.length;
     assistant.activity(); assistant.receive(snap({ focused: true, activity: 1 }));
@@ -239,7 +241,7 @@ describe('stale suggestions', () => {
     const store = new Store(directory()); store.update(s => { s.global.shareContext = true; });
     let finish!: (text: string) => void;
     const generator = vi.fn((_request: Parameters<typeof generate>[0]) => new Promise<string>(resolve => { finish = resolve; })), commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     assistant.receive(snap()); const pending = assistant.request(); assistant.activity(true);
     finish('Stale text'); await pending;
     expect(commands.some(c => c.type === 'suggestion')).toBe(false); assistant.cancel();
@@ -247,7 +249,7 @@ describe('stale suggestions', () => {
   test('mid-draft edits do not call the provider; returning to the end enables suggestions', async () => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; });
     const generator = vi.fn(async () => ' suffix'), commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     assistant.receive(snap({ draft: 'Editing in the middle', focused: true, caretAtEnd: false }));
     await vi.advanceTimersByTimeAsync(2000); await assistant.request(); expect(generator).not.toHaveBeenCalled();
     expect(assistant.message).not.toContain('Tab to accept');
@@ -257,20 +259,20 @@ describe('stale suggestions', () => {
   });
   test('mention-bearing drafts never reach a provider for refinement', async () => {
     const generator = vi.fn(async () => '@Alice'), store = new Store(directory());
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, false, generator);
     assistant.receive(snap({ draft: '@Alice', draftIssue: 'unsupported' })); await assistant.request('Shorter');
     expect(generator).not.toHaveBeenCalled(); expect(assistant.message).toContain('cannot be preserved'); assistant.cancel();
   });
   test('manual empty-composer requests explain the context opt-in beside the composer', async () => {
     const generator = vi.fn(async () => 'unused'), commands: RemoteCommand[] = [], store = new Store(directory());
-    const assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     assistant.receive(snap()); await assistant.request();
     expect(generator).not.toHaveBeenCalled();
-    expect(commands).toContainEqual({ type: 'notice', text: expect.stringContaining('AI settings → Replies') }); assistant.cancel();
+    expect(commands).toContainEqual({ type: 'notice', text: expect.stringContaining('Settings → Replies') }); assistant.cancel();
   });
   test('oversized drafts are explained and never passed to a provider for refinement', async () => {
     const generator = vi.fn(async () => 'replacement'), store = new Store(directory());
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, false, generator);
     assistant.receive(snap({ draft: 'x'.repeat(8000), draftIssue: 'too-long' })); await assistant.request('Shorter');
     expect(generator).not.toHaveBeenCalled(); expect(assistant.message).toContain('8,000'); assistant.cancel();
   });
@@ -384,7 +386,7 @@ describe('bounded automatic replies', () => {
   test.each(['takeover', 'pause', 'failed-pause'])('rule edits preserve %s until explicit resume', async reason => {
     vi.useFakeTimers();
     const store = new Store(directory()); store.update(s => { s.global.shareContext = true; });
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true);
     assistant.receive(snap()); assistant.changeAutoPermission(chat, 'enable');
     if (reason === 'failed-pause') vi.spyOn(store, 'update').mockImplementationOnce(() => { throw new Error('disk full'); });
     if (reason === 'pause') assistant.changeAutoPermission(chat, 'pause'); else assistant.activity();
@@ -404,7 +406,7 @@ describe('bounded automatic replies', () => {
   test('rule patches cannot carry send permissions, and edits cannot enable a disabled chat', () => {
     expect(actionSchema.safeParse({ type: 'autoRules', chatId: chat, patch: { enabled: true } }).success).toBe(false);
     expect(actionSchema.safeParse({ type: 'autoRules', chatId: chat, patch: { paused: false } }).success).toBe(false);
-    const store = new Store(directory()), assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
+    const store = new Store(directory()), assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true);
     assistant.receive(snap()); assistant.updateAutoRules(chat, { dailyLimit: 3 });
     expect(store.state.auto[chat].enabled).toBe(false);
     expect(() => assistant.changeAutoPermission(chat, 'resume')).toThrow('Enable');
@@ -414,7 +416,7 @@ describe('bounded automatic replies', () => {
     assistant.cancel();
   });
   test('a failed explicit resume never clears the runtime safety pause', () => {
-    const store = new Store(directory()), assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
+    const store = new Store(directory()), assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true);
     assistant.receive(snap()); assistant.changeAutoPermission(chat, 'enable'); assistant.activity();
     vi.spyOn(store, 'update').mockImplementationOnce(() => { throw new Error('disk full'); });
     expect(() => assistant.changeAutoPermission(chat, 'resume')).toThrow('disk full');
@@ -424,7 +426,7 @@ describe('bounded automatic replies', () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const store = new Store(directory()); store.update(s => { s.auto[chat] = { ...rules, delaySeconds: 15 }; s.global.shareContext = true; });
     const commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
     assistant.receive(snap()); await vi.advanceTimersByTimeAsync(20000);
     expect(commands.some(c => c.type === 'autoSend')).toBe(false);
     assistant.receive(snap({ messages: [{ id: 'b', text: 'A new message', outgoing: false }] }));
@@ -441,7 +443,7 @@ describe('bounded automatic replies', () => {
   test.each(['pause', 'takeover', 'expired', 'removed-reservation'])('queued sends must revalidate in main after %s', async reason => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const store = new Store(directory()); store.update(s => { s.auto[chat] = { ...rules, delaySeconds: 15 }; s.global.shareContext = true; });
-    const commands: RemoteCommand[] = [], assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
+    const commands: RemoteCommand[] = [], assistant = new Assistant(enableAi(store), {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
     assistant.receive(snap()); assistant.receive(snap({ messages: [{ id: 'b', text: 'New arrival', outgoing: false }] }));
     await vi.advanceTimersByTimeAsync(16200);
     const command = commands.find(c => c.type === 'autoSend')!; expect(command).toBeDefined();
@@ -455,14 +457,14 @@ describe('bounded automatic replies', () => {
   test('takeover during countdown prevents dispatch', async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const store = new Store(directory()); store.update(s => { s.auto[chat] = rules; s.global.shareContext = true; });
-    const commands: RemoteCommand[] = [], assistant = new Assistant(store, {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
+    const commands: RemoteCommand[] = [], assistant = new Assistant(enableAi(store), {} as Vault, { send: c => commands.push(c), focus() {} }, () => {}, true);
     assistant.receive(snap()); assistant.receive(snap({ messages: [{ id: 'b', text: 'new', outgoing: false }] }));
     await vi.advanceTimersByTimeAsync(1500); assistant.activity(); await vi.advanceTimersByTimeAsync(60000);
     expect(commands.some(c => c.type === 'autoSend')).toBe(false); expect(store.state.ledger[chat]).toBeUndefined(); assistant.cancel();
   });
   test.each(['text', 'viewport'])('reconsiders a fresh message after delayed %s readiness', async stage => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.auto[chat] = { ...rules, startHour: 0, endHour: 0 }; s.global.shareContext = true; });
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true);
     assistant.receive(snap());
     assistant.receive(snap({ messages: [{ id: 'b', text: stage === 'text' ? '' : 'new', outgoing: false }], atBottom: stage !== 'viewport' }));
     await vi.advanceTimersByTimeAsync(1500); expect(assistant.pending).toBeNull();
@@ -471,14 +473,14 @@ describe('bounded automatic replies', () => {
   });
   test('a message that becomes ready more than a minute later is not treated as fresh', async () => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.auto[chat] = { ...rules, startHour: 0, endHour: 0 }; s.global.shareContext = true; });
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true);
     assistant.receive(snap()); assistant.receive(snap({ messages: [{ id: 'b', text: '', outgoing: false }] }));
     await vi.advanceTimersByTimeAsync(61000); assistant.receive(snap({ messages: [{ id: 'b', text: 'Late', outgoing: false }] }));
     await vi.advanceTimersByTimeAsync(1500); expect(assistant.pending).toBeNull(); assistant.cancel();
   });
   test('removing and restoring loaded messages never makes seen history a new arrival', async () => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.auto[chat] = { ...rules, startHour: 0, endHour: 0 }; s.global.shareContext = true; });
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true);
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true);
     const older = { id: 'older', text: 'Older incoming', outgoing: false }, latest = { id: 'latest', text: 'Latest incoming', outgoing: false };
     assistant.receive(snap({ messages: [older, latest] })); assistant.receive(snap({ messages: [older] }));
     await vi.advanceTimersByTimeAsync(2000); expect(assistant.pending).toBeNull();
@@ -488,7 +490,7 @@ describe('bounded automatic replies', () => {
   });
   test('takeover remains paused through a failed disk write until explicit resume', async () => {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.auto[chat] = { ...rules, startHour: 0, endHour: 0 }; s.global.shareContext = true; });
-    const assistant = new Assistant(store, {} as Vault, { send() {}, focus() {} }, () => {}, true); assistant.receive(snap());
+    const assistant = new Assistant(enableAi(store), {} as Vault, { send() {}, focus() {} }, () => {}, true); assistant.receive(snap());
     const write = vi.spyOn(store, 'update'); write.mockImplementationOnce(() => { throw new Error('disk full'); });
     assistant.activity(); expect(assistant.isRuntimePaused()).toBe(true); expect(store.state.auto[chat].paused).toBe(false);
     assistant.receive(snap({ messages: [{ id: 'new', text: 'New arrival', outgoing: false }] })); await vi.advanceTimersByTimeAsync(3000); expect(assistant.pending).toBeNull();
@@ -553,7 +555,7 @@ describe('refinement source', () => {
     const store = new Store(directory()); store.update(s => { s.global.shareContext = true; });
     const commands: RemoteCommand[] = [];
     const generator = vi.fn<typeof generate>().mockResolvedValueOnce('An offered reply').mockResolvedValue('A refined reply');
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     const offered = () => commands.filter((c): c is Extract<RemoteCommand, { type: 'suggestion' }> => c.type === 'suggestion').at(-1)!;
     return { assistant, generator, commands, offered, store };
   }
@@ -609,7 +611,7 @@ describe('suggestion recovery', () => {
   function setup(generator: typeof generate) {
     vi.useFakeTimers(); const store = new Store(directory()); store.update(s => { s.global.suggestions = true; s.global.shareContext = true; });
     const commands: RemoteCommand[] = [];
-    const assistant = new Assistant(store, { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
+    const assistant = new Assistant(enableAi(store), { get: () => 'synthetic' } as unknown as Vault, { send: c => commands.push(c), focus() {} }, () => {}, false, generator);
     return { assistant, commands, store };
   }
   test('a transient failure recovers without changing the chat, draft or focus', async () => {
@@ -726,3 +728,28 @@ test('resetting chat style restores inheritance without erasing reply settings o
 });
 
 function legacyInitialState() { const { stickerGroups: _groups, ...state } = initialState(); return state; }
+
+
+test('AI and key actions are bounded, strict, and global only', () => {
+  const key = { type: 'key', provider: 'openai', key: 'sk-synthetic_fixture_key_never_real' };
+  expect(actionSchema.safeParse(key).success).toBe(true);
+  for (const invalid of [{ ...key, persist: true }, { ...key, key: 's'.repeat(504) }, { ...key, extra: true }, { type: 'key', provider: 'openai', persist: true }]) expect(actionSchema.safeParse(invalid).success).toBe(false);
+  for (const type of ['getKey', 'testProvider']) {
+    expect(actionSchema.safeParse({ type, provider: 'anthropic' }).success).toBe(true);
+    for (const invalid of [{ type }, { type, provider: 'invalid' }, { type, provider: 'openai', url: 'https://evil.invalid' }, { type, provider: 'openai', key: key.key }]) expect(actionSchema.safeParse(invalid).success).toBe(false);
+  }
+  expect(actionSchema.safeParse({ type: 'preferences', scope: '123@c.us', patch: { aiFeatures: true } }).success).toBe(false);
+  const state = initialState(); state.chats['123@c.us'] = { aiFeatures: true };
+  expect(resolveSettings(state, 'direct', '123@c.us').values.aiFeatures).toBe(false);
+  expect(() => setPreferences(state, '123@c.us', { aiFeatures: true })).toThrow();
+});
+test('connection checks for different providers run independently', async () => {
+  const finishes: (() => void)[] = [];
+  const generator = vi.fn(() => new Promise<string>(resolve => finishes.push(() => resolve('Connected'))));
+  const check = new ProviderCheck(generator);
+  const first = check.run({ provider: 'openai', model: 'saved-openai', key: 'synthetic' });
+  const second = check.run({ provider: 'anthropic', model: 'saved-anthropic', key: 'synthetic' });
+  expect(generator.mock.calls).toHaveLength(2);
+  finishes[0](); finishes[1]();
+  expect(await first).toContain('Connected'); expect(await second).toContain('Connected');
+});

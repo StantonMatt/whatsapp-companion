@@ -58,6 +58,7 @@ export function atomicWrite(path: string, text: string | Buffer, fault?: Storage
 }
 export class Store {
   state: State;
+  private aiFeaturesInitialized = false;
   readonly stickerFiles: StickerFiles;
   private path: string;
   private recoveryPath: string;
@@ -84,6 +85,7 @@ export class Store {
     // Invalid data is never silently overwritten with defaults. No GC on errors.
     if (loadedManifest) {
       const original = readFileSync(this.path, 'utf8'), raw: unknown = JSON.parse(original);
+      this.aiFeaturesInitialized = typeof (raw as { global?: { aiFeatures?: unknown } })?.global?.aiFeatures === 'boolean';
       if ((raw as { version?: unknown })?.version === 1) {
         const migrationStarted = performance.now();
         const legacy = legacyStateSchema.parse(raw);
@@ -113,6 +115,14 @@ export class Store {
     this.gcAllowed = loadedManifest;
     if (!options.deferGC) this.collectGarbage(options.timing);
     for (const rules of Object.values(this.state.auto)) rules.paused = true;
+  }
+  // Called once at startup by main, where both manifest and vault are available.
+  initializeAiFeatures(hasSavedKey: boolean) {
+    if (this.aiFeaturesInitialized) return;
+    const next = structuredClone(this.state);
+    next.global.aiFeatures = hasSavedKey;
+    this.manifestDurabilityWarning = !atomicWrite(this.path, JSON.stringify(next), this.fault);
+    this.state = next; this.aiFeaturesInitialized = true;
   }
   private gcAllowed = false;
   collectGarbage(timing?: (phase: 'gc', durationMs: number) => void) {

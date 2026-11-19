@@ -2,7 +2,7 @@ import { expect } from '@playwright/test';
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { launchApp, closeApp, preserveDiagnostics } from './desktop-harness.mjs';
+import { launchApp, closeApp, preserveDiagnostics, enableFixtureAi } from './desktop-harness.mjs';
 
 export async function runStickerTaggingDesktop() {
   const scratch = process.env.COMPANION_TEST_SCRATCH ?? join(process.env.HOME, '.cache/agent-scratch/whatsapp-companion');
@@ -38,6 +38,7 @@ export async function runStickerTaggingDesktop() {
     }
     await writeFile(join(dir, 'companion.json'), JSON.stringify(state), { mode: 0o600 });
     local = await launch(true);
+    await enableFixtureAi(local);
     await local.evaluate(() => window.companion.action({ type: 'panel', panel: 'stickers' }));
     let panel = local.getByRole('complementary', { name: 'Sticker library', exact: true });
     await panel.getByRole('button', { name: 'Edit stickers', exact: true }).click();

@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission, type DirectStickerDisabledReason } from '../shared/model';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { apiKeyError, defaultAuto, type Status, type Scope, type Preferences, type Provider, type ModelsResult, type AutoPatch, type AutoPermission, type DirectStickerDisabledReason } from '../shared/model';
 import { resolveSettings } from '../core/settings';
 import { minimumStyleSamples, styleSamples } from '../core/style';
 import { reasoningLevels, savedEffort } from '../core/model-policy';
@@ -9,19 +9,33 @@ import { BackIcon, ChevronIcon } from './icons';
 
 export function Settings({ status, act, close, initialTab = null }: { status: Status; act: Act; close: () => void; initialTab?: 'Providers' | null }) {
   const [tab, setTab] = useState<string | null>(initialTab);
+  const back = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (tab) back.current?.focus(); }, [tab]);
+  const [aiPending, setAiPending] = useState<{ value: boolean; accepted: boolean } | null>(null);
+  const savedAi = status.state.global.aiFeatures, ai = aiPending?.value ?? savedAi;
+  useEffect(() => { if (aiPending?.accepted && aiPending.value === savedAi) setAiPending(null); }, [savedAi, aiPending]);
+  useEffect(() => { if (!ai) setTab(null); }, [ai]);
+  const changeAi = async (value: boolean) => {
+    setAiPending({ value, accepted: false });
+    const accepted = await act({ type: 'preferences', scope: 'global', patch: { aiFeatures: value } });
+    setAiPending(accepted ? { value, accepted: true } : null);
+  };
   const scope: Scope = status.panel === 'chat' && status.chat.settingsId ? status.chat.settingsId : 'global';
-  const chat = scope !== 'global';
+  const chat = status.panel === 'chat';
   const sections = chat ? ['Replies', 'Style', 'Auto replies'] : ['Replies', 'Providers', 'Style'];
-  const descriptions: Record<string, string> = { Replies: 'Suggestions, tone and language', Providers: 'Model, reasoning and API key', Style: 'Your writing style', 'Auto replies': 'Permission and sending limits' };
+  const descriptions: Record<string, string> = { Replies: 'Suggestions, tone and language', Providers: status.keys.openai || status.keys.anthropic ? 'API keys, model and reasoning' : 'Add an API key', Style: 'Your writing style', 'Auto replies': 'Permission and sending limits' };
   return <>
-    <div className="panel-title"><button data-preserve-auto="" aria-label={tab ? 'Back to settings' : 'Close panel'} onClick={() => tab ? setTab(null) : close()}><BackIcon/></button><h1>{tab ?? (chat ? 'Chat AI settings' : 'AI settings')}</h1>{tab && <button className="close" data-preserve-auto="" aria-label="Close panel" onClick={close}>×</button>}</div>
+    <div className="panel-title"><button ref={back} data-preserve-auto="" aria-label={tab ? 'Back to settings' : 'Close panel'} onClick={() => tab ? setTab(null) : close()}><BackIcon/></button><h1>{ai && tab ? tab : chat ? 'Chat AI settings' : 'Settings'}</h1>{tab && <button className="close" data-preserve-auto="" aria-label="Close panel" onClick={close}>×</button>}</div>
     <div className="panel-body">
-      {!tab ? <>
+      {chat && !ai ? <div className="empty"><p>AI features are off</p><button onClick={() => void act({ type: 'panel', panel: 'settings' })}>Open settings</button></div> : !ai || !tab ? <>
+        {!chat && <Toggle label="AI features" checked={ai} disabled={aiPending !== null} onChange={value => void changeAi(value)}/>}
+        {ai && <>
         <p className="scope-line"><strong title={chat ? status.chat.name : undefined}>{chat ? status.chat.name : 'All conversations'}</strong>{chat && <span>{Object.keys(status.state.chats[scope] ?? {}).length ? 'Custom settings' : 'Uses global settings'}</span>}</p>
-        <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small>{descriptions[label]}</small></span><ChevronIcon/></button>)}</nav>
+        <nav className="settings-list" aria-label="Settings sections">{sections.map(label => <button key={label} aria-label={label} onClick={() => setTab(label)}><span>{label}<small className={label === 'Providers' && !status.keys.openai && !status.keys.anthropic ? 'attention' : undefined}>{descriptions[label]}</small></span><ChevronIcon/></button>)}</nav>
+        </>}
         {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} reason={status.state.global.directStickerDisabledReason} sequence={status.sequence} act={act}/>}
-        {!chat && <AutomaticStickerSetting status={status} act={act}/>}
-        {chat && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
+        {!chat && ai && <AutomaticStickerSetting status={status} act={act}/>}
+        {chat && ai && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
       </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}
       {!tab && !chat && <div className="footer-actions"><button className="quiet" onClick={() => void act({ type: 'reload' })}>Reload WhatsApp</button></div>}
     </div>
@@ -104,25 +118,84 @@ function ReplySettings({ status, act, scope }: { status: Status; act: Act; scope
   </>;
 }
 function Providers({ status, act }: { status: Status; act: Act }) {
-  const [busy, setBusy] = useState(false);
   const [keyRevision, setKeyRevision] = useState(0);
   const provider = status.state.provider;
-  const run = async (action: Parameters<Act>[0]) => {
-    setBusy(true);
-    try { if (await act(action) && (action.type === 'key' || action.type === 'deleteKey')) setKeyRevision(value => value + 1); }
-    finally { setBusy(false); }
-  };
   return <>
-    <Choice label="Provider" value={provider} options={['openai', 'anthropic']} onChange={v => void act({ type: 'provider', provider: v as Provider, model: status.state.models[v as Provider] })}/>
-    <ModelPicker key={`${provider}-${keyRevision}`} provider={provider} value={status.state.models[provider]} available={status.keys[provider] || status.fixture} act={act}/>
-    <ReasoningSlider key={`${provider}-${status.state.models[provider]}`} status={status} act={act}/>
-    <div className="card"><strong>{status.keys[provider] ? 'API key configured' : 'Add your API key'}</strong><p className="hint">Keys are entered in an OS password dialog and never exposed to the app renderer or WhatsApp.</p>
-      <div className="actions"><button disabled={busy || !status.secureStorage} onClick={() => void run({ type: 'key', provider, persist: true })}>{status.keys[provider] ? 'Replace stored key' : 'Store key securely'}</button><button disabled={busy} onClick={() => void run({ type: 'key', provider, persist: false })}>Session-only key</button></div>
-      {!status.secureStorage && <p className="hint">OS encryption unavailable. Unlock KWallet or Secret Service to save a key. A session-only key is kept in memory until exit.</p>}
-      {status.keys[provider] && <div className="actions"><button disabled={busy} onClick={() => void run({ type: 'testProvider' })}>{busy ? 'Working…' : 'Test connection'}</button><button disabled={busy} className="quiet" onClick={() => void run({ type: 'deleteKey', provider })}>Remove key</button></div>}
-    </div>
-    <p className="hint">API usage is billed by your provider. Test connection checks the selected model using synthetic text.</p>
+    {!status.secureStorage && <div className="notice" role="alert">Can’t save keys because secure storage is unavailable.{navigator.platform.toLowerCase().includes('linux') ? ' Unlock KWallet or Secret Service.' : ''}<button onClick={() => void act({ type: 'checkSecureStorage' })}>Check again</button></div>}
+    {(['openai', 'anthropic'] as const).map(p => <KeySlot key={p} provider={p} status={status} act={act} changed={() => setKeyRevision(value => value + 1)}/>)}
+    {(status.keys.openai || status.keys.anthropic || status.fixture) && <div className="card">
+      <label className="choice-setting"><span>Provider</span><select value={provider} onChange={e => { const p = e.target.value as Provider; void act({ type: 'provider', provider: p, model: status.state.models[p] }); }}>
+        {(['openai', 'anthropic'] as const).map(p => <option key={p} value={p} disabled={!status.keys[p] && !status.fixture}>{providerName(p)}{!status.keys[p] && !status.fixture ? ' · no key' : ''}</option>)}
+      </select></label>
+      <ModelPicker key={`${provider}-${keyRevision}`} provider={provider} value={status.state.models[provider]} available={status.keys[provider] || status.fixture} act={act}/>
+      <ReasoningSlider key={`${provider}-${status.state.models[provider]}`} status={status} act={act}/>
+    </div>}
+    <p className="hint">API usage is billed by your provider.</p>
   </>;
+}
+function KeySlot({ provider, status, act, changed }: { provider: Provider; status: Status; act: Act; changed(): void }) {
+  const [text, setText] = useState(''), [replacing, setReplacing] = useState(false), [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState<'saving' | 'testing' | 'removing' | null>(null);
+  const [result, setResult] = useState<{ error?: string; message?: string }>({});
+  const input = useRef<HTMLInputElement>(null), keep = useRef<HTMLButtonElement>(null), replace = useRef<HTMLButtonElement>(null);
+  const focusAfter = useRef<'replace' | 'input' | null>(null);
+  const mounted = useRef(true), pending = useRef(false);
+  const keyRef = useCallback((node: HTMLInputElement | null) => {
+    if (!node && input.current) input.current.value = '';
+    input.current = node;
+  }, []);
+  const saved = status.keys[provider], name = providerName(provider), field = !saved || replacing;
+  const model = status.state.models[provider];
+  const currentModel = useRef(model); currentModel.current = model;
+  useEffect(() => { setResult({}); }, [model, saved]);
+  useEffect(() => { if (replacing) input.current?.focus(); }, [replacing]);
+  useEffect(() => { if (confirm) keep.current?.focus(); }, [confirm]);
+  useEffect(() => {
+    const target = focusAfter.current === 'replace' && !field ? replace.current : focusAfter.current === 'input' && field ? input.current : null;
+    if (!busy && target && !target.disabled) { target.focus(); focusAfter.current = null; }
+  });
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; if (input.current) input.current.value = ''; }; }, []);
+  const cancel = () => { if (replacing) focusAfter.current = 'replace'; if (input.current) input.current.value = ''; setText(''); setReplacing(false); setResult({}); };
+  const run = async (kind: 'saving' | 'testing' | 'removing') => {
+    if (pending.current) return;
+    if (kind === 'saving') {
+      const error = apiKeyError(provider, text.trim());
+      if (error) { setResult({ error }); input.current?.focus(); input.current?.select(); return; }
+    }
+    pending.current = true; setBusy(kind); setResult({});
+    const action = kind === 'saving' ? { type: 'key' as const, provider, key: text.trim() }
+      : kind === 'testing' ? { type: 'testProvider' as const, provider } : { type: 'deleteKey' as const, provider };
+    let response: { error?: string; message?: string } = {};
+    try {
+      const ok = await act(action, result => { response = result; });
+      if (!mounted.current || kind === 'testing' && currentModel.current !== model) return;
+      if (ok) {
+        if (kind === 'saving') { cancel(); focusAfter.current = 'replace'; if (saved) changed(); }
+        if (kind === 'removing') { cancel(); focusAfter.current = 'input'; setConfirm(false); }
+        if (kind === 'testing') setResult({ message: response.message ?? '✓ Connected' });
+      } else { setResult({ error: response.error ?? (kind === 'saving' ? 'Couldn’t save the key. Try again.' : 'Provider connection check failed.') }); }
+      if (!ok && kind === 'saving') requestAnimationFrame(() => { if (mounted.current) { input.current?.focus(); input.current?.select(); } });
+    } finally { pending.current = false; if (mounted.current) setBusy(null); }
+  };
+  return <div className="key-slot" role="group" aria-label={`${name} API key`} onKeyDown={e => {
+    if (e.key === 'Escape' && (confirm || replacing || text)) { e.preventDefault(); e.stopPropagation(); if (confirm) setConfirm(false); else if (!busy) cancel(); }
+  }}>
+    <div className="key-head">{field ? <label htmlFor={`key-${provider}`}>{name} API key</label> : <span className="key-name">{name} API key</span>}
+      {!saved && <a className="key-link" href="#" onClick={e => { e.preventDefault(); void act({ type: 'getKey', provider }); }}>Get key</a>}
+    </div>
+    {field ? <div className="key-row"><input ref={keyRef} id={`key-${provider}`} type="password" autoComplete="off" spellCheck={false} autoCapitalize="off" placeholder={provider === 'openai' ? 'sk-…' : 'sk-ant-…'} value={text} disabled={!!busy || !status.secureStorage} readOnly={!!busy} aria-invalid={!!result.error || undefined}
+      onChange={e => { setText(e.target.value); setResult({}); }} onPaste={e => { e.preventDefault(); setText(e.clipboardData.getData('text').trim()); setResult({}); }}
+      onKeyDown={e => { if (e.key === 'Enter' && text.trim() && !busy && status.secureStorage) { e.preventDefault(); void run('saving'); } }}/>
+      <button className="primary" disabled={!text.trim() || !!busy || !status.secureStorage} aria-busy={busy === 'saving' || undefined} onClick={() => void run('saving')}>{busy === 'saving' ? 'Saving…' : 'Save'}</button>
+      {replacing && <button className="quiet" disabled={!!busy} onClick={cancel}>Cancel</button>}
+    </div> : <>
+      <div className="key-saved"><span className="dots" aria-hidden="true">••••••••••••••••••••••••</span><span className="saved">✓ Saved</span></div>
+      {confirm ? <div className="actions confirm" role="group" aria-label={`Remove the ${name} key?`}><span>Remove the {name} key?</span><button className="primary" disabled={!!busy} onClick={() => void run('removing')}>Remove</button><button ref={keep} className="quiet" disabled={!!busy} onClick={() => setConfirm(false)}>Keep</button></div>
+        : <div className="actions"><button disabled={!!busy} aria-busy={busy === 'testing' || undefined} onClick={() => void run('testing')}>{busy === 'testing' ? 'Testing…' : 'Test connection'}</button><button ref={replace} disabled={!!busy || !status.secureStorage} onClick={() => { setResult({}); setReplacing(true); }}>Replace</button><button className="quiet" disabled={!!busy} onClick={() => { setResult({}); setConfirm(true); }}>Remove</button></div>}
+    </>}
+    {result.error && <p className="key-status error" role="alert">{result.error}</p>}
+    {result.message && <p className="key-status ok" role="status">{result.message}</p>}
+  </div>;
 }
 function ModelPicker({ provider, value, available, act }: { provider: Provider; value: string; available: boolean; act: Act }) {
   const [result, setResult] = useState<ModelsResult>({ models: [] });
@@ -212,7 +285,7 @@ function StyleSettings({ status, act, scope }: { status: Status; act: Act; scope
       <Toggle label="Learn automatically from my messages" checked={values.learnFromSent} note={inherited('learnFromSent')} onChange={learnFromSent => void act({ type: 'preferences', scope: preferencesScope, patch: { learnFromSent } })}/>
       <p className="hint">Learns from your sent messages as you open and scroll through chats. Each chat’s style stays separate.{profile && profile.source !== 'observed' && !global ? ' Your saved style is kept until you reset it.' : ''}</p>
     </>}
-    {!global && values.style === 'general' ? <p className="hint">Edit your general style in global AI settings → Style.</p> : <>
+    {!global && values.style === 'general' ? <p className="hint">Edit your general style in Settings → Style.</p> : <>
       {global && <p className="hint">{values.style === 'conversation' ? 'A general style is optional and can help chats without their own style.' : 'Your general style can be used across conversations.'}</p>}
       <button className="primary" disabled={busy || !status.chat.ready || !status.chat.settingsId || loaded < minimumStyleSamples} onClick={() => void learn('')}>{global ? 'Learn general style from this chat' : 'Learn from this chat'}</button>
       <p className="hint" data-testid="style-history">{status.chat.ready ? `${loaded} sent message${loaded === 1 ? '' : 's'} loaded${loaded < minimumStyleSamples ? ` · ${minimumStyleSamples} needed` : ''}. Scroll up in WhatsApp to load older messages.` : 'Open a conversation to learn from your sent messages.'}</p>

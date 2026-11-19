@@ -126,7 +126,7 @@ export class Assistant {
     return request.contextKey === this.emptyKey() && request.composerDraft === this.snapshot.draft;
   }
   private current(work: Live) {
-    return !this.suspended && !this.refreshNonce && this.live === work && !work.controller.signal.aborted && work.signature === this.inlineSignature();
+    return this.store.state.global.aiFeatures && !this.suspended && !this.refreshNonce && this.live === work && !work.controller.signal.aborted && work.signature === this.inlineSignature();
   }
   private owns(work: Live) {
     // Work identity is the ordering token: retired requests cannot dispatch or
@@ -295,7 +295,7 @@ export class Assistant {
   /** Local observation is independent of suggestion eligibility and refreshes. */
   private observeStyle() {
     const next = this.snapshot, settingsId = this.chatIdentity(next);
-    if (this.suspended || !next.ready || !settingsId) return;
+    if (!this.store.state.global.aiFeatures || this.suspended || !next.ready || !settingsId) return;
     const preferences = resolveSettings(this.store.state, next.kind, settingsId).values;
     if (!preferences.learnFromSent || preferences.style !== 'conversation') return;
     const observation = this.observed.get(settingsId) ?? { samples: new Map<string, string>(), hasProfile: false };
@@ -317,6 +317,10 @@ export class Assistant {
     observation.hasProfile = Boolean(this.store.state.profiles[settingsId]);
   }
   reconfigure(options: { keyProvider?: Provider; learning?: boolean; autoRules?: boolean } = {}) {
+    if (!this.store.state.global.aiFeatures) {
+      this.cancel(true); this.cache.clear(); this.baseline = this.snapshot.messages.at(-1)?.id; this.fresh = undefined;
+      this.message = 'Ready'; this.changed(); return;
+    }
     if (options.keyProvider) { this.keyVersions[options.keyProvider]++; this.abortEmpty(options.keyProvider); }
     // Invalidate only entries whose effective output settings changed, including
     // inactive chats; changing another chat must not discard this chat's reply.
@@ -520,6 +524,7 @@ export class Assistant {
     finally { this.completeSnapshot(next, preferences, previousIdentity !== this.recordIdentity() || !previous.ready ? 'open/revisit' : 'incoming message'); }
   }
   private completeSnapshot(next: Snapshot, preferences: Preferences, reason: RequestReason) {
+    if (!this.store.state.global.aiFeatures) { this.changed(); return; }
     const normalized = this.normalizeDraft(next.draft);
     const configuration = this.outputConfiguration(next);
     this.activeConfiguration = JSON.stringify([configuration, preferences.suggestions]);
@@ -568,7 +573,7 @@ export class Assistant {
     this.completeSnapshot(this.snapshot, preferences, candidate.reason);
   }
   async request(instruction?: string, automatic = false, source?: RequestSource, retry = 0, reason?: RequestReason, origin?: RequestOrigin) {
-    if (this.suspended || this.refreshNonce) return;
+    if (!this.store.state.global.aiFeatures || this.suspended || this.refreshNonce) return;
     const snapshot = this.snapshot, previous = this.live;
     if (source?.key && source.key !== suggestionKey(snapshot)) return;
     const replay = source?.operation === 'retry' && previous?.error ? previous.request : undefined;
@@ -584,7 +589,7 @@ export class Assistant {
     const draft = snapshot.draft.trim() ? snapshot.draft : instruction ? replay?.draft ?? suggested ?? '' : snapshot.draft;
     if (instruction && !draft.trim()) { this.message = 'Write a message or wait for a suggestion, then try again.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
     const preferences = resolveSettings(this.store.state, snapshot.kind, this.chatIdentity()).values;
-    if (!preferences.shareContext && !draft) { this.message = 'Enable conversation context in AI settings → Replies to suggest a reply, or type a draft to refine.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
+    if (!preferences.shareContext && !draft) { this.message = 'Enable conversation context in Settings → Replies to suggest a reply, or type a draft to refine.'; this.connector.send({ type: 'notice', text: this.message }); this.changed(); return; }
     const request: InlineRequest = { operation: replay?.operation ?? (instruction ? source?.operation === 'translate' ? 'translate' : 'refine' : snapshot.draft.trim() ? 'continuation' : 'suggest'),
       instruction, draft, composerDraft: snapshot.draft, contextKey: this.emptyKey(),
       reason: retry || replay ? 'retry' : automatic ? 'auto reply' : reason ?? (instruction ? source?.operation === 'translate' ? 'translate' : 'refine' : source?.operation === 'retry' ? 'retry' : 'explicit suggest') };
@@ -609,7 +614,7 @@ export class Assistant {
     const state = this.store.state, prompt = buildPrompt(state, preferences, { ...snapshot, draft }, instruction);
     const input = { provider: state.provider, model: state.models[state.provider], effort: savedEffort(state), ...prompt };
     const run = async (attempt: number): Promise<void> => {
-      const alive = () => emptyKey ? this.inFlight.get(emptyKey) === work && !work.controller.signal.aborted : ticket ? this.gate.current(ticket, this.snapshot) : this.current(work);
+      const alive = () => this.store.state.global.aiFeatures && (emptyKey ? this.inFlight.get(emptyKey) === work && !work.controller.signal.aborted : ticket ? this.gate.current(ticket, this.snapshot) : this.current(work));
       const finish = () => { if (emptyKey && this.inFlight.get(emptyKey) === work) this.inFlight.delete(emptyKey); };
       try {
         if (!alive()) { this.decision('stale_context', 'completion', work.signature); return; }
@@ -678,7 +683,7 @@ export class Assistant {
   }
   private sendAutomatic(ticket: ReturnType<SuggestionGate['begin']>, text: string) {
     const s = this.snapshot, id = s.chatId;
-    if (!id || this.runtimePaused.has(id) || !this.gate.current(ticket, s) || !resolveSettings(this.store.state, s.kind, id).values.shareContext || autoDecision(this.store.state.auto[id], s, this.store.state.ledger[id] ?? [], new Date(), this.baseline)) { this.cancel(); this.changed(); return; }
+    if (!this.store.state.global.aiFeatures || !id || this.runtimePaused.has(id) || !this.gate.current(ticket, s) || !resolveSettings(this.store.state, s.kind, id).values.shareContext || autoDecision(this.store.state.auto[id], s, this.store.state.ledger[id] ?? [], new Date(), this.baseline)) { this.cancel(); this.changed(); return; }
     const expiresAt = autoSendExpiry(this.store.state.auto[id], new Date());
     const reservation = { at: Date.now(), messageId: s.messages.at(-1)!.id };
     // Reserve before dispatch. Failed/ambiguous attempts consume budget and cannot be retried after a crash.
@@ -691,7 +696,7 @@ export class Assistant {
   }
   authorizeAutomatic(nonce: string): boolean {
     const attempt = this.attempt, s = this.snapshot, id = s.chatId;
-    if (!attempt || attempt.nonce !== nonce || attempt.approved || Date.now() >= attempt.expiresAt || !id || this.runtimePaused.has(id) || !this.gate.current(attempt.ticket, s) || !resolveSettings(this.store.state, s.kind, id).values.shareContext) return false;
+    if (!this.store.state.global.aiFeatures || !attempt || attempt.nonce !== nonce || attempt.approved || Date.now() >= attempt.expiresAt || !id || this.runtimePaused.has(id) || !this.gate.current(attempt.ticket, s) || !resolveSettings(this.store.state, s.kind, id).values.shareContext) return false;
     // Recheck main-owned permission after the renderer finishes waiting for Send.
     // Only this attempt's durable reservation is excluded from budget evaluation.
     const ledger = this.store.state.ledger[id] ?? [];

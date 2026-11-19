@@ -17,7 +17,7 @@ export type RemoteCommand =
   | ({ type: 'prepareSticker' } & StickerTicket)
   | ({ type: 'sendSticker'; expiresAt: number } & StickerTicket)
   | { type: 'cancelSticker' }
-  | { type: 'chrome'; panel: Panel; pending: boolean; panelBounds?: { left: number; right: number } | null }
+  | { type: 'chrome'; panel: Panel; pending: boolean; aiFeatures?: boolean; panelBounds?: { left: number; right: number } | null }
   | { type: 'snapshot'; nonce: string }
   // Discard request-bound text and pending/recovery notices together.
   | { type: 'clear' }

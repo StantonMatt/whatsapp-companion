@@ -31,3 +31,32 @@ test('schema v1 without desktop settings still migrates with both answers unset'
     expect(store.state.version).toBe(2); expect(store.state.desktop).toEqual({});
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test.each([false, true])('missing AI switch is initialized from key presence once and persisted (%s)', hasKey => {
+  const dir = mkdtempSync(join(tmpdir(), 'companion-ai-startup-'));
+  try {
+    const old = initialState(); const { aiFeatures: _missing, ...global } = old.global;
+    writeFileSync(join(dir, 'companion.json'), JSON.stringify({ ...old, global }));
+    const store = new Store(dir);
+    expect(store.state.global.aiFeatures).toBe(false);
+    store.initializeAiFeatures(hasKey);
+    expect(store.state.global.aiFeatures).toBe(hasKey);
+    store.initializeAiFeatures(!hasKey);
+    expect(store.state.global.aiFeatures).toBe(hasKey);
+    const restored = new Store(dir); restored.initializeAiFeatures(!hasKey);
+    expect(restored.state.global.aiFeatures).toBe(hasKey);
+    expect(JSON.parse(readFileSync(join(dir, 'companion.json'), 'utf8')).global.aiFeatures).toBe(hasKey);
+    expect(store.state.version).toBe(2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('fresh profiles persist the off decision even though it equals the schema default', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'companion-ai-fresh-'));
+  try {
+    const store = new Store(dir); expect(store.state.global.aiFeatures).toBe(false);
+    store.initializeAiFeatures(false);
+    expect(JSON.parse(readFileSync(join(dir, 'companion.json'), 'utf8')).global.aiFeatures).toBe(false);
+    new Store(dir).initializeAiFeatures(true);
+    expect(new Store(dir).state.global.aiFeatures).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
