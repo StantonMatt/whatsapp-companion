@@ -1,6 +1,6 @@
 # Implementation notes
 
-This is a fresh application; no Whatsie or other messaging-client code was imported. Dependency revisions are pinned in `package-lock.json`. README documents actual behavior and limits.
+This is a fresh application; no Whatsie or other messaging-client code was imported. Dependency revisions are pinned in `package-lock.json`. The [user guide](user-guide.md) documents actual behavior and limits.
 
 ## Boundaries
 

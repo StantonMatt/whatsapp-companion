@@ -1,146 +1,108 @@
-# WhatsApp Companion
+<p align="center">
+  <img src="assets/icons/256x256.png" width="112" height="112" alt="WhatsApp Companion icon: a green chat bubble with a smiling face">
+</p>
 
-A Linux-first Electron + React + TypeScript desktop app around an isolated, persistent WhatsApp Web session. It adds searchable sticker metadata and discreet writing assistance without rebuilding the messaging client. This is an independent project, not an official WhatsApp or Meta application.
+<h1 align="center">WhatsApp Companion</h1>
 
-The first functional implementation is available. Build, unit and desktop-fixture checks are recorded in [implementation notes](docs/implementation.md). Linked-account suggestion generation and Tab acceptance have been tested on the current WhatsApp Web layout; remaining limits are listed below.
+<p align="center">
+  An unofficial Linux desktop app for WhatsApp Web, with a searchable sticker library and optional AI help with your replies.
+</p>
 
-## Run
+<p align="center">
+  <a href="https://github.com/StantonMatt/whatsapp-companion/releases/latest"><img src="https://img.shields.io/github/v/release/StantonMatt/whatsapp-companion?style=for-the-badge&label=Download&logo=linux&logoColor=white&color=1f9d55" alt="Download the latest release"></a>
+</p>
 
-Requires Node.js 22.12+ and npm. On Kubuntu, KWallet6 protects saved API keys. Chromium’s sandbox remains enabled.
+![WhatsApp Companion with the sticker library open beside a chat, and a suggested reply in grey in the message box](docs/images/companion.png)
+
+<p align="center"><sub>Shown with the app's built-in demo page and sample data.</sub></p>
+
+## Features
+
+- **Sticker library.** Stickers you come across in WhatsApp are saved to a library on your computer. Search them by your own words, sort them into groups and send one with a click. AI can fill in the search words for you.
+- **Reply suggestions.** A suggested reply appears in grey in the message box. Press <kbd>Tab</kbd> to use it; nothing is sent until you send it.
+- **Refine and translate.** Click **✦** to make a draft shorter, warmer or more formal, fix its spelling, translate it, or ask for your own change.
+- **Your style.** Optionally learn how you write, overall or per chat, so suggestions sound like you.
+- **Per-chat settings.** Give any chat its own reply and style settings.
+- **Tray.** Closing the window keeps WhatsApp connected in the tray, and the app can start at login.
+
+AI features are optional and off until you turn them on. Everything else works without them.
+
+<p align="center">
+  <img src="docs/images/refine.png" width="640" alt="The refine menu above a typed draft, with options such as Shorter, Warmer, Fix spelling and Translate">
+</p>
+
+## Install
+
+For Linux on x86_64 (tested on Kubuntu).
+
+1. Install the library AppImages need. Kubuntu and Ubuntu 24.04 or newer don't include it:
+
+   ```bash
+   sudo apt install libfuse2t64
+   ```
+2. Download `WhatsApp.Companion-0.2.0.AppImage` from the [latest release](https://github.com/StantonMatt/whatsapp-companion/releases/latest).
+3. Move it to a folder you'll keep, make it executable and start it:
+
+   ```bash
+   mkdir -p ~/Applications
+   mv ~/Downloads/WhatsApp.Companion-0.2.0.AppImage ~/Applications/
+   cd ~/Applications
+   chmod +x WhatsApp.Companion-0.2.0.AppImage
+   ./WhatsApp.Companion-0.2.0.AppImage
+   ```
+
+   Or, in Dolphin, right-click the file, choose **Properties → Permissions**, tick **Is executable**, and double-click it.
+4. On your phone, open WhatsApp's **Linked devices** and scan the QR code shown in the app.
+
+## First steps
+
+- **Sticker library** and **Settings** (the gear) are added to WhatsApp's left bar.
+- Open WhatsApp's sticker picker and let it load; the stickers it shows are added to the library.
+- Closing the window leaves the app running in the tray. Use **Quit** in the tray menu to exit. The app starts at login, hidden in the tray; turn that off in the tray menu.
+
+### Turn on AI (optional)
+
+You need your own API key from OpenAI or Anthropic. Your provider bills you for what you use.
+
+1. Open **Settings** and turn on **AI features**.
+2. Open **Providers**, paste your key and click **Save**. **Get key** opens the provider's key page.
+3. Open **Replies** and turn on **Share recent conversation context** and **Inline suggestions**.
+
+<p align="center">
+  <img src="docs/images/settings.png" width="640" alt="Settings with AI features turned on, and Providers with a saved OpenAI key that passed Test connection">
+</p>
+
+Your key is encrypted by your system keyring (KWallet or Secret Service). The [user guide](docs/user-guide.md) covers every feature and setting.
+
+## Privacy and limits
+
+- **On your computer.** Settings, the sticker library and learned writing habits are kept in `~/.config/WhatsApp Companion/`. Companion doesn't store your conversation text. Its files aren't encrypted by the app, so use disk encryption if that matters to you.
+- **Sent to your AI provider, only when AI is on.** With context sharing on, up to 30 recent messages loaded in the open chat, the sender names shown in group chats, your draft, and attachment types and file names, never the files themselves. AI sticker tagging sends the sticker image. Your provider's retention policy applies. [Full details](docs/data-and-privacy.md#what-your-ai-provider-receives).
+- **Unofficial.** Not made by or affiliated with WhatsApp or Meta. WhatsApp updates can break it, and WhatsApp may restrict unofficial clients. The experimental direct sticker sending, off by default, carries some account risk.
+- **Linux only for now.** Windows and macOS builds are configured but not validated.
+- **Unsigned, no automatic updates.** To update, download the new AppImage from [Releases](https://github.com/StantonMatt/whatsapp-companion/releases) and use it instead of the old one.
+
+If the app says it could not start, your files are kept; see [Recovery](docs/data-and-privacy.md#recovery).
+
+## Build from source
+
+Requires Node.js 22.12+ and npm.
 
 ```bash
+git clone https://github.com/StantonMatt/whatsapp-companion.git
+cd whatsapp-companion
 npm ci
-npm run dev                  # build and open the real application
-npm start                    # open an already-built application
-npm run demo                 # separate local fixture; no WhatsApp or provider calls
+npm run dev     # build and open the app
+npm run demo    # local demo page; no WhatsApp or provider calls
 ```
 
-Scan the QR code in the **application** with WhatsApp on your phone. Its session is separate from Chrome and Whatsie. No browser cookies or unrelated credentials are imported. Account linking and live suggestions have been verified. The current WhatsApp Web layout uses opaque message IDs. Companion recognizes observed conversations locally so reply and style overrides work; automatic sending still requires a WhatsApp peer identifier.
+## Documentation
 
-Open the **Settings** gear in the left sidebar and turn on **AI features**, then open **Providers**. Paste your key into its provider’s masked field and click **Save**. Each saved key has **Test connection**, **Replace** and **Remove**; removal asks inline. **Get key** opens that provider’s fixed API-key page in your system browser. A provider without a saved key cannot be selected. **Model ID** shows a short list of current general-purpose text models available to your key: GPT-6 Astra, GPT-6.1 Sol, GPT-6 Sol and Luna for OpenAI; Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 4.5 for Anthropic. Older generations, specialist models and duplicate dated snapshots are excluded. **Refresh models** checks account availability again. Model lists are cached in memory for ten minutes per provider and key; Refresh bypasses the cache. A saved model outside this list is retained in your configuration and identified separately until you choose a current model. Selections are saved separately for each provider; new installations default to GPT-6 Luna and Claude Sonnet 5.5. Model-list access requires Models read permission on restricted keys.
+- [User guide](docs/user-guide.md): install, every feature and setting, tray and startup
+- [Data and privacy](docs/data-and-privacy.md): what is stored and sent, diagnostics, recovery
+- [Development](docs/development.md): running from source, tests, packaging, releases, feature status
+- [Implementation notes](docs/implementation.md), [product brief](docs/product-brief.md) and [CI operation](docs/ci.md)
 
-The **Reasoning effort** slider saves separately for each model and applies to suggestions, refinements and connection checks. GPT-6 Luna/Sol offer None through Max; GPT-6.1 Sol, Astra and current Claude reasoning models offer Low through Max. Haiku has no adjustable effort. The initial setting favors speed: None for GPT-6 Luna/Sol and Low for GPT-6.1 Sol, Astra and Claude reasoning models. Higher effort can take longer and use more tokens. **Test connection** checks that button’s provider with its saved model and effort using synthetic text. A dedicated OpenAI key is securely configured on the development machine and has passed live checks. No key is included in this repository or packages. Anthropic has request/response fixture coverage but no live-key test yet.
+## License
 
-Saved credentials require working OS encryption (KWallet/Secret Service on Linux, Keychain on macOS, DPAPI on Windows). If storage is unavailable, unlock it and use **Check again** in Providers; saving stays disabled until secure storage is available. The app refuses `basic_text`. If Electron does not detect KDE correctly, start once with:
-
-```bash
-npm start -- --password-store=kwallet6
-```
-
-The secure backend is remembered when saving a key. Windows/macOS secure storage still needs validation on those systems.
-
-## Use
-
-**AI features** is off on a fresh profile. With it off, no AI controls appear and main refuses AI work, including suggestions, style learning, sticker tagging, automatic replies, model lists and connection tests. Turning it off cancels work in flight without deleting keys, models, preferences, learned styles or chat rules. Turning it on restores those settings; enabled automatic replies remain paused until Resume. Existing profiles that lack the setting start on only if a provider key was already saved; that decision is persisted once. Sticker search, manual terms and groups, direct sending and Reload remain available with AI off.
-
-The Companion top bar is gone. **Sticker library** and **Settings** live in WhatsApp’s left navigation rail. Global settings open over the chat list; the **Chat AI settings** sliders button in each conversation header opens a right-hand panel for that chat. Panels follow the WhatsApp light/dark appearance. Use the back arrow or Escape to close them. **Companion → Settings** (Ctrl+,) remains available before linking or when navigation cannot be detected.
-
-Settings dropdowns follow the same theme, with padded options, selected checkmarks and consistent row spacing. Arrow keys and typing navigate options; Enter selects. Escape closes an open dropdown first, then the settings panel on a second press.
-
-Right-click the message field or a Companion input for Cut, Copy, Paste and Select all. Selected text outside editable fields offers Copy. Misspelled words offer available corrections and Add to dictionary when spellcheck is active. WhatsApp’s own message and chat menus stay in control.
-
-- **Suggestions:** enable context sharing and inline suggestions for the desired scope in Settings → Replies. An empty composer prepares a reply after one second of stable context when the latest message is incoming. Unchanged chat revisits reuse completed text or attach to an already-running request; dismissals stay remembered for that message. Switching chats does not abort an automatic empty-composer request. Failures stay live-only, so a later visit can try again. This memory-only cache holds up to 50 entries and resets when the app exits. A partial draft gets a continuation after a one-second typing pause and a meaningful edit; whitespace alone does not request again. Continuations are shown only for the live request’s exact draft and latest message; they are never cached or restored after a revisit or refresh. Try again requests a fresh continuation for your current exact draft. Refinement and translation results and retry controls are live-only and disappear on navigation or refresh; results require the exact draft and latest message to match. Accepting a suggestion or applying a refinement waits for your next edit before offering a continuation. Suggestions stay visible when you click, scroll or switch focus. Focus the composer with the caret at the end to accept with Tab. Tab accepts without sending; Escape dismisses. Normal Tab navigation returns without a suggestion. Shift+Tab, Enter, Shift+Enter and input methods retain their roles. Typing, message changes, chat changes, composer replacement and input-method composition invalidate stale suggestions; ordinary focus or caret movement does not restart the provider request. After your own message, click **✦** to request a follow-up explicitly. Group context preserves observed sender labels so the model distinguishes the person sharing photos/news from other participants and from you. Recognized quoted messages are kept separate from the current author’s words. Missing attribution stays uncertain; it is never silently assigned to you. Image-only messages can suggest a neutral acknowledgement. Shared PDFs and other document cards include an attachment marker and their visible filename, so the model knows who already shared the file. Prompts discourage requesting that same attachment again. The model receives types, filenames, captions and surrounding text, not image or file contents. Temporary network, timeout and server failures retry once after two seconds for the same unchanged context; persistent errors offer **Try again** beside the composer. Invalid keys, quota and model-access errors require attention and do not retry automatically. Up to five empty-composer requests can remain in flight across chat switches; additional chats stay eligible on a later visit. With no draft or suggestion, one click on **✦** requests a reply immediately. With a suggestion or draft, **✦** opens its refinement menu. While a request runs, inline ghost dots cycle . → .. → ... every 400 ms where the text will appear; reduced motion keeps static "...". Draft continuation, refinement and translation dots follow the draft, with a thin gap unless it ends in whitespace. If the dots would be clipped or their line is scrolled out of view, they appear just left of **✦** until space returns. The empty-composer placeholder is hidden while dots show. The star’s tooltip and accessible label are Suggest reply, Refine suggestion, Refine draft or Cancel. Escape, typing, input-method composition and sending cancel pending work. **✦** cancels user-requested dots; during automatic continuation dots it cancels the continuation and opens Refine draft in one click, while automatic dots in an empty composer keep running. Automatic retries retain their initiating origin and normal star label; clicks elsewhere, scrolling and blur keep it running. Screen readers announce Suggesting a reply or Refining once per request. Errors remove the dots and offer Try again above **✦**; retry brings the dots back. No new keyboard shortcut is added.
-- **Refine:** click **✦** beside the composer to work on your entire written draft. If the composer is empty, it works on the visible suggestion instead. The compact menu identifies its target and offers **Shorter**, **Longer**, **Warmer**, **Funnier**, **More formal**, **More casual**, **More direct**, **Fix spelling**, **Add emoji**, **Translate…** (enter a language), and one field for your own instruction. With an empty composer, the result updates the inline suggestion immediately; Tab accepts it into the draft as usual. A written draft is revised directly in the composer, with native Undo available. If you move to another field while it works, the revision waits until you return to the composer. There is no separate result box or **Use text** step. Nothing is sent. If native insertion fails, it restores your selection and waits for **Try again**. Refocusing while it works keeps the request running; Escape or the close button cancels it, and changes to the draft or conversation cancel stale work.
-- **Stickers:** open WhatsApp’s sticker picker and wait for loading to index observed WebP stickers. Search saved words, synonyms and captions in either language; use each card’s **Send** or search-terms editor. With a provably empty composer, static indexed stickers send through **Attach → New sticker**, even when the original is no longer loaded. With a draft or uncertain composer, static stickers use the native picker and leave the draft untouched; if missing, send or clear your draft first. With direct sending off, animated stickers look up the byte-identical original to preserve animation; if missing, **Try again** starts a fresh animated lookup, or **Send still** explicitly uses the maker and loses animation, requiring an empty composer. These native routes do not automatically switch routes or capture/restore drafts. One send runs at a time. You can cancel while finding or preparing; changing chats, closing the panel or reloading also revokes preparation. During maker ownership, a visual shield blocks pointer input, keyboard/paste/IME input is blocked and focus stays on the local controls. If a draft appears, automation stops without closing or discarding the editor; check the chat before retrying if Send may have activated. Both native routes require an outgoing sticker message to confirm sending; uncertain sends are never retried automatically. Lookup-owned pickers and maker editors close afterwards when safe; a picker you already had open stays open. Stable picker categories finish promptly; loading categories are revisited up to a 15-second total lookup cap; maker preparation takes at most five seconds and outgoing-message confirmation at most four seconds, followed by teardown. **Locate in WhatsApp** highlights a loaded sticker and never sends one.
-- **Direct stickers (experimental):** enable **Send stickers directly (experimental)** in global Settings to send any indexed static or animated sticker from its original stored WebP, with drafts untouched and no picker, sticker editor or shield. It is **off by default**. Unofficial use of WhatsApp internals may break with WhatsApp updates and carries some account risk. Missing/incompatible modules fall back to the existing native route only before upload or send starts. An uncertain attempt never falls back or retries; check the chat before choosing another send. Direct mode allows at most 10 page-side send invocations per rolling 60 seconds; the next sticker immediately uses the normal maker/picker route without queuing. It turns itself off if WhatsApp shows a QR/link-device or logout screen, displays an account warning, a dispatched direct send errors or remains unknown, or module shapes change after a successful direct send in this app session. Settings shows the saved reason. After resolving the issue, turn the toggle back on to clear the reason and re-enable direct sending. These guards do not eliminate account risk. Turning the setting off immediately prevents new direct sends; an already dispatched attempt still reports its outcome.
-- **Inheritance:** global → individual conversation. Global reply and style settings apply to all people and groups. Change a field under **Chat AI settings** to override it for that chat; each field shows whether it uses the global setting or a custom value. **Reset all to global settings** removes its overrides. Switching chats closes that panel and clears unsaved examples. The former direct-message/group defaults are retained on disk for compatibility but no longer applied. Provider, model, reasoning and credentials are global.
-- **Style:** Settings → Style contains matching and learning controls together. Choose Off (the default), General style, or conversation-specific style. **Learn from this chat** reads your loaded sent messages directly; the screen shows how many are available and requires at least five usable messages. Scroll up in WhatsApp to include older messages. This reads the loaded conversation, not your entire archive. Global Style can explicitly create a general profile from the open chat; **Learn automatically from my messages** opts into separate profiles as you open and scroll through chats in conversation mode. **Add examples manually** is optional; **View or edit saved style** lets you inspect, edit or reset the result. Learning does not turn matching on. Only aggregate writing habits are saved locally; raw examples are not persisted or sent to providers for learning. Conversation profiles stay scoped to their chat, with an approved general profile as fallback. Unsaved examples clear on chat changes. Selected/edited profiles are preserved until reset, and resetting a conversation profile stops automatic learning. **Use global style settings** resets only the style overrides, preserving other chat preferences.
-- **Automatic replies:** separately off by default, with explicit per-chat permission. Requires shared context, a recognized active chat, empty composer, and new incoming text after arming. Fresh messages can finish rendering or scrolling into view for up to a minute before becoming eligible. Set local permitted hours, daily attempt limit, cooldown and a 15–120 second cancellation window. Typing, clicking, scrolling and opening controls in WhatsApp or Companion cancel/pause; restarting pauses sending. Resume explicitly. Editing schedules or limits preserves any pause; it cannot grant permission to send. Only the active chat is eligible. A discreet button above the composer offers cancellation while queued. Attempts reserve durable budget before dispatch and are never retried automatically. The connector waits up to two seconds for an enabled Send control and rechecks context and user activity throughout. Delivery/read receipts remain WhatsApp’s responsibility.
-
-Provider HTTP dispatch counts are saved locally in `request-counts.json` in the app’s data directory, separately from `companion.json`. The owner-only JSON file aggregates the last 30 local calendar days by provider/model, request reason and completed/error/timeout/aborted outcome. Model-list GETs are counted separately from generation POSTs. Writes are batched every 30 seconds and flushed on quit. It contains no messages, prompts, chat identities or keys; dispatch counts are not billing totals.
-
-Suggestion decisions are counted separately in `suggestion-decisions.json`, using only local day, allowlisted reason and count. Counts track changes in eligibility and display rejection rather than every poll. This uses the same 30-day retention, owner-only permissions and batched writes as request counts.
-
-## Diagnostics
-
-Open WhatsApp’s native sticker picker, then choose **Companion → Capture sticker picker layout**. The app saves a JSON file under `diagnostics/` in its data directory and reveals it in your file manager. Send that file when requested to investigate the picker markup. If the picker is closed, the app asks you to open it first.
-
-Each sticker send also appends a privacy-limited JSON line to `diagnostics/sticker-sends.log`: route, animation flag, outcome/reason, elapsed time and fixed category loading timings. It contains no sticker identifiers, images, chat names or messages. The directory/files are owner-only; the log rotates at 256 KB with one backup.
-
-The capture reads only the open expressions panel and a minimal ancestor chain. Labels and visible text become lengths and recognized UI words; image URLs become schemes and sizes, and classes become counts. It retains structural attributes and layout measurements, with truncation marked at depth 40 or 6,000 elements. It does not capture conversations, account details or image bytes, and does not click, focus, scroll or send anything. Diagnostic files have owner-only permissions.
-
-## Feature status
-
-| Component | Implemented / verified | Remaining live validation |
-| --- | --- | --- |
-| Desktop / session | Sandboxed WebContentsView, dedicated persistent partition; linked personal session works | Extended reconnect testing |
-| Composer | DOM adapter, ghost text, refinement, stale cancellation; live OpenAI continuation/empty reply, inline refinement, direct draft revision and Tab acceptance verified | Actual IMEs and broader layouts/languages |
-| Stickers | Content hashes, persistent search terms, card editor/locator and guarded one-click native sticker sending; 95 indexed stickers visually tagged and given English/Spanish equivalents, including 67 animations; restart tested | Only observed stickers are searchable; future discoveries need their own terms |
-| Providers | Real OpenAI Responses and Anthropic Messages adapters; timeout/cancellation/errors; live synthetic OpenAI check | Anthropic key/model access |
-| Settings / style | Inheritance, persistence, local aggregate extraction, scope, reset, sparse fallback | Richer language/tone estimation beyond initial aggregate heuristics |
-| Auto replies | Main-process permissions/budget and guarded dispatch; local rules/countdown tests | Live sending deliberately not tested against contacts |
-| Packaging | Linux build and packaging commands; Windows/macOS targets configured | Windows/macOS builds/dialogs, signing/notarization |
-
-The replaceable connector uses a narrow DOM contract. The optional direct sticker route additionally uses private WhatsApp modules; it is not a complete messaging SDK. Only loaded text context (up to 30 messages, 4,000 characters each) and drafts are considered. Drafts over 8,000 characters or containing structured mentions or unreadable embedded content are left unchanged with an explanation; they are not refined from a truncated prefix. Image-based emoji count as draft content. Observed image, sticker, audio, video and document types are included as attachment markers. Document cards include their visible filename (up to 255 characters), including quoted documents; filenames are untrusted labels, not proof of file contents. Their bytes, preview images, download URLs and contents are not sent to AI. Suggestions cannot describe unseen attachments. Media-only arrivals do not trigger automatic sending. Conflicting peer IDs disable assistance. For opaque message IDs, the main process recognizes conversations by overlap with up to 200 saved message-ID hashes per conversation (at most 2,000 conversations), never by names or message text. Reply/style overrides survive renames and restarts when a known message is loaded. If history has no overlap (for example after clearing it or a long absence), a new local identity starts with global settings; existing private settings are not guessed or merged. Conflicting local identities use global settings. Automatic sending requires a real WhatsApp peer ID and remains unavailable on the current opaque-ID layout. Unknown message authors remain labelled unknown rather than guessed. WhatsApp changes may require selector updates.
-
-In Stickers, choose Edit to delete: select stickers with their circles, then use the bottom bar’s trash button, or open a sticker’s editor and use its trash button. Confirm with Delete or choose Keep. Delete/Backspace on a focused tile opens the same confirmation. Selections survive search and group filters, so the selected count can include hidden stickers. Bulk deletion saves the whole selection together.
-
-Sticker discovery recognizes loaded images marked as stickers (English/Spanish/Portuguese hints and test IDs), accepts blob/data WebP sources up to 1 MiB (including larger animated favorites), and retains at most 2,000 stickers / 1 GiB of original WebP blob bytes (backups and temporary files excluded). Search terms survive recents changes and duplicate observation. Byte-identical stickers share identity; near-identical re-encodings are suppressed using their first-frame appearance, retaining the existing entry and its search terms. A static copy matching an animated entry's first frame is also suppressed; an incoming animation is always kept separate from static entries. This approximate comparison can miss some copies or treat very similar images as duplicates; it does not remove existing library entries. Each image decode waits at most two seconds. Close/Quit allows at most three seconds for indexing before saving remaining observations by exact hash, so a stalled decoder cannot prevent closing. **Delete** remembers the exact image hash across restarts and later discovery, without hiding another encoding or the original of a duplicate. The list retains the latest 5,000 forgotten hashes; older ones may be discovered again. Favorites are **not assumed inaccessible**: click the star and wait. Complete library enumeration/synchronization and complete cross-language discovery are not claimed. With direct sending off, the maker re-encodes indexed stickers and explicit Send still flattens animations.
-
-In **Edit stickers**, **✦ Tag N untagged** tags empty search terms in the current group/search view; the selection’s ✦ tags only its untagged stickers. More than 20 asks for confirmation. The header shows progress and **Stop**; completed results stay saved, and **Try again** retries failed entries. The **Untagged** chip keeps its current tiles visible as results arrive. Typing or deleting withdraws that sticker from the tagging queue. Batch and automatic results fill empty terms and add existing groups without replacing curated terms or removing groups. In the editor, **✦** suggests an unsaved draft; **Save** accepts the terms and suggested groups, and **Discard** restores the original draft.
-
-**Tag new stickers automatically** is off initially. Turning it on sends only stickers indexed afterward, without processing the existing library. Manual and automatic tagging share up to three simultaneous requests. Authentication, quota, connection and image-model errors stop the queue and pause automatic tagging for the session; toggle the setting off/on, replace the key, or complete a manual tag to resume. The pause reason is held in memory, and the setting is saved with the other preferences.
-
-Sticker tagging sends the sticker image to the configured OpenAI or Anthropic provider, plus its animation flag, existing group names and up to five examples of library search terms. Editor suggestions also send the current search terms. It never sends chat messages, contact names or conversation records. Animated stickers use up to three still PNG frames (a single frame when further decoding is unavailable); static stickers use WebP for OpenAI and a PNG for Anthropic. Provider access and saved keys stay in main; only unsaved pasted text is held temporarily in the local settings field. Provider account retention and billing policies apply. The desktop fixture uses deterministic local suggestions and makes no tagging network requests.
-
-Ordinary messaging, attachments, emoji, playback and other media stay with WhatsApp Web. Downloads use a save dialog; microphone/camera capture asks for permission. Once the signed-in chat list is ready and the window is visible, Companion asks once about desktop notifications and remembers Allow or Deny. Change that answer anytime with **Notifications** in the tray menu. WhatsApp's main frame can copy images and text through Chromium's sanitized clipboard-write permission without a shell prompt; clipboard reads and unsanitized writes remain denied. Calling/native-client parity is not established. Unofficial personal-account automation can break or be restricted by WhatsApp.
-
-Use one personal account per application data directory. Account switching does not migrate Companion metadata; use a fresh directory for another account. A mobile companion remains future work.
-
-## Verify and package
-
-Linux desktop checks require `xvfb` (`sudo apt install xvfb`).
-
-```bash
-npm run build
-npm test
-npm run test:desktop                    # actual Electron with disposable fixture data
-xvfb-run -a npm run test:desktop        # headless Linux
-npm run package:dir                    # release/linux-unpacked on Linux
-npm run package:linux                  # AppImage under release/
-npm run package:win                    # run on Windows for NSIS
-npm run package:mac                    # run on macOS for DMG
-```
-
-Companion starts with a lightweight isolated detector and defers overlays, message observation and sticker discovery only while a recognized WhatsApp splash is present, for at most 20 seconds. Shell, login/QR, blocked and unknown screens activate the connector immediately, preserving logout and account-warning safety checks. Remote background throttling stays disabled so WhatsApp can receive messages and show permitted notifications while hidden. Account linking still requires your QR interaction.
-
-If a recognized loading splash remains for at least 60 seconds with no phase or coarse progress change for at least 30 seconds, Companion can reload WhatsApp normally. Recovery requires fresh authenticated heartbeats, a visible, online window and no pending app action or permission dialog. It allows at most two automatic reloads per launch, at least 120 seconds apart. Unknown markup or missing heartbeats never trigger recovery. Reload preserves cookies and storage; after the budget is used, use **Reload WhatsApp** if needed.
-
-The tray icon stays available while Companion runs. Closing the window hides it and removes its taskbar entry; WhatsApp stays connected. Click the tray icon or **Open WhatsApp Companion** to show it again. Clicking a notification while the window is in the tray doesn't open it; use the tray icon. **Quit** in the tray or app menu (Ctrl+Q) exits completely. Launching Companion again brings the running window forward.
-
-**Start at login** defaults on for packaged apps with a tray and starts hidden, loading WhatsApp in the background. Toggle it in the tray menu. Linux uses an XDG autostart entry pointing to the current AppImage or executable; development and fixture runs never change OS autostart. Windows and macOS use Electron login settings. If tray creation fails, hidden launches show the window, closing quits, and login startup is not enabled by default. Linux cannot reliably detect a missing tray host after successful tray construction.
-
-Startup and shutdown timings are saved asynchronously to owner-only `diagnostics/startup.log`, rotated at 256 KiB with one previous file. Earlier interrupted launches remain visible. The log contains timestamps, structural phase/progress codes, visibility, bounded timing/bounds/version metadata and watchdog decisions. While running, local startup page load rejections record `base-load-failed` or `controls-load-failed` with only a bounded numeric error code when available, and do not abort remote startup. Controls retry once if their URL has not committed; `controls-loaded` follows the attempts only when the controls URL is present. Once closing begins, pending startup loads stop quietly without retries, failure diagnostics or a startup error dialog. Remote load recovery records `load-failed` with a bounded numeric code/attempt, plus `load-retry`, `navigation-stalled` and one-time `relaunch` events with attempt counts. The first startup asset failure per navigation records only its script/stylesheet kind. A one-time loading-screen signature records allowlisted standard progress/ancestor tags and attribute-presence flags; ancestor IDs and test IDs retain only explicitly allowlisted WhatsApp structural identifiers, with other tags and attribute values replaced by `other`. The signature waits for visible progress or a known splash marker, or for an unknown document to complete the startup grace period. It excludes URLs, error messages, DOM text, account identifiers, QR data and credentials. Quitting stops command intake immediately, drains sticker intake and closes both views even if a frame was disposed. Nonessential sticker GC runs after navigation begins; migration remains durable before the window opens.
-
-WhatsApp fills the entire content area. Settings are a separate trusted native view overlaid beside the rail or at the right; they do not shrink WhatsApp. Resizing, maximizing and restoring update both views. Local controls keep a fixed zoom level. Reloading them closes the panel.
-
-Desktop tests never connect to WhatsApp or a provider. They exercise acceptance/dismissal, refinement, incoming/chat changes, simulated composition, keyboard behavior, renderer isolation, settings reset, sticker editing/search, animated picker lookup, stored-file sticker creation, explicit Send still and cancellation while finding/preparing, pause-and-edit races, native layout after resize/zoom/reload, and restart persistence. Unit tests cover inheritance, style boundaries, staleness, persistence failure, provider contracts/errors, credential storage and automatic sending decisions/countdown cancellation. Automatic-send authorization expires within two seconds of main-process dispatch and before permitted hours end. Cancellation invalidates queued commands locally; immediately before clicking Send, the isolated preload also rechecks permission with main so a local-settings pause cannot be overtaken by queued work. Fixture screenshots are written under ignored `.local/screenshots/`.
-
-The unpacked Linux executable is `release/linux-unpacked/whatsapp-companion`. Distribution builds are unsigned. Do not disable Chromium’s sandbox to work around host setup; use a properly installed package / host configuration.
-
-The app uses a custom emerald chat/handset icon with a mint Companion sparkle. Linux window and launcher icons, Windows ICO and macOS ICNS exports are included. See [icon assets and regeneration](assets/README.md); `npm run icons:export` regenerates platform sizes from the saved master. Normal builds use the checked-in exports.
-
-## Releases
-
-This desktop application is distributed as a Linux AppImage; it has no hosted web deployment or automatic updater. Release artifacts contain application code and assets, never the development machine's account data, sticker library or API keys. Download the AppImage from [GitHub Releases](https://github.com/StantonMatt/whatsapp-companion/releases), make it executable, and launch it:
-
-```bash
-chmod +x 'WhatsApp Companion-0.2.0.AppImage'
-./'WhatsApp Companion-0.2.0.AppImage'
-```
-
-To prepare a release, run the verification commands above and `npm run package:linux -- --publish never`, then complete the repository's required review-fix-loop before committing or pushing. Publish the reviewed commit on `main`, create the matching version tag, attach the AppImage and its SHA-256 checksum to the tag's GitHub release. The project is private, so downloads require GitHub access. Releases are unsigned; Windows/macOS packages are not yet validated. A source push by itself does not deploy an update to installed applications.
-
-CI runs through [GitHub Actions](https://github.com/StantonMatt/whatsapp-companion/actions); see [CI operation](docs/ci.md).
-
-## Data and security
-
-The main process owns providers, credentials, persistence, permissions and budgets. The local sandboxed React renderer uses a small validated IPC API. The remote sandboxed preload observes DOM and implements guarded composer commands, with **no exposed desktop API**. Automatic replies and native card sticker sends recheck one-use main-process authorization immediately before native activation. For the opt-in direct route, main executes one fixed bundled main-world function with bounded, validated arguments, binds the active chat’s exact WID to the local-click ticket, and consumes one attempt before dispatch. No main-world callable API or preload bridge is installed. A returned sticker model with ack ≥ 1 and the bound destination confirms the send. Structural route/timing/outcome/version diagnostics go to owner-only `diagnostics/sticker-sends.log`, without IDs, names or bytes. Sticker cancellation revokes finding and preparing tickets. Maker image disclosure and its final Send click have separate one-use authorizations; the isolated connector retains destination continuity only for the app-owned editor transition. Once clicked, sending finishes and reports its result. Sender, origin and main-frame checks protect IPC. WhatsApp may define its own browser-side `require` loader; it has no Node integration. A pasted key travels once from the local sandboxed settings renderer to main through validated IPC. Main validates and OS-encrypts it; status returns only presence booleans. Fields clear on successful save, Cancel/Escape and page/panel close. Keys never enter WhatsApp, status, diagnostics or logs. Provider HTTPS destinations are fixed, redirects are refused, and raw error bodies are not shown.
-
-Data normally lives in `~/.config/WhatsApp Companion/` on Linux, `%APPDATA%/WhatsApp Companion/` on Windows, and `~/Library/Application Support/WhatsApp Companion/` on macOS. `companion.json` holds settings, aggregate style traits, hashed conversation anchors, sticker metadata and attempt budgets; `stickers/<sha256>.webp` holds the original sticker bytes; `credentials.json` holds OS-encrypted keys and backend selection. Files are atomically replaced with owner-only permissions (sticker folder 0700, files 0600). On Linux, writes flush both the file and its containing directory. Sticker images are served only to the local controls session through `companion-sticker://<sha256>`; the WhatsApp session cannot resolve that scheme. WhatsApp session data stays in `Partitions/whatsapp`. **Metadata/session files are not additionally encrypted by Companion**; use disk encryption. Conversation text, sender labels, document filenames and quote context are transient and not stored by Companion; WhatsApp maintains its own browser storage. OpenAI uses `store: false`; provider retention follows your account policies.
-
-On the first startup with schema v1, Companion validates the complete inline library, durably saves `companion.v1-backup.json` without overwriting an existing backup, writes and verifies each original WebP, then replaces `companion.json` with schema v2 metadata. An interrupted migration resumes on restart; failures preserve the inline manifest and stop startup. No sticker is re-encoded or merged during migration. The Stickers hint line reports capacity or save failures. Missing/damaged image files retain their card metadata and offer Retry; sending fails with a recovery message. Deleting saves each tombstone before deleting the blob. Deferred startup cleanup removes only recognized unreferenced sticker files after successful state validation/migration, using the current reference set when cleanup runs.
-
-Invalid state is preserved and startup stops instead of overwriting it. For recovery, close the app, back up the data directory and inspect/restore `companion.json`. **Back up and restore `companion.json` together with the `stickers/` folder.** To restore the pre-migration state, preserve the current directory first, then copy `companion.v1-backup.json` over `companion.json`; the next startup migrates again. This loses settings, labels, additions and forgets made after that backup; schema v2 does not support opening the manifest in an older app. A corrupt existing blob must be restored or moved aside before retrying migration. Renaming it creates fresh defaults and loses metadata unless restored. Do not delete the WhatsApp partition unless you intend to log out. For isolated development, use `npm start -- --data-dir=/absolute/test-directory`; packaged apps ignore this development flag. Demo data is separate and cannot access the real provider key.
-
-See [architecture and verification](docs/implementation.md) and the [product brief](docs/product-brief.md).
+MIT © 2026 Matthew Stanton. See [LICENSE](LICENSE).

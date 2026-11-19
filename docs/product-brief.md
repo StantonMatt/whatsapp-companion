@@ -6,7 +6,7 @@ Created September 28, 2026 from the project planning conversation.
 
 Build a personal WhatsApp application that feels close to WhatsApp for Mac while running on Linux first. Ordinary messaging should feel smooth and familiar. Personal additions should improve sticker discovery and help the user write replies without turning the interface into a separate AI chat application.
 
-Implementation was authorized on September 28, 2026, superseding the original planning-only scope. A first Electron + React + TypeScript application now exists. This document retains the product discussion and corrections; [README](../README.md) and [implementation notes](implementation.md) describe actual behavior, verification and limitations.
+Implementation was authorized on September 28, 2026, superseding the original planning-only scope. A first Electron + React + TypeScript application now exists. This document retains the product discussion and corrections; [user guide](user-guide.md) and [implementation notes](implementation.md) describe actual behavior, verification and limitations.
 
 ## User requirements and preferences
 
