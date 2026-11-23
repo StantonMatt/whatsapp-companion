@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   errors: [] as unknown[],
   diagnostics: [] as any[],
   menu: [] as any[],
+  external: [] as string[],
+  messageBox: [] as { options: any; resolve: (result: { response: number; checkboxChecked: boolean }) => void }[],
   store: undefined as { update: (change: (state: State) => void) => void; durabilityWarning: boolean } | undefined
 }));
 
@@ -86,8 +88,8 @@ vi.mock('electron', async () => {
     app, BrowserWindow, WebContentsView, protocol: { registerSchemesAsPrivileged: vi.fn() },
     ipcMain: Object.assign(ipcMain, { handle: (name: string, handler: (...args: any[]) => any) => mocks.handlers.set(name, handler) }),
     session: { defaultSession: permissions(), fromPartition: vi.fn(() => permissions()) },
-    dialog: { showErrorBox: (...args: unknown[]) => mocks.errors.push(args) },
-    shell: {}, Menu: { buildFromTemplate: vi.fn(template => { mocks.menu = template; return template; }), setApplicationMenu: vi.fn() }
+    dialog: { showErrorBox: (...args: unknown[]) => mocks.errors.push(args), showMessageBox: (_win: unknown, options: any) => new Promise(resolve => mocks.messageBox.push({ options, resolve })) },
+    shell: { openExternal: async (url: string) => { mocks.external.push(url); } }, Menu: { buildFromTemplate: vi.fn(template => { mocks.menu = template; return template; }), setApplicationMenu: vi.fn() }
   };
 });
 vi.mock('../src/main/sticker-send-diagnostics', () => ({ StickerSendDiagnostics: class {
@@ -133,7 +135,7 @@ beforeEach(async () => {
   vi.stubGlobal('__dirname', '/tmp/sticker-main-test');
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   mocks.animated = false; mocks.readFailure = false; mocks.reads.length = 0; mocks.diagnostics.length = 0;
-  mocks.views.length = 0; mocks.handlers.clear(); mocks.errors.length = 0;
+  mocks.views.length = 0; mocks.handlers.clear(); mocks.errors.length = 0; mocks.external.length = 0; mocks.messageBox.length = 0;
   await import('../src/main/index');
   await vi.dynamicImportSettled();
   expect(mocks.errors).toEqual([]);
@@ -163,6 +165,33 @@ const inputBlocked = (input = { type: 'keyDown', key: 'x' }) => {
 const publications = () => controls().send.mock.calls.filter(([channel]) => channel === 'companion:status').map(([, update]) => update as StatusUpdate);
 const chromeCommands = () => remote().send.mock.calls.filter(([channel, command]) => channel === 'companion:command' && command.type === 'chrome');
 
+test('WhatsApp links ask first unless the chat or the global setting skips the question', async () => {
+  const open = (url: string) => (remote() as any).setWindowOpenHandler.mock.calls[0][0]({ url });
+  const link = 'https://example.com/page';
+  expect(open(link)).toEqual({ action: 'deny' });
+  expect(mocks.messageBox).toHaveLength(1); expect(mocks.messageBox[0].options).toMatchObject({ message: 'Open this link in your browser?', detail: link, checkboxLabel: 'Don’t ask again in this chat' });
+  mocks.messageBox[0].resolve({ response: 0, checkboxChecked: true }); await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.external).toEqual([]); expect(status().state.links.skipChats).toEqual([]);
+  open(link); mocks.messageBox[1].resolve({ response: 1, checkboxChecked: true });
+  await vi.waitFor(() => expect(mocks.external).toEqual([link]));
+  expect(status().state.links.skipChats).toEqual(['123@c.us']);
+  open(link); await Promise.resolve();
+  expect(mocks.messageBox).toHaveLength(2); expect(mocks.external).toEqual([link, link]);
+  expect(await action({ type: 'links', resetChats: true })).toEqual({ ok: true });
+  open(link); expect(mocks.messageBox).toHaveLength(3);
+  expect(await action({ type: 'links', confirm: false })).toEqual({ ok: true });
+  open(link); await Promise.resolve();
+  expect(mocks.messageBox).toHaveLength(3); expect(mocks.external).toEqual([link, link, link]);
+  open('file:///etc/passwd'); expect(mocks.messageBox).toHaveLength(3); expect(mocks.external).toHaveLength(3);
+  // A read-only chat has no composer but is still the open, identified chat.
+  expect(await action({ type: 'links', confirm: true })).toEqual({ ok: true });
+  remoteEvent({ type: 'snapshot', snapshot: { ...snapshot, ready: false, revision: '2' } });
+  open(link); expect(mocks.messageBox[3].options.checkboxLabel).toBe('Don’t ask again in this chat');
+  mocks.messageBox[3].resolve({ response: 1, checkboxChecked: true });
+  await vi.waitFor(() => expect(mocks.external).toHaveLength(4));
+  expect(status().state.links.skipChats).toEqual(['123@c.us']);
+  open(link); await Promise.resolve(); expect(mocks.messageBox).toHaveLength(4); expect(mocks.external).toHaveLength(5);
+});
 test('status polling during pending maker capture preserves the subscriber send and busy chat update', async () => {
   await action({ type: 'cancelSticker' });
   await vi.advanceTimersByTimeAsync(STICKER_MAKER_CLEANUP_MS);

@@ -129,7 +129,9 @@ const stateBaseSchema = z.object({
   auto: z.record(z.string(), autoSchema),
   ledger: z.record(z.string(), z.array(z.object({ at: z.number(), messageId: z.string().max(250) })).max(100)),
   stickers: z.array(legacyStickerSchema).max(MAX_LIBRARY_STICKERS),
-  forgottenStickers: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(5000).default([])
+  forgottenStickers: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(5000).default([]),
+  // Links clicked in WhatsApp open in the browser; skipped chats open without asking.
+  links: z.object({ confirm: z.boolean(), skipChats: z.array(settingsIdSchema).max(5000) }).strict().default(() => ({ confirm: true, skipChats: [] }))
 }).strict();
 export const legacyStateSchema = stateBaseSchema;
 export const stateSchema = stateBaseSchema.extend({ version: z.literal(2), stickers: z.array(stickerSchema).max(MAX_LIBRARY_STICKERS), stickerGroups: z.array(stickerGroupSchema).max(50).default([]) }).strict()
@@ -146,7 +148,7 @@ export type State = z.infer<typeof stateSchema>;
 export function initialState(): State {
   return { version: 2, desktop: {}, global: { ...defaults }, direct: {}, group: {}, chats: {},
     provider: 'openai', models: { openai: 'gpt-6-luna', anthropic: 'claude-sonnet-5-5' }, reasoning: { openai: {}, anthropic: {} },
-    conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [], stickerGroups: [], forgottenStickers: [] };
+    conversations: {}, profiles: {}, auto: {}, ledger: {}, stickers: [], stickerGroups: [], forgottenStickers: [], links: { confirm: true, skipChats: [] } };
 }
 export type ViewBounds = { x: number; y: number; width: number; height: number };
 export type StickerShield = { nonce: string; image: string; bounds: ViewBounds; panel: ViewBounds };
@@ -178,6 +180,7 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('preferences'), scope: scopeSchema, patch: preferencesPatchSchema }).strict()
     .refine(action => action.scope === 'global' || (action.patch.aiFeatures === undefined && action.patch.directStickerSend === undefined && action.patch.automaticStickerTags === undefined)),
   z.object({ type: z.literal('resetPreferences'), scope: scopeSchema }).strict(),
+  z.object({ type: z.literal('links'), confirm: z.boolean().optional(), resetChats: z.literal(true).optional() }).strict(),
   z.object({ type: z.literal('resetStylePreferences'), scope: settingsIdSchema }).strict(),
   z.object({ type: z.literal('provider'), provider: providerSchema, model: modelIdSchema }).strict(),
   z.object({ type: z.literal('reasoning'), provider: providerSchema, model: modelIdSchema, effort: reasoningEffortSchema }).strict(),

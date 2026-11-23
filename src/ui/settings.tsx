@@ -35,6 +35,11 @@ export function Settings({ status, act, close, initialTab = null }: { status: St
         </>}
         {!chat && <DirectStickerSetting checked={status.state.global.directStickerSend} reason={status.state.global.directStickerDisabledReason} sequence={status.sequence} act={act}/>}
         {!chat && ai && <AutomaticStickerSetting status={status} act={act}/>}
+        {!chat && <Toggle label="Ask before opening links" checked={status.state.links.confirm} onChange={confirm => void act({ type: 'links', confirm })}/>}
+        {!chat && status.state.links.confirm && status.state.links.skipChats.length > 0 && <>
+          <p className="hint">Links open without asking in {status.state.links.skipChats.length === 1 ? '1 chat' : `${status.state.links.skipChats.length} chats`}.</p>
+          <button className="reset-link" onClick={() => void act({ type: 'links', resetChats: true })}>Ask in all chats</button>
+        </>}
         {chat && ai && <button className="reset-link" onClick={() => void act({ type: 'resetPreferences', scope })}>Reset all to global settings</button>}
       </> : tab === 'Replies' ? <ReplySettings status={status} act={act} scope={scope}/> : tab === 'Providers' ? <Providers status={status} act={act}/> : tab === 'Style' ? <StyleSettings key={status.chat.settingsId ?? 'no-chat'} status={status} act={act} scope={scope === 'global' ? 'general' : scope}/> : <AutoSettings status={status} act={act}/>}
       {!tab && !chat && <div className="footer-actions"><button className="quiet" onClick={() => void act({ type: 'reload' })}>Reload WhatsApp</button></div>}

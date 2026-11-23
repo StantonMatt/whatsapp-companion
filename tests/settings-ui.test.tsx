@@ -2,7 +2,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { initialState, type Status, type ReasoningEffort } from '../src/shared/model';
+import { actionSchema, initialState, stateSchema, type Status, type ReasoningEffort } from '../src/shared/model';
 import { Settings } from '../src/ui/settings';
 
 let root: Root, host: HTMLDivElement;
@@ -250,12 +250,12 @@ async function providerPage(options: { keys?: Status['keys']; secure?: boolean; 
   return { action, publish: (change: Partial<Status>) => act(() => { current = { ...current, ...change }; draw(); }), current: () => current };
 }
 
-test('AI off has only the master switch, direct stickers and Reload; a failed optimistic change rolls back', async () => {
+test('AI off has only the master switch, direct stickers, link confirmation and Reload; a failed optimistic change rolls back', async () => {
   const current = status(); current.state.global.aiFeatures = false;
   const request = deferred(), action = vi.fn(() => request.promise);
   act(() => root.render(<Settings status={current} act={action} close={() => {}}/>));
   expect(host.querySelector('h1')?.textContent).toBe('Settings');
-  expect(host.querySelectorAll('input[type=checkbox]')).toHaveLength(2);
+  expect(host.querySelectorAll('input[type=checkbox]')).toHaveLength(3);
   expect(host.querySelector('nav')).toBeNull(); expect(host.textContent).not.toContain('All conversations');
   expect(host.textContent).not.toContain('Tag new stickers'); expect(findButton('Reload WhatsApp')).toBeDefined();
   const toggle = host.querySelector<HTMLInputElement>('input')!;
@@ -263,6 +263,24 @@ test('AI off has only the master switch, direct stickers and Reload; a failed op
   await act(async () => request.resolve(false));
   expect(toggle.checked).toBe(false); expect(host.querySelector('nav')).toBeNull();
   expect(action).toHaveBeenCalledExactlyOnceWith({ type: 'preferences', scope: 'global', patch: { aiFeatures: true } });
+});
+test('link confirmation is a global switch with a reset for chats that skip it', async () => {
+  const current = status(); current.state.global.aiFeatures = false; current.state.links = { confirm: true, skipChats: ['123@c.us', '456@c.us'] };
+  const action = vi.fn(async () => true);
+  const draw = () => act(() => root.render(<Settings status={current} act={action} close={() => {}}/>));
+  draw();
+  const toggle = () => [...host.querySelectorAll('label')].find(label => label.textContent === 'Ask before opening links')!.querySelector('input')!;
+  expect(toggle().checked).toBe(true); expect(host.textContent).toContain('Links open without asking in 2 chats.');
+  await act(async () => findButton('Ask in all chats').click()); expect(action).toHaveBeenLastCalledWith({ type: 'links', resetChats: true });
+  await act(async () => toggle().click()); expect(action).toHaveBeenLastCalledWith({ type: 'links', confirm: false });
+  current.state.links = { confirm: false, skipChats: ['123@c.us'] }; draw();
+  expect(toggle().checked).toBe(false); expect(host.textContent).not.toContain('Links open without asking');
+  current.panel = 'chat'; current.state.global.aiFeatures = true; draw();
+  expect(host.textContent).not.toContain('Ask before opening links');
+  expect(actionSchema.safeParse({ type: 'links', confirm: true }).success).toBe(true);
+  expect(actionSchema.safeParse({ type: 'links', resetChats: false }).success).toBe(false);
+  const { links: _links, ...legacy } = initialState();
+  expect(stateSchema.parse(legacy).links).toEqual({ confirm: true, skipChats: [] });
 });
 test('AI off chat fallback opens global Settings and never offers a local master switch', async () => {
   const current = status(); current.state.global.aiFeatures = false; current.panel = 'chat';

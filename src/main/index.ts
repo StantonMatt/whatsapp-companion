@@ -689,6 +689,7 @@ async function start() {
         case 'resetPreferences': directStickerSafety.reset(action.scope);
           stickerTags.observe();
           assistant.reconfigure(); break;
+        case 'links': store.update(s => { if (action.confirm !== undefined) s.links.confirm = action.confirm; if (action.resetChats) s.links.skipChats = []; }); break;
         case 'resetStylePreferences': store.update(s => resetStylePreferences(s, action.scope)); assistant.reconfigure(); break;
         case 'provider': if (!fixture && !vault.has(action.provider)) throw new Error('Add an API key for this provider.'); store.update(s => { s.provider = action.provider; s.models[action.provider] = action.model; }); providerChanged(); assistant.message = 'Provider configuration changed. Use Test connection to check account access.'; break;
         case 'reasoning': store.update(s => setReasoning(s, action.provider, action.model, action.effort)); providerChanged(); assistant.message = 'Provider configuration changed. Use Test connection to check account access.'; break;
@@ -933,7 +934,19 @@ async function start() {
   });
   for (const contents of [win.webContents, controls.webContents, remote.webContents]) {
     contents.setWindowOpenHandler(({ url }) => {
-      if (contents === remote.webContents && /^https?:\/\//.test(url)) void dialog.showMessageBox(win, { type: 'question', message: 'Open this link in your browser?', detail: url.slice(0, 500), buttons: ['Cancel', 'Open'], defaultId: 0, cancelId: 0 }).then(r => { if (r.response === 1) void shell.openExternal(url); });
+      if (contents === remote.webContents && /^https?:\/\//.test(url)) {
+        const chatId = assistant.snapshot.conversationOpen ? assistant.snapshot.settingsId : null;
+        const links = store.state.links;
+        if (!links.confirm || (chatId && links.skipChats.includes(chatId))) void shell.openExternal(url);
+        else void dialog.showMessageBox(win, { type: 'question', message: 'Open this link in your browser?', detail: url.slice(0, 500), buttons: ['Cancel', 'Open'], defaultId: 0, cancelId: 0, ...(chatId ? { checkboxLabel: 'Don’t ask again in this chat' } : {}) }).then(r => {
+          if (r.response !== 1) return;
+          if (chatId && r.checkboxChecked) {
+            try { store.update(s => { if (!s.links.skipChats.includes(chatId)) s.links.skipChats = [...s.links.skipChats, chatId].slice(-5000); }); publish(); }
+            catch { /* The link still opens when the preference can't be saved. */ }
+          }
+          void shell.openExternal(url);
+        });
+      }
       return { action: 'deny' };
     });
     contents.on('will-attach-webview', event => event.preventDefault());
