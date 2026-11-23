@@ -1241,7 +1241,7 @@ try {
     const filename = (await diagnosticFiles())[0], path = join(dir, 'diagnostics', filename);
     expect(filename).toMatch(/^sticker-picker-.*\.json$/);
     const contents = await readFile(path, 'utf8'), diagnostic = JSON.parse(contents);
-    expect(diagnostic).toMatchObject({ status: 'captured', appVersion: '0.2.0', connectorVersion: 1, truncated: false, tree: { tagName: 'ul', attributes: { 'data-testid': 'expressions-panel' } } });
+    expect(diagnostic).toMatchObject({ status: 'captured', appVersion: '0.3.0', connectorVersion: 1, truncated: false, tree: { tagName: 'ul', attributes: { 'data-testid': 'expressions-panel' } } });
     for (const secret of ['PRIVATE-PICKER-TITLE', 'PRIVATE-PICKER-LABEL', 'PRIVATE-PICKER-ALT', 'Alex', '123456@c.us', 'base64,']) expect(contents).not.toContain(secret);
     expect(diagnostic.tree.children.find(node => node.attributes['data-testid'] === 'panel-starred').labels['aria-label'].words).toEqual(['favorites']);
     const flatten = node => [node, ...node.children.flatMap(flatten)];
