@@ -40,15 +40,15 @@ For Linux on x86_64 (tested on Kubuntu).
    ```bash
    sudo apt install libfuse2t64
    ```
-2. Download `WhatsApp.Companion-0.2.0.AppImage` from the [latest release](https://github.com/StantonMatt/whatsapp-companion/releases/latest).
+2. Download `WhatsApp.Companion-0.3.0.AppImage` from the [latest release](https://github.com/StantonMatt/whatsapp-companion/releases/latest).
 3. Move it to a folder you'll keep, make it executable and start it:
 
    ```bash
    mkdir -p ~/Applications
-   mv ~/Downloads/WhatsApp.Companion-0.2.0.AppImage ~/Applications/
+   mv ~/Downloads/WhatsApp.Companion-0.3.0.AppImage ~/Applications/
    cd ~/Applications
-   chmod +x WhatsApp.Companion-0.2.0.AppImage
-   ./WhatsApp.Companion-0.2.0.AppImage
+   chmod +x WhatsApp.Companion-0.3.0.AppImage
+   ./WhatsApp.Companion-0.3.0.AppImage
    ```
 
    Or, in Dolphin, right-click the file, choose **Properties → Permissions**, tick **Is executable**, and double-click it.

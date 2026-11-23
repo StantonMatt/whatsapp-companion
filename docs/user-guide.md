@@ -29,8 +29,8 @@ WhatsApp Companion is distributed as a Linux AppImage. It has no hosted web depl
 4. Make it executable and start it:
 
    ```bash
-   chmod +x WhatsApp.Companion-0.2.0.AppImage
-   ./WhatsApp.Companion-0.2.0.AppImage
+   chmod +x WhatsApp.Companion-0.3.0.AppImage
+   ./WhatsApp.Companion-0.3.0.AppImage
    ```
 
    In Dolphin you can instead right-click the file, choose **Properties → Permissions**, tick **Is executable**, and double-click it.
@@ -99,7 +99,7 @@ Saved credentials require working OS encryption: KWallet or Secret Service on Li
 
 - If storage is unavailable, unlock it and use **Check again** in Providers; saving stays disabled until secure storage is available.
 - The app refuses Electron's unencrypted `basic_text` store.
-- If Electron does not detect KDE correctly, start once with `--password-store=kwallet6`, for example `./WhatsApp.Companion-0.2.0.AppImage --password-store=kwallet6`, or from source `npm start -- --password-store=kwallet6`. The secure backend is remembered when saving a key.
+- If Electron does not detect KDE correctly, start once with `--password-store=kwallet6`, for example `./WhatsApp.Companion-0.3.0.AppImage --password-store=kwallet6`, or from source `npm start -- --password-store=kwallet6`. The secure backend is remembered when saving a key.
 - Windows/macOS secure storage still needs validation on those systems.
 
 How keys travel and where they are kept is described in [Data and privacy](data-and-privacy.md#keys-and-security-design).
@@ -259,6 +259,7 @@ Separately off by default, with explicit per-chat permission. **Automatic sendin
 Ordinary messaging, attachments, emoji, playback and other media stay with WhatsApp Web.
 
 - Downloads use a save dialog; microphone/camera capture asks for permission.
+- Links open in your browser after a confirmation. Tick **Don’t ask again in this chat** to open that chat’s links directly, or turn off **Ask before opening links** in Settings for all chats. **Ask in all chats** clears the per-chat exceptions.
 - Once the signed-in chat list is ready and the window is visible, Companion asks once about desktop notifications and remembers Allow or Deny. Change that answer anytime with **Notifications** in the tray menu.
 - WhatsApp's main frame can copy images and text through Chromium's sanitized clipboard-write permission without a shell prompt; clipboard reads and unsanitized writes remain denied.
 - Calling/native-client parity is not established.
