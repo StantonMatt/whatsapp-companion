@@ -7,7 +7,7 @@ This is a fresh application; no Whatsie or other messaging-client code was impor
 - `src/shared`: validated IPC/state schemas and connector command contract.
 - `src/core`: portable settings, style, search, suggestion and auto-reply decisions.
 - `src/connector/dom.ts`: DOM adapter. Persistent chat identity comes from recognized peer-bearing message IDs, never display names. Opaque-ID layouts become ready after a stable selected row/title/composer; main-process conversation recognition then scopes reply and style preferences. Conflicting peers fail closed. Row/identity/composer changes invalidate suggestions. Unknown authors are not treated as verified sent messages.
-- `src/preload/remote.ts`: sandboxed isolated-world integration, no bridge to the page’s main world. Emits snapshots, trusted user activity/requests, observed stickers and command acknowledgements.
+- `src/preload/remote.ts`: sandboxed isolated-world integration. Emits snapshots, trusted user activity/requests, observed stickers and command acknowledgements. A fixed preload-time wrapper around the native Notification constructor adds a private trusted-click listener; it signals main to show the window without exposing a page-callable API or reading notification content. WhatsApp's own click handler still opens the conversation. Electron 44's libnotify backend retrieves KDE's activation token before dispatching the native click; the shared tray/window remap path uses that token on Wayland.
 - `src/main`: persistence, OS encryption and validated key entry, fixed-endpoint providers, validated IPC, scheduling and sending permissions.
 - `src/ui`: local React controls. Masked provider fields send key text once to main; status carries only key-presence booleans.
 

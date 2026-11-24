@@ -1,7 +1,7 @@
 import { Menu, Tray, nativeImage } from 'electron';
 import { join } from 'node:path';
 
-export function createCompanionTray(root: string, actions: { open: () => void; notifications: () => boolean; startAtLogin: () => boolean;
+export function createCompanionTray(root: string, actions: { open: () => void; activate: () => void; notifications: () => boolean; startAtLogin: () => boolean;
   toggleNotifications: () => void; toggleStartAtLogin: () => void; quit: () => void }) {
   const image = nativeImage.createEmpty();
   for (const [size, scaleFactor] of [[22, 1], [44, 2]]) {
@@ -11,7 +11,7 @@ export function createCompanionTray(root: string, actions: { open: () => void; n
   }
   const tray = new Tray(image);
   try {
-    tray.setToolTip('WhatsApp Companion'); tray.on('click', actions.open);
+    tray.setToolTip('WhatsApp Companion'); tray.on('click', actions.activate);
     const refresh = () => tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Open WhatsApp Companion', click: actions.open }, { type: 'separator' },
       { label: 'Notifications', type: 'checkbox', checked: actions.notifications(), click: actions.toggleNotifications },

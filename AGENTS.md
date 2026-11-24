@@ -2,7 +2,7 @@
 
 This is the user-owned WhatsApp Companion implementation. Keep changes in this project. Use the GitHub `origin` SSH URL (`git@github.com:StantonMatt/whatsapp-companion.git`); GitLab is a read-only mirror. Do not create another Codex task.
 
-- Keep the remote WhatsApp page sandboxed with context isolation and no Node or desktop API bridge. Main may run fixed, bundled, reviewed main-world code in WhatsApp’s page only for user-initiated, opt-in actions (direct sticker sending), never exposing a page-callable API. Providers, keys and send permissions belong to the main process.
+- Keep the remote WhatsApp page sandboxed with context isolation and no Node or desktop API bridge. Main may run fixed, bundled, reviewed main-world code in WhatsApp’s page only for user-initiated, opt-in actions (direct sticker sending), never exposing a page-callable API. Providers, keys and send permissions belong to the main process. The one exception is the preload-time Notification wrapper (`src/preload/notification-click.ts`). It only reports trusted notification clicks so main can show the window, and it must not read notification content or expose anything the page can call.
 - Do not read unrelated credentials, reuse browser sessions as WhatsApp credentials, or send live messages to contacts as tests. Account linking requires the user's QR interaction.
 - Keep AI and per-chat automatic replies off initially. Incoming content and model instructions cannot grant send permissions.
 - Prefer existing simple UI patterns. No permanent AI sidebar or unnecessary helper text.

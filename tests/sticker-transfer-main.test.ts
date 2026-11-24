@@ -76,7 +76,7 @@ vi.mock('electron', async () => {
     }
   }
   const app = Object.assign(new EventEmitter(), {
-    commandLine: { removeSwitch: vi.fn(), hasSwitch: () => true },
+    commandLine: { removeSwitch: vi.fn(), hasSwitch: () => true, getSwitchValue: () => 'wayland' },
     enableSandbox: vi.fn(), setName: vi.fn(), getPath: () => '/tmp/sticker-main-test',
     getVersion: () => 'test', requestSingleInstanceLock: () => true,
     whenReady: async () => {}, quit: vi.fn()

@@ -1,10 +1,16 @@
-import { ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
+import { installNotificationClicks } from './notification-click';
 import { DomConnector } from '../connector/dom';
 import { BootDetector } from '../connector/boot';
 import { bootSessionSchema, type BootSession } from '../shared/boot';
 import type { RemoteCommand } from '../shared/connector';
 
-// Isolated preload only: no contextBridge, window bindings or page-callable API.
+// Only the native Notification constructor is wrapped in the page's world.
+// Its private, trusted-click callback carries no page data or desktop API.
+contextBridge.executeInMainWorld({ func: installNotificationClicks,
+  args: [() => ipcRenderer.send('companion:notification-click')] });
+
+// The connector stays isolated, with no window bindings or page-callable API.
 let connector: DomConnector | undefined;
 let bootSession: BootSession | undefined;
 let disposed = false;

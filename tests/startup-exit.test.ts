@@ -8,7 +8,7 @@ vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events');
   mocks.app = Object.assign(new EventEmitter(), {
     isPackaged: false, directory: '',
-    commandLine: { removeSwitch() {}, hasSwitch: () => true }, enableSandbox() {}, setName() {},
+    commandLine: { removeSwitch() {}, hasSwitch: () => true, getSwitchValue: () => 'wayland' }, enableSandbox() {}, setName() {},
     setPath(_name: string, value: string) { this.directory = value; }, getPath() { return this.directory; },
     getVersion: () => '0.1.0', requestSingleInstanceLock: vi.fn(), whenReady: vi.fn(), quit: vi.fn()
   });

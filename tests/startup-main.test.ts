@@ -54,7 +54,7 @@ vi.mock('electron', async () => {
   }
   class Window extends EventEmitter {
     webContents = new Contents(); destroyed = false; minimized = false; visible = true;
-    focus = vi.fn(); moveTop = vi.fn(); setSkipTaskbar = vi.fn();
+    focus = vi.fn(() => { this.emit('focus'); }); moveTop = vi.fn(); setSkipTaskbar = vi.fn();
     show = vi.fn(() => { this.visible = true; this.emit('show'); });
     hide = vi.fn(() => { this.visible = false; this.emit('hide'); });
     restore = vi.fn(() => { this.minimized = false; this.emit('restore'); });
@@ -69,7 +69,7 @@ vi.mock('electron', async () => {
   mocks.ipc = Object.assign(new EventEmitter(), { handle: (name: string, handler: (...args: any[]) => any) => mocks.handlers.set(name, handler) });
   mocks.app = Object.assign(new EventEmitter(), {
     isPackaged: false, directory: '',
-    commandLine: { removeSwitch() {}, hasSwitch: () => true, appendSwitch() {} }, enableSandbox() {}, setName() {},
+    commandLine: { removeSwitch() {}, hasSwitch: () => true, appendSwitch() {}, getSwitchValue: vi.fn(() => 'wayland') }, enableSandbox() {}, setName() {},
     setPath(_name: string, value: string) { this.directory = value; }, getPath() { return this.directory; },
     getVersion: () => '0.1.0', requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), quit: vi.fn(), relaunch: vi.fn()
   });
@@ -79,7 +79,7 @@ vi.mock('electron', async () => {
     setContextMenu(menu: any) { this.menu = menu; }
     constructor(public image: any) { super(); if (mocks.trayFailure) throw new Error('no tray'); mocks.trays.push(this); }
   }
-  return { Tray, powerMonitor: mocks.power, nativeImage: {
+  return { contextBridge: { executeInMainWorld: vi.fn() }, Tray, powerMonitor: mocks.power, nativeImage: {
     createEmpty: () => { const image = { addRepresentation: vi.fn() }; mocks.images.push(image); return image; },
     createFromPath: (path: string) => ({ isEmpty: () => false, toPNG: () => Buffer.from(path) })
   }, ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
@@ -106,6 +106,7 @@ beforeEach(async () => {
   mocks.vaultKeys.clear(); mocks.vaultSet.mockReset(); mocks.external.mockReset().mockResolvedValue(undefined); mocks.generator.mockReset().mockResolvedValue('Connected'); mocks.secure = true;
   vi.resetModules(); mocks.app?.removeAllListeners(); mocks.ipc?.removeAllListeners(); mocks.power?.removeAllListeners(); mocks.app?.quit.mockReset(); mocks.app?.relaunch.mockReset(); if (mocks.app) mocks.app.isPackaged = false;
   mocks.windows.length = mocks.views.length = mocks.records.length = mocks.trays.length = mocks.menus.length = mocks.images.length = 0; mocks.trayFailure = false; mocks.activateOnLoad = false; mocks.pendingRemoteLoad = undefined; mocks.handlers.clear(); mocks.errors.mockClear(); mocks.messageBox.mockReset().mockResolvedValue({ response: 0 });
+  mocks.app?.commandLine.getSwitchValue.mockReturnValue('wayland');
   directory = mkdtempSync(join(tmpdir(), 'startup-main-')); args = process.argv;
   process.argv = [...args, '--fixture', `--data-dir=${directory}`]; vi.stubGlobal('__dirname', '/fixture-build');
   await import('../src/main/index');
@@ -591,15 +592,132 @@ test('X hides and removes the taskbar entry without stopping runtime or destroyi
   expect(mocks.views.every(view => !view.webContents.destroyed)).toBe(true); expect(mocks.app.quit).not.toHaveBeenCalled();
   expect(mocks.handlers.get('companion:boot-session')!(bootEvent())).not.toBeNull();
 });
-test.each(['click', 'menu', 'second-instance'])('%s shows, restores, raises and focuses; repeated click never hides', source => {
+test.each(['click', 'menu', 'second-instance', 'notification'])('%s shows, restores, raises and focuses', source => {
   const win = mocks.windows[0]; win.close(); win.minimized = true;
   if (source === 'click') mocks.trays[0].emit('click');
   if (source === 'menu') trayMenu()[0].click();
   if (source === 'second-instance') mocks.app.emit('second-instance', {}, ['--hidden']);
+  if (source === 'notification') mocks.ipc.emit('companion:notification-click', bootEvent());
   expect(win.isVisible()).toBe(true); expect(win.restore).toHaveBeenCalledOnce();
   expect(win.moveTop).toHaveBeenCalled(); expect(win.focus).toHaveBeenCalled();
   expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
-  mocks.trays[0].emit('click'); expect(win.isVisible()).toBe(true); expect(win.hide).toHaveBeenCalledOnce();
+  if (source !== 'click') {
+    if (source === 'menu') trayMenu()[0].click();
+    else if (source === 'notification') mocks.ipc.emit('companion:notification-click', bootEvent());
+    else mocks.app.emit('second-instance', {}, []);
+    expect(win.isVisible()).toBe(true);
+  }
+});
+test('notification activation rejects other renderers, subframes, navigated documents and shutdown', () => {
+  const win = mocks.windows[0], remote = mocks.views[1].webContents, controls = mocks.views[0].webContents;
+  win.close(); win.focus.mockClear();
+  for (const event of [
+    { sender: controls, senderFrame: controls.mainFrame },
+    { sender: remote, senderFrame: { ...remote.mainFrame } },
+    { sender: remote, senderFrame: null }
+  ]) mocks.ipc.emit('companion:notification-click', event);
+  const url = remote.mainFrame.url; remote.mainFrame.url = 'https://example.com/';
+  mocks.ipc.emit('companion:notification-click', bootEvent()); remote.mainFrame.url = url;
+  mocks.app.emit('before-quit', { preventDefault() {} });
+  mocks.ipc.emit('companion:notification-click', bootEvent());
+  expect(win.focus).not.toHaveBeenCalled(); expect(win.isVisible()).toBe(false);
+});
+test.each([
+  { platform: 'linux', backend: 'wayland' }, { platform: 'linux', backend: 'x11' },
+  { platform: 'win32', backend: '' }, { platform: 'darwin', backend: '' }
+].flatMap(mode => ['minimized', 'compositor-minimized', 'visible', 'hidden'].map(state => ({ ...mode, state }))))(
+  'tray remaps only unfocused Wayland surfaces ($platform, $backend, $state)', async ({ platform, backend, state }) => {
+  const originalPlatform = process.platform;
+  try {
+    Object.defineProperty(process, 'platform', { value: platform });
+    mocks.app.commandLine.getSwitchValue.mockReturnValue(backend);
+    // A Wayland session can still run an X11 Electron window.
+    vi.stubEnv('XDG_SESSION_TYPE', 'wayland'); vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+    await restart();
+    const win = mocks.windows[0]; win.minimized = state === 'minimized'; win.visible = state !== 'hidden';
+    vi.spyOn(win, 'isFocused').mockReturnValue(false);
+    const remoteFocus = vi.spyOn(mocks.views[1].webContents, 'focus');
+    win.restore.mockClear(); win.hide.mockClear(); win.show.mockClear();
+    mocks.trays[0].emit('click');
+    expect(win.restore).toHaveBeenCalledTimes(state === 'minimized' ? 1 : 0);
+    const wayland = platform === 'linux' && backend === 'wayland';
+    if (wayland && state !== 'hidden') {
+      expect(win.hide).toHaveBeenCalledOnce(); expect(win.show).toHaveBeenCalledOnce();
+      if (state === 'minimized') expect(win.restore.mock.invocationCallOrder[0]).toBeLessThan(win.hide.mock.invocationCallOrder[0]);
+      expect(win.hide.mock.invocationCallOrder[0]).toBeLessThan(win.show.mock.invocationCallOrder[0]);
+    } else {
+      expect(win.hide).not.toHaveBeenCalled(); expect(win.show).toHaveBeenCalledTimes(state === 'hidden' ? 1 : 0);
+    }
+    expect(win.isMinimized()).toBe(false); expect(win.isVisible()).toBe(true);
+    expect(win.focus).toHaveBeenCalled(); expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
+    expect(remoteFocus).toHaveBeenCalledTimes(platform === 'linux' ? 1 : 0);
+  } finally { Object.defineProperty(process, 'platform', { value: originalPlatform }); }
+});
+test.each(['menu', 'second-instance', 'notification'])('%s does not remap an already focused Wayland window', source => {
+  const win = mocks.windows[0];
+  vi.spyOn(win, 'isFocused').mockReturnValue(true);
+  win.visible = true; win.minimized = false;
+  win.hide.mockClear(); win.show.mockClear();
+  if (source === 'menu') trayMenu()[0].click();
+  else if (source === 'notification') mocks.ipc.emit('companion:notification-click', bootEvent());
+  else mocks.app.emit('second-instance', {}, []);
+  expect(win.hide).not.toHaveBeenCalled(); expect(win.show).not.toHaveBeenCalled();
+  expect(win.moveTop).toHaveBeenCalled(); expect(win.focus).toHaveBeenCalled();
+});
+test('reported minimization still remaps even if focus has not updated yet', () => {
+  const win = mocks.windows[0]; win.minimized = true;
+  vi.spyOn(win, 'isFocused').mockReturnValue(true);
+  win.hide.mockClear(); win.show.mockClear(); trayMenu()[0].click();
+  expect(win.restore).toHaveBeenCalledOnce(); expect(win.hide).toHaveBeenCalledOnce(); expect(win.show).toHaveBeenCalledOnce();
+});
+test.each(['linux', 'win32', 'darwin'])('tray click toggles the focused window only on Linux (%s)', platform => {
+  const originalPlatform = process.platform, win = mocks.windows[0];
+  vi.spyOn(win, 'isFocused').mockReturnValue(true);
+  win.visible = true; win.minimized = false;
+  win.hide.mockClear(); win.show.mockClear(); win.focus.mockClear();
+  try {
+    Object.defineProperty(process, 'platform', { value: platform });
+    mocks.trays[0].emit('click');
+    expect(win.isVisible()).toBe(platform !== 'linux');
+    if (platform === 'linux') {
+      expect(win.hide).toHaveBeenCalledOnce(); expect(win.focus).not.toHaveBeenCalled();
+      expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(true);
+      mocks.trays[0].emit('click');
+      expect(win.isVisible()).toBe(true); expect(win.focus).toHaveBeenCalledOnce();
+      expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
+    } else expect(win.hide).not.toHaveBeenCalled();
+  } finally { Object.defineProperty(process, 'platform', { value: originalPlatform }); }
+});
+test.each(['remote', 'controls'])('Wayland waits for native focus and restores the last focused %s view after a remap', view => {
+  const win = mocks.windows[0], remote = mocks.views[1].webContents, controls = mocks.views[0].webContents;
+  mocks.menus.at(-1)[0].submenu.find((item: any) => item.label === 'Settings').click();
+  (view === 'remote' ? remote : controls).emit('focus');
+  const remoteFocus = vi.spyOn(remote, 'focus'), controlsFocus = vi.spyOn(controls, 'focus');
+  win.close(); win.focus.mockImplementation(() => {});
+  mocks.trays[0].emit('click');
+  expect(remoteFocus).not.toHaveBeenCalled(); expect(controlsFocus).not.toHaveBeenCalled();
+  // Mapping may focus the base/other view before the native window focus arrives.
+  (view === 'remote' ? controls : remote).emit('focus');
+  win.emit('focus');
+  expect(remoteFocus).toHaveBeenCalledTimes(view === 'remote' ? 1 : 0);
+  expect(controlsFocus).toHaveBeenCalledTimes(view === 'controls' ? 1 : 0);
+  remoteFocus.mockClear(); controlsFocus.mockClear();
+  win.emit('focus');
+  expect(remoteFocus).toHaveBeenCalledTimes(view === 'remote' ? 1 : 0);
+  expect(controlsFocus).toHaveBeenCalledTimes(view === 'controls' ? 1 : 0);
+});
+test.each(['remote', 'controls'])('Alt-Tab with Settings open restores the last focused %s view', view => {
+  const win = mocks.windows[0], remote = mocks.views[1].webContents, controls = mocks.views[0].webContents;
+  mocks.menus.at(-1)[0].submenu.find((item: any) => item.label === 'Settings').click();
+  (view === 'remote' ? remote : controls).emit('focus');
+  const remoteFocus = vi.spyOn(remote, 'focus'), controlsFocus = vi.spyOn(controls, 'focus');
+  win.emit('blur'); win.emit('focus');
+  expect(remoteFocus).toHaveBeenCalledTimes(view === 'remote' ? 1 : 0);
+  expect(controlsFocus).toHaveBeenCalledTimes(view === 'controls' ? 1 : 0);
+});
+test('Linux focuses WhatsApp before any child view has reported focus', () => {
+  const remoteFocus = vi.spyOn(mocks.views[1].webContents, 'focus');
+  mocks.windows[0].emit('focus'); expect(remoteFocus).toHaveBeenCalledOnce();
 });
 test('a cancelable session-end query leaves the app running', () => {
   mocks.windows[0].emit('query-session-end', { preventDefault: () => { throw new Error('must not block session end'); } });

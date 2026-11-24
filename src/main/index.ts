@@ -185,12 +185,29 @@ async function start() {
     if (connectorReady && lastBoot?.phase === 'shell' && lastBoot.chatListReady === true && notifications.answer() === undefined) void notifications.request();
     notifications.maybeAsk();
   };
-  // Clicking a notification while the window is in the tray doesn't open it; use the tray icon.
+  // Tray activation and native notification clicks share the Wayland remap path.
+  // Electron/Chromium resolves the actual Ozone backend before app readiness,
+  // including automatic selection and an explicit --ozone-platform=x11 override.
+  const wayland = process.platform === 'linux' && app.commandLine.getSwitchValue('ozone-platform') === 'wayland';
+  let lastFocusedContents: Electron.WebContents | undefined;
+  let remapFocus: Electron.WebContents | undefined;
   const showWindow = () => {
     if (closing || win.isDestroyed()) return;
+    const remap = wayland && (!win.isFocused() || win.isMinimized());
+    const restoreContents = lastFocusedContents;
     if (win.isMinimized()) win.restore();
+    // Wayland has no unminimize request or minimized-state notification.
+    // An unfocused surface may be KDE-minimized without Electron knowing.
+    // Remap it so the tray/notification activation token applies to the new map.
+    if (remap) { remapFocus = restoreContents; if (win.isVisible()) win.hide(); }
     win.setSkipTaskbar(false); if (!win.isVisible()) win.show();
     win.moveTop(); win.focus(); maybeAskNotifications();
+  };
+  const activateTray = () => {
+    if (closing || win.isDestroyed()) return;
+    if (process.platform === 'linux' && win.isVisible() && !win.isMinimized() && win.isFocused()) {
+      win.hide(); win.setSkipTaskbar(true);
+    } else showWindow();
   };
   const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
@@ -201,6 +218,8 @@ async function start() {
   // Electron 44 exposes no UA metadata parameter; its Chromium client hints remain unchanged.
   remoteSession.setUserAgent(userAgent);
   const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), session: remoteSession, contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true, backgroundThrottling: false } });
+  controls.webContents.on('focus', () => { lastFocusedContents = controls.webContents; });
+  remote.webContents.on('focus', () => { lastFocusedContents = remote.webContents; });
   startupDiagnostics.record('views-created');
   const sendRemote = (command: unknown) => safeRendererSend(remote.webContents, closing, 'companion:command', command);
   const requireRemote = (command: unknown) => requireRendererSend(remote.webContents, closing, 'companion:command', command);
@@ -555,6 +574,7 @@ async function start() {
   };
   const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => trustedFrame(event, controls.webContents, true);
   const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => trustedFrame(event, remote.webContents);
+  ipcMain.on('companion:notification-click', event => { if (isRemote(event)) showWindow(); });
   ipcMain.handle('companion:boot-session', event => isRemote(event) ? bootSession : null);
   ipcMain.on('companion:connector-ready', (event, raw: unknown) => {
     if (!isRemote(event) || connectorReady) return;
@@ -1055,8 +1075,17 @@ async function start() {
     else maybeAskNotifications();
   };
   win.on('show', recordVisibility); win.on('hide', recordVisibility); win.on('minimize', recordVisibility); win.on('restore', recordVisibility);
+  // Linux can focus the empty base page after both a Wayland remap and Alt-Tab.
+  // Restore the user's last view, even with Settings open over the composer.
+  if (process.platform === 'linux') win.on('focus', () => {
+    const contents = remapFocus ?? lastFocusedContents; remapFocus = undefined;
+    if (closing) return;
+    const target = contents ?? (panel ? controls.webContents : remote.webContents);
+    if (makerInputOwner || (target === controls.webContents && panel)) controls.webContents.focus();
+    else if (stickerTransfer.send?.state !== 'sending' && !remote.webContents.isDestroyed()) remote.webContents.focus();
+  });
   try {
-    tray = createCompanionTray(root, { open: showWindow, notifications: () => notifications.answer() === 'allowed',
+    tray = createCompanionTray(root, { open: showWindow, activate: activateTray, notifications: () => notifications.answer() === 'allowed',
       startAtLogin: () => startAtLogin,
       toggleNotifications: () => {
         notifications.change(notifications.answer() !== 'allowed'); tray?.refresh();

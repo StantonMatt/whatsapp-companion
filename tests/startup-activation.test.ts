@@ -7,7 +7,7 @@ import type { Store } from '../src/main/store';
 import type { Vault } from '../src/main/vault';
 
 const ipc = vi.hoisted(() => ({ send: vi.fn(), invoke: vi.fn(), on: vi.fn() }));
-vi.mock('electron', () => ({ ipcRenderer: ipc }));
+vi.mock('electron', () => ({ contextBridge: { executeInMainWorld: vi.fn() }, ipcRenderer: ipc }));
 const session = { nonce: '00000000-0000-4000-8000-000000000001', generation: 1 };
 beforeEach(() => { vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers();
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({ width: 100, height: 100 } as DOMRect); });
