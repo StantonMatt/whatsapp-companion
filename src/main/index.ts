@@ -185,13 +185,13 @@ async function start() {
     if (connectorReady && lastBoot?.phase === 'shell' && lastBoot.chatListReady === true && notifications.answer() === undefined) void notifications.request();
     notifications.maybeAsk();
   };
-  // Clicking a notification while the window is in the tray doesn't open it; use the tray icon.
+  // Tray activation and native notification clicks share the Wayland remap path.
   const showWindow = () => {
     if (closing || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
     // Wayland has no unminimize request or minimized-state notification.
     // Remap visible Linux windows even when KDE minimized them without Electron
-    // knowing. The tray's activation token then applies to the new surface.
+    // knowing. Electron's tray/notification activation token then applies to it.
     if (process.platform === 'linux' && win.isVisible()) win.hide();
     win.setSkipTaskbar(false); if (!win.isVisible()) win.show();
     win.moveTop(); win.focus(); maybeAskNotifications();
@@ -565,6 +565,7 @@ async function start() {
   };
   const isLocal = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => trustedFrame(event, controls.webContents, true);
   const isRemote = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => trustedFrame(event, remote.webContents);
+  ipcMain.on('companion:notification-click', event => { if (isRemote(event)) showWindow(); });
   ipcMain.handle('companion:boot-session', event => isRemote(event) ? bootSession : null);
   ipcMain.on('companion:connector-ready', (event, raw: unknown) => {
     if (!isRemote(event) || connectorReady) return;

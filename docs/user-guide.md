@@ -270,7 +270,7 @@ Ordinary messaging, attachments, emoji, playback and other media stay with Whats
 The tray icon stays available while Companion runs.
 
 - Closing the window hides it and removes its taskbar entry; WhatsApp stays connected. Click the tray icon or **Open WhatsApp Companion** to show it again.
-- Clicking a notification while the window is in the tray doesn't open it; use the tray icon.
+- Clicking a notification brings Companion to the front, including from the tray or a minimized window; WhatsApp opens the notification's conversation.
 - **Quit** in the tray or app menu (Ctrl+Q) exits completely.
 - Launching Companion again brings the running window forward.
 

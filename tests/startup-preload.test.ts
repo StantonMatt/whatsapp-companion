@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   session: { nonce: '00000000-0000-4000-8000-000000000001', generation: 1 },
   send: vi.fn(), invoke: vi.fn(), on: vi.fn(), start: vi.fn(), stop: vi.fn(), command: vi.fn()
 }));
-vi.mock('electron', () => ({ ipcRenderer: { send: mocks.send, invoke: mocks.invoke, on: mocks.on } }));
+vi.mock('electron', () => ({ contextBridge: { executeInMainWorld: vi.fn() }, ipcRenderer: { send: mocks.send, invoke: mocks.invoke, on: mocks.on } }));
 vi.mock('../src/connector/dom', () => ({ DomConnector: class {
   start = mocks.start; stop = mocks.stop; command = mocks.command;
 } }));

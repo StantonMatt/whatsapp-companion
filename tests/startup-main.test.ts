@@ -79,7 +79,7 @@ vi.mock('electron', async () => {
     setContextMenu(menu: any) { this.menu = menu; }
     constructor(public image: any) { super(); if (mocks.trayFailure) throw new Error('no tray'); mocks.trays.push(this); }
   }
-  return { Tray, powerMonitor: mocks.power, nativeImage: {
+  return { contextBridge: { executeInMainWorld: vi.fn() }, Tray, powerMonitor: mocks.power, nativeImage: {
     createEmpty: () => { const image = { addRepresentation: vi.fn() }; mocks.images.push(image); return image; },
     createFromPath: (path: string) => ({ isEmpty: () => false, toPNG: () => Buffer.from(path) })
   }, ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
@@ -591,19 +591,35 @@ test('X hides and removes the taskbar entry without stopping runtime or destroyi
   expect(mocks.views.every(view => !view.webContents.destroyed)).toBe(true); expect(mocks.app.quit).not.toHaveBeenCalled();
   expect(mocks.handlers.get('companion:boot-session')!(bootEvent())).not.toBeNull();
 });
-test.each(['click', 'menu', 'second-instance'])('%s shows, restores, raises and focuses', source => {
+test.each(['click', 'menu', 'second-instance', 'notification'])('%s shows, restores, raises and focuses', source => {
   const win = mocks.windows[0]; win.close(); win.minimized = true;
   if (source === 'click') mocks.trays[0].emit('click');
   if (source === 'menu') trayMenu()[0].click();
   if (source === 'second-instance') mocks.app.emit('second-instance', {}, ['--hidden']);
+  if (source === 'notification') mocks.ipc.emit('companion:notification-click', bootEvent());
   expect(win.isVisible()).toBe(true); expect(win.restore).toHaveBeenCalledOnce();
   expect(win.moveTop).toHaveBeenCalled(); expect(win.focus).toHaveBeenCalled();
   expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
   if (source !== 'click') {
     if (source === 'menu') trayMenu()[0].click();
+    else if (source === 'notification') mocks.ipc.emit('companion:notification-click', bootEvent());
     else mocks.app.emit('second-instance', {}, []);
     expect(win.isVisible()).toBe(true);
   }
+});
+test('notification activation rejects other renderers, subframes, navigated documents and shutdown', () => {
+  const win = mocks.windows[0], remote = mocks.views[1].webContents, controls = mocks.views[0].webContents;
+  win.close(); win.focus.mockClear();
+  for (const event of [
+    { sender: controls, senderFrame: controls.mainFrame },
+    { sender: remote, senderFrame: { ...remote.mainFrame } },
+    { sender: remote, senderFrame: null }
+  ]) mocks.ipc.emit('companion:notification-click', event);
+  const url = remote.mainFrame.url; remote.mainFrame.url = 'https://example.com/';
+  mocks.ipc.emit('companion:notification-click', bootEvent()); remote.mainFrame.url = url;
+  mocks.app.emit('before-quit', { preventDefault() {} });
+  mocks.ipc.emit('companion:notification-click', bootEvent());
+  expect(win.focus).not.toHaveBeenCalled(); expect(win.isVisible()).toBe(false);
 });
 test.each(['linux', 'win32', 'darwin'].flatMap(platform =>
   ['minimized', 'compositor-minimized', 'visible', 'hidden'].map(state => ({ platform, state }))))(
