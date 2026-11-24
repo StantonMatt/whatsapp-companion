@@ -29,8 +29,8 @@ WhatsApp Companion is distributed as a Linux AppImage. It has no hosted web depl
 4. Make it executable and start it:
 
    ```bash
-   chmod +x WhatsApp.Companion-0.3.0.AppImage
-   ./WhatsApp.Companion-0.3.0.AppImage
+   chmod +x WhatsApp.Companion-0.3.1.AppImage
+   ./WhatsApp.Companion-0.3.1.AppImage
    ```
 
    In Dolphin you can instead right-click the file, choose **Properties → Permissions**, tick **Is executable**, and double-click it.
@@ -99,7 +99,7 @@ Saved credentials require working OS encryption: KWallet or Secret Service on Li
 
 - If storage is unavailable, unlock it and use **Check again** in Providers; saving stays disabled until secure storage is available.
 - The app refuses Electron's unencrypted `basic_text` store.
-- If Electron does not detect KDE correctly, start once with `--password-store=kwallet6`, for example `./WhatsApp.Companion-0.3.0.AppImage --password-store=kwallet6`, or from source `npm start -- --password-store=kwallet6`. The secure backend is remembered when saving a key.
+- If Electron does not detect KDE correctly, start once with `--password-store=kwallet6`, for example `./WhatsApp.Companion-0.3.1.AppImage --password-store=kwallet6`, or from source `npm start -- --password-store=kwallet6`. The secure backend is remembered when saving a key.
 - Windows/macOS secure storage still needs validation on those systems.
 
 How keys travel and where they are kept is described in [Data and privacy](data-and-privacy.md#keys-and-security-design).
