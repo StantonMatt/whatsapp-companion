@@ -136,3 +136,12 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+      # Lets PR reviews show the fixture's screens without running PR code locally.
+      - name: Upload desktop screenshots
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: desktop-screenshots
+          path: .local/screenshots/
+          if-no-files-found: ignore
+          retention-days: 14

@@ -23,8 +23,9 @@ provider keys or real WhatsApp sessions and never deploys or restarts the servic
   even for documentation-only changes. Tag pushes do not trigger CI.
 - New commits cancel superseded runs. Unrelated label events cannot cancel
   checks. Jobs time out after 10 and 20 minutes. Desktop diagnostics are
-  collected after success or failure and retained for seven days; cancellation
-  or a hard timeout can still interrupt upload.
+  collected after success or failure and retained for seven days; the fixture's
+  screenshots are kept for 14 days as `desktop-screenshots`. Cancellation or a
+  hard timeout can still interrupt upload.
 
 Both jobs use Node.js 22 with npm download caching. The full job also caches
 Electron and packaging downloads. Every job uses
