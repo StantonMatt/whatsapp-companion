@@ -189,8 +189,18 @@ async function start() {
   const showWindow = () => {
     if (closing || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
+    // Wayland has no unminimize request or minimized-state notification.
+    // Remap visible Linux windows even when KDE minimized them without Electron
+    // knowing. The tray's activation token then applies to the new surface.
+    if (process.platform === 'linux' && win.isVisible()) win.hide();
     win.setSkipTaskbar(false); if (!win.isVisible()) win.show();
     win.moveTop(); win.focus(); maybeAskNotifications();
+  };
+  const activateTray = () => {
+    if (closing || win.isDestroyed()) return;
+    if (process.platform === 'linux' && win.isVisible() && !win.isMinimized() && win.isFocused()) {
+      win.hide(); win.setSkipTaskbar(true);
+    } else showWindow();
   };
   const controls = new WebContentsView({ webPreferences: { preload: join(root, 'local.cjs'), partition: 'companion-controls', contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true } });
   // WhatsApp rejects Electron-branded user agents despite the current Chromium engine.
@@ -1055,8 +1065,15 @@ async function start() {
     else maybeAskNotifications();
   };
   win.on('show', recordVisibility); win.on('hide', recordVisibility); win.on('minimize', recordVisibility); win.on('restore', recordVisibility);
+  // Wayland maps/focuses the surface asynchronously. Restore child-view input
+  // after that focus event; doing it inside showWindow is too early.
+  if (process.platform === 'linux') win.on('focus', () => {
+    if (closing) return;
+    if (panel || makerInputOwner) controls.webContents.focus();
+    else if (stickerTransfer.send?.state !== 'sending') remote.webContents.focus();
+  });
   try {
-    tray = createCompanionTray(root, { open: showWindow, notifications: () => notifications.answer() === 'allowed',
+    tray = createCompanionTray(root, { open: showWindow, activate: activateTray, notifications: () => notifications.answer() === 'allowed',
       startAtLogin: () => startAtLogin,
       toggleNotifications: () => {
         notifications.change(notifications.answer() !== 'allowed'); tray?.refresh();

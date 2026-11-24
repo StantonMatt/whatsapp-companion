@@ -54,7 +54,7 @@ vi.mock('electron', async () => {
   }
   class Window extends EventEmitter {
     webContents = new Contents(); destroyed = false; minimized = false; visible = true;
-    focus = vi.fn(); moveTop = vi.fn(); setSkipTaskbar = vi.fn();
+    focus = vi.fn(() => { this.emit('focus'); }); moveTop = vi.fn(); setSkipTaskbar = vi.fn();
     show = vi.fn(() => { this.visible = true; this.emit('show'); });
     hide = vi.fn(() => { this.visible = false; this.emit('hide'); });
     restore = vi.fn(() => { this.minimized = false; this.emit('restore'); });
@@ -591,7 +591,7 @@ test('X hides and removes the taskbar entry without stopping runtime or destroyi
   expect(mocks.views.every(view => !view.webContents.destroyed)).toBe(true); expect(mocks.app.quit).not.toHaveBeenCalled();
   expect(mocks.handlers.get('companion:boot-session')!(bootEvent())).not.toBeNull();
 });
-test.each(['click', 'menu', 'second-instance'])('%s shows, restores, raises and focuses; repeated click never hides', source => {
+test.each(['click', 'menu', 'second-instance'])('%s shows, restores, raises and focuses', source => {
   const win = mocks.windows[0]; win.close(); win.minimized = true;
   if (source === 'click') mocks.trays[0].emit('click');
   if (source === 'menu') trayMenu()[0].click();
@@ -599,7 +599,66 @@ test.each(['click', 'menu', 'second-instance'])('%s shows, restores, raises and 
   expect(win.isVisible()).toBe(true); expect(win.restore).toHaveBeenCalledOnce();
   expect(win.moveTop).toHaveBeenCalled(); expect(win.focus).toHaveBeenCalled();
   expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
-  mocks.trays[0].emit('click'); expect(win.isVisible()).toBe(true); expect(win.hide).toHaveBeenCalledOnce();
+  if (source !== 'click') {
+    if (source === 'menu') trayMenu()[0].click();
+    else mocks.app.emit('second-instance', {}, []);
+    expect(win.isVisible()).toBe(true);
+  }
+});
+test.each(['linux', 'win32', 'darwin'].flatMap(platform =>
+  ['minimized', 'compositor-minimized', 'visible', 'hidden'].map(state => ({ platform, state }))))(
+  'tray remaps Linux surfaces, including minimization unknown to Electron ($platform, $state)', ({ platform, state }) => {
+  const originalPlatform = process.platform;
+  const win = mocks.windows[0]; win.minimized = state === 'minimized'; win.visible = state !== 'hidden';
+  vi.spyOn(win, 'isFocused').mockReturnValue(false);
+  const remoteFocus = vi.spyOn(mocks.views[1].webContents, 'focus');
+  win.restore.mockClear(); win.hide.mockClear(); win.show.mockClear();
+  try {
+    Object.defineProperty(process, 'platform', { value: platform });
+    mocks.trays[0].emit('click');
+    expect(win.restore).toHaveBeenCalledTimes(state === 'minimized' ? 1 : 0);
+    if (platform === 'linux' && state !== 'hidden') {
+      expect(win.hide).toHaveBeenCalledOnce(); expect(win.show).toHaveBeenCalledOnce();
+      if (state === 'minimized') expect(win.restore.mock.invocationCallOrder[0]).toBeLessThan(win.hide.mock.invocationCallOrder[0]);
+      expect(win.hide.mock.invocationCallOrder[0]).toBeLessThan(win.show.mock.invocationCallOrder[0]);
+    } else {
+      expect(win.hide).not.toHaveBeenCalled(); expect(win.show).toHaveBeenCalledTimes(state === 'hidden' ? 1 : 0);
+    }
+    expect(win.isMinimized()).toBe(false); expect(win.isVisible()).toBe(true);
+    expect(win.focus).toHaveBeenCalled(); expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
+    // The host platform installed the focus listener during startup.
+    expect(remoteFocus).toHaveBeenCalledTimes(originalPlatform === 'linux' ? 1 : 0);
+  } finally { Object.defineProperty(process, 'platform', { value: originalPlatform }); }
+});
+test.each(['linux', 'win32', 'darwin'])('tray click toggles the focused window only on Linux (%s)', platform => {
+  const originalPlatform = process.platform, win = mocks.windows[0];
+  vi.spyOn(win, 'isFocused').mockReturnValue(true);
+  win.visible = true; win.minimized = false;
+  win.hide.mockClear(); win.show.mockClear(); win.focus.mockClear();
+  try {
+    Object.defineProperty(process, 'platform', { value: platform });
+    mocks.trays[0].emit('click');
+    expect(win.isVisible()).toBe(platform !== 'linux');
+    if (platform === 'linux') {
+      expect(win.hide).toHaveBeenCalledOnce(); expect(win.focus).not.toHaveBeenCalled();
+      expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(true);
+      mocks.trays[0].emit('click');
+      expect(win.isVisible()).toBe(true); expect(win.focus).toHaveBeenCalledOnce();
+      expect(win.setSkipTaskbar).toHaveBeenLastCalledWith(false);
+    } else expect(win.hide).not.toHaveBeenCalled();
+  } finally { Object.defineProperty(process, 'platform', { value: originalPlatform }); }
+});
+test('Linux waits for native focus and returns input to the currently open view', () => {
+  if (process.platform !== 'linux') return;
+  const win = mocks.windows[0], remoteFocus = vi.spyOn(mocks.views[1].webContents, 'focus');
+  win.close(); win.focus.mockImplementation(() => {});
+  mocks.trays[0].emit('click');
+  expect(remoteFocus).not.toHaveBeenCalled();
+  win.emit('focus'); expect(remoteFocus).toHaveBeenCalledOnce();
+  mocks.menus.at(-1)[0].submenu.find((item: any) => item.label === 'Settings').click();
+  const controlsFocus = vi.spyOn(mocks.views[0].webContents, 'focus'); remoteFocus.mockClear();
+  win.emit('focus');
+  expect(controlsFocus).toHaveBeenCalledOnce(); expect(remoteFocus).not.toHaveBeenCalled();
 });
 test('a cancelable session-end query leaves the app running', () => {
   mocks.windows[0].emit('query-session-end', { preventDefault: () => { throw new Error('must not block session end'); } });
