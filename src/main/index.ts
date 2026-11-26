@@ -38,6 +38,7 @@ import { installEditContextMenus } from './context-menu';
 import { installRemotePermissions, NotificationConsent } from './permissions';
 import { StartAtLogin, loginExecutable } from './autostart';
 import { createCompanionTray } from './tray';
+import { unreadCountFromTitle } from './tray-badge';
 import { StartupDiagnostics } from './startup-diagnostics';
 import { StartupWatchdog } from './startup-watchdog';
 import { RemoteLoadRecovery } from './remote-load-recovery';
@@ -218,6 +219,9 @@ async function start() {
   // Electron 44 exposes no UA metadata parameter; its Chromium client hints remain unchanged.
   remoteSession.setUserAgent(userAgent);
   const remote = new WebContentsView({ webPreferences: { preload: join(root, 'remote.cjs'), session: remoteSession, contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: true, backgroundThrottling: false } });
+  remote.webContents.on('page-title-updated', (_event, title) => {
+    if (!closing) tray?.setUnreadCount(unreadCountFromTitle(title));
+  });
   controls.webContents.on('focus', () => { lastFocusedContents = controls.webContents; });
   remote.webContents.on('focus', () => { lastFocusedContents = remote.webContents; });
   startupDiagnostics.record('views-created');
@@ -994,6 +998,7 @@ async function start() {
   remote.webContents.on('did-start-navigation', details => {
     remoteLoadRecovery.navigate(details.isMainFrame, details.isSameDocument);
     if (!details.isMainFrame || details.isSameDocument || closing) return;
+    tray?.setUnreadCount(0);
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
     startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; assetFailureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
     startupDiagnostics.record('remote-navigation', { generation: bootSession.generation });
@@ -1009,6 +1014,7 @@ async function start() {
   remote.webContents.on('responsive', () => startupDiagnostics.record('responsive'));
   remote.webContents.on('did-finish-load', () => { startupDiagnostics.record('finish-load'); chromeSync.reset(); syncChrome(); if (connectorReady) assistant.refresh(true); });
   remote.webContents.on('render-process-gone', (_event, details) => {
+    if (!closing) tray?.setUnreadCount(0);
     startupDiagnostics.record('render-process-gone', { reason: ['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction'].includes(details.reason) ? details.reason : 'other' });
     bootSession = { nonce: randomUUID(), generation: bootSession.generation + 1 };
     startupWatchdog.navigate(bootSession); detectorSeen = false; structureLogged = false; assetFailureLogged = false; shellChromeSynced = false; connectorReady = false; lastBoot = undefined; lastDecision = undefined;
