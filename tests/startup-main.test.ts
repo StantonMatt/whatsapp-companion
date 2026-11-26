@@ -75,13 +75,14 @@ vi.mock('electron', async () => {
   });
   mocks.power = new EventEmitter();
   class Tray extends EventEmitter {
-    menu: any; setToolTip = vi.fn(); destroy = vi.fn();
+    menu: any; setToolTip = vi.fn(); destroy = vi.fn(); setImage = vi.fn(); isDestroyed = () => false;
     setContextMenu(menu: any) { this.menu = menu; }
     constructor(public image: any) { super(); if (mocks.trayFailure) throw new Error('no tray'); mocks.trays.push(this); }
   }
   return { contextBridge: { executeInMainWorld: vi.fn() }, Tray, powerMonitor: mocks.power, nativeImage: {
     createEmpty: () => { const image = { addRepresentation: vi.fn() }; mocks.images.push(image); return image; },
-    createFromPath: (path: string) => ({ isEmpty: () => false, toPNG: () => Buffer.from(path) })
+    createFromPath: (path: string) => ({ isEmpty: () => false, toPNG: () => Buffer.from(path), toBitmap: () => Buffer.alloc((path.endsWith('44.png') ? 44 : 22) ** 2 * 4) }),
+    createFromBitmap: (bitmap: Buffer) => ({ toPNG: () => bitmap })
   }, ipcRenderer: mocks.renderer, app: mocks.app, BrowserWindow: Window, WebContentsView: View, ipcMain: mocks.ipc,
     session: { defaultSession: makeSession(), fromPartition: vi.fn(() => makeSession()) }, protocol: { registerSchemesAsPrivileged() {} },
     dialog: { showErrorBox: mocks.errors, showMessageBox: mocks.messageBox }, shell: { openExternal: mocks.external },
@@ -118,6 +119,30 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); process.argv = args; rmSync(directory, { recursive: true, force: true });
 });
 function bootEvent() { const contents = mocks.views[1].webContents; return { sender: contents, senderFrame: contents.mainFrame }; }
+test('remote page titles update the tray while hidden and clear on navigation or renderer loss', () => {
+  const remote = mocks.views[1].webContents, controls = mocks.views[0].webContents, tray = mocks.trays[0];
+  const original = tray.image, window = mocks.windows[0];
+  window.close(); window.show.mockClear(); window.focus.mockClear();
+  controls.emit('page-title-updated', {}, '(8) WhatsApp');
+  expect(tray.setImage).not.toHaveBeenCalled();
+  remote.emit('page-title-updated', {}, '(3) WhatsApp');
+  expect(tray.setImage).toHaveBeenCalledOnce();
+  remote.emit('page-title-updated', {}, '(3) WhatsApp');
+  expect(tray.setImage).toHaveBeenCalledOnce();
+  remote.emit('page-title-updated', {}, 'WhatsApp');
+  expect(tray.setImage).toHaveBeenLastCalledWith(original);
+  remote.emit('page-title-updated', {}, '(12) WhatsApp');
+  remote.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false });
+  remote.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true });
+  expect(tray.setImage).toHaveBeenCalledTimes(3);
+  remote.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  expect(tray.setImage).toHaveBeenLastCalledWith(original);
+  remote.emit('page-title-updated', {}, '(1) WhatsApp');
+  remote.emit('render-process-gone', {}, { reason: 'crashed' });
+  expect(tray.setImage).toHaveBeenLastCalledWith(original);
+  expect(tray.setImage).toHaveBeenCalledTimes(6);
+  expect(window.show).not.toHaveBeenCalled(); expect(window.focus).not.toHaveBeenCalled();
+});
 function bootSession() { return mocks.handlers.get('companion:boot-session')!(bootEvent()); }
 function snapshotRequests() { return mocks.views[1].webContents.send.mock.calls.filter(([, command]: any[]) => command?.type === 'snapshot'); }
 function connectorReady(session = bootSession()) { mocks.ipc.emit('companion:connector-ready', bootEvent(), session); }
