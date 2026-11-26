@@ -30,7 +30,7 @@ describe('bitmap badge', () => {
     expect(base).toEqual(original);
     expect(drawTrayBadge(base, size, '')).toEqual(original);
     for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-      if (x < 11 * scale || y < 11 * scale) {
+      if (x < 8 * scale || y < 8 * scale) {
         const offset = (y * size + x) * 4;
         expect(rendered.subarray(offset, offset + 4)).toEqual(base.subarray(offset, offset + 4));
       }
@@ -40,5 +40,33 @@ describe('bitmap badge', () => {
     expect(pixels).toContain('2b3d06ff'); // dark outline
     expect(pixels).toContain('ffffffff'); // white digit
     expect(drawTrayBadge(base, size, '9+')).not.toEqual(drawTrayBadge(base, size, '9'));
+  });
+
+  test.each([22, 44] as const)('draws an eight-pixel-tall digit with two-pixel strokes at %i px', size => {
+    const scale = size / 22, rendered = drawTrayBadge(Buffer.alloc(size * size * 4), size, '3');
+    const rows = ['111111', '111111', '000011', '111111', '111111', '000011', '111111', '111111'];
+    const whitePixels: [number, number][] = [];
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const offset = (y * size + x) * 4;
+      if (rendered.subarray(offset, offset + 4).equals(Buffer.from([255, 255, 255, 255]))) whitePixels.push([x, y]);
+    }
+    const expected: [number, number][] = [];
+    for (let y = 0; y < 8 * scale; y++) for (let x = 0; x < 6 * scale; x++) {
+      if (rows[Math.floor(y / scale)][Math.floor(x / scale)] === '1') expected.push([12 * scale + x, 11 * scale + y]);
+    }
+    expect(whitePixels).toEqual(expected);
+  });
+
+  test.each([22, 44] as const)('keeps the 9+ pill below the top eight pixels at %i px', size => {
+    const base = Buffer.alloc(size * size * 4, 128), scale = size / 22;
+    const rendered = drawTrayBadge(base, size, '9+');
+    expect(rendered.subarray(0, 8 * scale * size * 4)).toEqual(base.subarray(0, 8 * scale * size * 4));
+    // The pill reaches both sides, retains its outline and has a two-pixel glyph gap.
+    const pixel = (x: number, y: number) => rendered.subarray((y * size + x) * 4, (y * size + x) * 4 + 4).toString('hex');
+    expect(pixel(0, 15 * scale)).toBe('2b3d06ff');
+    expect(pixel(size - 1, 15 * scale)).toBe('2b3d06ff');
+    for (let x = 10 * scale; x < 12 * scale; x++) expect(pixel(x, 14 * scale)).toBe('66d325ff');
+    expect(pixel(12 * scale, 14 * scale)).toBe('ffffffff');
+    expect(pixel(17 * scale, 14 * scale)).toBe('ffffffff');
   });
 });

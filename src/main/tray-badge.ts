@@ -13,27 +13,27 @@ export function trayBadgeValue(count: number): TrayBadgeValue {
   return count > 9 ? '9+' : String(count) as TrayBadgeValue;
 }
 
-// A compact bold pixel face stays crisp at both native tray resolutions.
+// Six-by-eight pixel glyphs use two-pixel strokes at the native 1x resolution.
 const glyphs: Record<string, string[]> = {
-  '1': ['010', '110', '010', '010', '111'],
-  '2': ['111', '001', '111', '100', '111'],
-  '3': ['111', '001', '111', '001', '111'],
-  '4': ['101', '101', '111', '001', '001'],
-  '5': ['111', '100', '111', '001', '111'],
-  '6': ['111', '100', '111', '101', '111'],
-  '7': ['111', '001', '010', '010', '010'],
-  '8': ['111', '101', '111', '101', '111'],
-  '9': ['111', '101', '111', '001', '111'],
-  '+': ['000', '010', '111', '010', '000']
+  '1': ['001100', '011100', '111100', '001100', '001100', '001100', '111111', '111111'],
+  '2': ['111111', '111111', '000011', '111111', '111111', '110000', '111111', '111111'],
+  '3': ['111111', '111111', '000011', '111111', '111111', '000011', '111111', '111111'],
+  '4': ['110011', '110011', '110011', '111111', '111111', '000011', '000011', '000011'],
+  '5': ['111111', '111111', '110000', '111111', '111111', '000011', '111111', '111111'],
+  '6': ['111111', '111111', '110000', '111111', '111111', '110011', '111111', '111111'],
+  '7': ['111111', '111111', '000011', '000011', '001100', '001100', '001100', '001100'],
+  '8': ['111111', '111111', '110011', '111111', '111111', '110011', '111111', '111111'],
+  '9': ['111111', '111111', '110011', '111111', '111111', '000011', '111111', '111111'],
+  '+': ['000000', '001100', '001100', '111111', '111111', '001100', '001100', '000000']
 };
 
 /** Compose onto Electron's premultiplied BGRA bitmap (supported desktop targets). */
 export function drawTrayBadge(bitmap: Buffer, size: 22 | 44, value: TrayBadgeValue): Buffer {
   const output = Buffer.from(bitmap);
   if (!value) return output;
-  const scale = size / 22, height = 11, width = value === '9+' ? 15 : 11;
-  const left = 22 - width, top = 11, radius = height / 2;
-  const textWidth = value.length * 4 - 1;
+  const scale = size / 22, height = 14, width = value === '9+' ? 22 : 14;
+  const left = 22 - width, top = 22 - height, radius = height / 2;
+  const textWidth = value.length * 8 - 2;
   const textLeft = left + (width - textWidth) / 2, textTop = top + 3;
   // Four samples per axis smooth only the capsule boundary; glyphs align to pixels.
   for (let y = top * scale; y < size; y++) {
@@ -46,8 +46,8 @@ export function drawTrayBadge(bitmap: Buffer, size: 22 | 44, value: TrayBadgeVal
         if (distance > radius) continue;
         let color = distance > radius - 1 ? [6, 61, 43] : [37, 211, 102];
         const tx = Math.floor(px - textLeft), ty = Math.floor(py - textTop);
-        const glyph = glyphs[value[Math.floor(tx / 4)]];
-        if (tx >= 0 && ty >= 0 && ty < 5 && glyph?.[ty][tx % 4] === '1') color = [255, 255, 255];
+        const glyph = glyphs[value[Math.floor(tx / 8)]];
+        if (tx >= 0 && ty >= 0 && ty < 8 && glyph?.[ty][tx % 8] === '1') color = [255, 255, 255];
         red += color[0]; green += color[1]; blue += color[2]; samples++;
       }
       const offset = (y * size + x) * 4, remaining = 1 - samples / 16;
