@@ -1,0 +1,17 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Id": "io.whatsappcompanion.tray",
+    "Name": "WhatsApp Companion (drag to open)",
+    "Description": "Open WhatsApp Companion while dragging a file over its tray icon",
+    "Icon": "whatsapp",
+    "Version": "1.0.0",
+    "License": "MIT",
+    "Category": "Online Services",
+    "EnabledByDefault": false
+  },
+  "X-Plasma-API-Minimum-Version": "6.6",
+  "X-Plasma-NotificationArea": true,
+  "X-Plasma-NotificationAreaCategory": "Communications",
+  "X-Plasma-FormFactors": ["desktop"]
+}

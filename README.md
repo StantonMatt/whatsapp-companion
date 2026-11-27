@@ -59,6 +59,7 @@ For Linux on x86_64 (tested on Kubuntu).
 - **Sticker library** and **Settings** (the gear) are added to WhatsApp's left bar.
 - Open WhatsApp's sticker picker and let it load; the stickers it shows are added to the library.
 - Closing the window leaves the app running in the tray. Use **Quit** in the tray menu to exit. The app starts at login, hidden in the tray; turn that off in the tray menu.
+- On Plasma 6.6, an optional [tray widget](linux/plasma-tray/README.md) can reveal the window when you drag a file over its icon. Installation and live Wayland verification are separate steps.
 
 ### Turn on AI (optional)
 
