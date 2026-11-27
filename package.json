@@ -33,6 +33,11 @@
     },
     "linux": {
       "icon": "assets/icons",
+      "extraResources": [
+        { "from": "linux/plasma-tray/package", "to": "plasma-tray/package" },
+        { "from": "linux/plasma-tray/install.sh", "to": "plasma-tray/install.sh" },
+        { "from": "linux/plasma-tray/README.md", "to": "plasma-tray/README.md" }
+      ],
       "executableArgs": [],
       "syncDesktopName": true,
       "maintainer": "WhatsApp Companion contributors",

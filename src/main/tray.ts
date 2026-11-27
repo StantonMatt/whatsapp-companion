@@ -18,6 +18,7 @@ export function createCompanionTray(root: string, actions: { open: () => void; a
   const image = createTrayImage(root);
   const tray = new Tray(image);
   let displayed: TrayBadgeValue = '';
+  let dragRevealUntil = 0;
   const setUnreadCount = (count: number) => {
     const next = trayBadgeValue(count);
     if (next === displayed || tray.isDestroyed()) return;
@@ -25,12 +26,25 @@ export function createCompanionTray(root: string, actions: { open: () => void; a
     displayed = next;
   };
   try {
-    tray.setToolTip('WhatsApp Companion'); tray.on('click', actions.activate);
+    tray.setToolTip('WhatsApp Companion');
+    tray.on('click', () => {
+      const reveal = performance.now() < dragRevealUntil;
+      dragRevealUntil = 0; // Exactly one activation consumes an armed reveal.
+      (reveal ? actions.open : actions.activate)();
+    });
     const refresh = () => tray.setContextMenu(Menu.buildFromTemplate([
+      // The optional Plasma widget invokes this DBusMenu item on file hover.
+      // Keep it show-only; Activate and SecondaryActivate toggle on Linux.
       { label: 'Open WhatsApp Companion', click: actions.open }, { type: 'separator' },
       { label: 'Notifications', type: 'checkbox', checked: actions.notifications(), click: actions.toggleNotifications },
       { label: 'Start at login', type: 'checkbox', checked: actions.startAtLogin(), click: actions.toggleStartAtLogin },
-      { type: 'separator' }, { label: 'Quit', click: actions.quit }
+      { type: 'separator' }, { label: 'Quit', click: actions.quit },
+      // Private DBusMenu handshake for Plasma's token-bearing Activate path.
+      // Hidden in every native menu. A genuine click during this short window
+      // shows instead of toggling. SystemTray.activate obtains its token async;
+      // an exceptional compositor delay beyond 3 s could outlive this arm.
+      { id: 'companion-prepare-drag-reveal', label: 'Prepare drag reveal', visible: false,
+        click: () => { dragRevealUntil = performance.now() + 3000; } }
     ]));
     refresh(); return { tray, refresh, setUnreadCount };
   } catch (error) { tray.destroy(); throw error; }

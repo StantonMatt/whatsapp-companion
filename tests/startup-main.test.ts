@@ -598,9 +598,10 @@ test('tray icon has both image scales, tooltip, ordered menu and immediate main-
   const tray = mocks.trays[0];
   expect(tray.setToolTip).toHaveBeenCalledExactlyOnceWith('WhatsApp Companion');
   expect(mocks.images[0].addRepresentation.mock.calls.map(([value]: any[]) => value.scaleFactor)).toEqual([1, 2]);
-  expect(trayMenu().map((item: any) => item.label ?? item.type)).toEqual([
+  expect(trayMenu().filter((item: any) => item.visible !== false).map((item: any) => item.label ?? item.type)).toEqual([
     'Open WhatsApp Companion', 'separator', 'Notifications', 'Start at login', 'separator', 'Quit'
   ]);
+  expect(trayMenu().find((item: any) => item.id === 'companion-prepare-drag-reveal')).toMatchObject({ visible: false });
   expect(mocks.menus.at(-1)[0].submenu.at(-1)).toMatchObject({ role: 'quit', accelerator: 'CmdOrCtrl+Q' });
   expect(trayMenu()[2]).toMatchObject({ type: 'checkbox', checked: false });
   expect(trayMenu()[3]).toMatchObject({ type: 'checkbox', checked: false });
