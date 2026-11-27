@@ -7,6 +7,7 @@ import org.kde.plasma.plasmoid
 PlasmoidItem {
     id: root
     preferredRepresentation: compactRepresentation
+    fullRepresentation: compactRepresentation
     readonly property var iconBridge: badgedIcon.item
     readonly property var trayHost: Plasmoid.containment
     toolTipMainText: sni.title
@@ -49,8 +50,8 @@ PlasmoidItem {
     Plasmoid.contextualActions: [
         PlasmaCore.Action { text: "Open WhatsApp Companion"; onTriggered: sni.show() },
         PlasmaCore.Action { isSeparator: true },
-        PlasmaCore.Action { text: "Notifications"; checkable: true; checked: root.checked(text); onTriggered: root.trigger(text) },
-        PlasmaCore.Action { text: "Start at login"; checkable: true; checked: root.checked(text); onTriggered: root.trigger(text) },
+        PlasmaCore.Action { text: "Notifications"; checkable: true; checked: root.checked("Notifications"); onTriggered: root.trigger(text) },
+        PlasmaCore.Action { text: "Start at login"; checkable: true; checked: root.checked("Start at login"); onTriggered: root.trigger(text) },
         PlasmaCore.Action { isSeparator: true },
         PlasmaCore.Action { text: "Quit"; onTriggered: root.trigger(text) }
     ]
